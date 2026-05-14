@@ -5,6 +5,9 @@
 #include <QString>
 #include <QStringList>
 
+#include "audio/discovery.h"
+#include "runtime/runtime_settings.h"
+
 class QCheckBox;
 class QComboBox;
 class QDoubleSpinBox;
@@ -13,32 +16,6 @@ class QPushButton;
 class QSlider;
 class QSpinBox;
 
-struct RuntimeSettings {
-    QString sourceMode{"loopback"};
-    QString loopbackDeviceId;
-    QStringList sourceApps;
-    QString sourceLanguage{"auto"};
-    float segmentSeconds{6.0F};
-    float hopSeconds{1.5F};
-    QString overlapMergeMethod{"replace-window"};
-
-    bool translationEnabled{false};
-    QString fromLang{"auto"};
-    QString toLang{"zh"};
-    QString translationStyle{"stacked"};
-
-    int fontSize{18};
-    float opacity{0.8F};
-    QColor sourceColor{QStringLiteral("#F0F2F5")};
-    QColor translatedColor{QStringLiteral("#FFD98A")};
-    QColor backgroundColor{QStringLiteral("#0A101A")};
-};
-
-struct SourceDeviceEntry {
-    QString id;
-    QString label;
-};
-
 class SettingsDialog : public QDialog {
     Q_OBJECT
 
@@ -46,6 +23,7 @@ public:
     explicit SettingsDialog(const RuntimeSettings &initial,
                             const QList<SourceDeviceEntry> &loopbackDevices,
                             const QList<SourceDeviceEntry> &appSessions,
+                            const QStringList &modelCandidates,
                             QWidget *parent = nullptr);
 
     RuntimeSettings settings() const;
@@ -59,6 +37,7 @@ private slots:
     void onTranslationToggle();
 
 private:
+    QString uiLang_{"zh"};
     void refreshSourceSummary();
     static void setComboData(QComboBox *combo, const QString &value);
     void setButtonColor(QPushButton *button, const QColor &color) const;
@@ -70,12 +49,17 @@ private:
     QStringList selectedAppNames_;
 
     QComboBox *sourceModeCombo_{nullptr};
+    QComboBox *uiLanguageCombo_{nullptr};
     QPushButton *sourceSelectButton_{nullptr};
     QLabel *sourceSummaryLabel_{nullptr};
     QDoubleSpinBox *segmentSpin_{nullptr};
     QDoubleSpinBox *hopSpin_{nullptr};
     QComboBox *overlapMergeMethodCombo_{nullptr};
     QComboBox *sourceLanguageCombo_{nullptr};
+    QComboBox *modelCombo_{nullptr};
+    QCheckBox *vadEnabledCheck_{nullptr};
+    QCheckBox *vadAdaptiveCheck_{nullptr};
+    QDoubleSpinBox *vadThresholdSpin_{nullptr};
 
     QCheckBox *translationEnabledCheck_{nullptr};
     QComboBox *translationStyleCombo_{nullptr};

@@ -24,6 +24,7 @@ public:
                    std::function<void(const RuntimeSettings &)> applySettings,
                    std::function<QList<SourceDeviceEntry>()> loopbackDeviceProvider,
                    std::function<QList<SourceDeviceEntry>()> appSessionProvider,
+                   std::function<QStringList()> modelCandidatesProvider,
                    QObject *parent = nullptr);
 
 private slots:
@@ -41,6 +42,7 @@ private:
     std::function<void(const RuntimeSettings &)> applySettings_;
     std::function<QList<SourceDeviceEntry>()> loopbackDeviceProvider_;
     std::function<QList<SourceDeviceEntry>()> appSessionProvider_;
+    std::function<QStringList()> modelCandidatesProvider_;
 
     QSystemTrayIcon tray_;
     QMenu *menu_{nullptr};

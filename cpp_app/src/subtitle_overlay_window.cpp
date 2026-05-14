@@ -12,6 +12,9 @@
 #include <QPaintEvent>
 #include <QPainter>
 #include <QPen>
+#include <QStyle>
+#include <QToolButton>
+#include <QWheelEvent>
 
 SubtitleOverlayWindow::SubtitleOverlayWindow(QWidget *parent) : QWidget(parent) {
     setWindowTitle("Voice2Text Overlay");
@@ -28,6 +31,13 @@ SubtitleOverlayWindow::SubtitleOverlayWindow(QWidget *parent) : QWidget(parent) 
 
     connect(&tickTimer_, &QTimer::timeout, this, &SubtitleOverlayWindow::onTick);
     tickTimer_.start(16);
+    jumpBottomButton_ = new QToolButton(this);
+    jumpBottomButton_->setAutoRaise(true);
+    jumpBottomButton_->setIcon(style()->standardIcon(QStyle::SP_ArrowDown));
+    jumpBottomButton_->setToolTip("Back to latest");
+    connect(jumpBottomButton_, &QToolButton::clicked, this, &SubtitleOverlayWindow::scrollToBottom);
+    updateJumpBottomButtonGeometry();
+    updateJumpBottomButtonVisibility();
 
     pushStatus("Overlay ready. ESC to quit. Drag window to move.");
 }
@@ -153,11 +163,19 @@ void SubtitleOverlayWindow::appendLines(const QString &text, LineEntry::Kind kin
     }
 
     if (added > 0) {
+        const bool wasAtBottom = isAtBottom();
         trimHistory();
-        scrollOffset_ += static_cast<float>(addedHeight);
-        if (scrollOffset_ > static_cast<float>(height())) {
-            scrollOffset_ = static_cast<float>(height());
+        if (wasAtBottom) {
+            scrollOffset_ += static_cast<float>(addedHeight);
+            if (scrollOffset_ > static_cast<float>(height())) {
+                scrollOffset_ = static_cast<float>(height());
+            }
+            historyScrollOffset_ = 0.0F;
+        } else {
+            historyScrollOffset_ = std::min(historyScrollOffset_ + static_cast<float>(addedHeight),
+                                            maxHistoryScrollOffset());
         }
+        updateJumpBottomButtonVisibility();
         update();
     }
 }
@@ -287,6 +305,20 @@ void SubtitleOverlayWindow::leaveEvent(QEvent *event) {
     QWidget::leaveEvent(event);
 }
 
+void SubtitleOverlayWindow::wheelEvent(QWheelEvent *event) {
+    const int delta = event->angleDelta().y();
+    if (delta == 0) {
+        QWidget::wheelEvent(event);
+        return;
+    }
+    const float step = std::max(12.0F, static_cast<float>(lineHeight_) * 0.9F);
+    historyScrollOffset_ += delta > 0 ? step : -step;
+    historyScrollOffset_ = std::clamp(historyScrollOffset_, 0.0F, maxHistoryScrollOffset());
+    updateJumpBottomButtonVisibility();
+    update();
+    event->accept();
+}
+
 void SubtitleOverlayWindow::paintEvent(QPaintEvent *event) {
     Q_UNUSED(event);
 
@@ -309,7 +341,7 @@ void SubtitleOverlayWindow::paintEvent(QPaintEvent *event) {
     const QFontMetrics fm(font());
     const QRect content = rect().adjusted(20, 44, -20, -18);
 
-    float y = static_cast<float>(content.bottom()) + scrollOffset_;
+    float y = static_cast<float>(content.bottom()) + scrollOffset_ + historyScrollOffset_;
     for (auto it = lines_.rbegin(); it != lines_.rend(); ++it) {
         const int blockHeight = measureLineHeight(it->text, fm, content.width());
         const QRect lineRect(content.left(),
@@ -403,9 +435,12 @@ void SubtitleOverlayWindow::performResize(const QPoint &globalPos) {
     }
 
     setGeometry(rect.normalized());
+    updateJumpBottomButtonGeometry();
+    updateJumpBottomButtonVisibility();
 }
 
 void SubtitleOverlayWindow::replaceSubtitleEntries(const QList<LineEntry> &entries) {
+    const bool wasAtBottom = isAtBottom();
     std::deque<LineEntry> kept;
     for (const auto &entry : lines_) {
         if (entry.kind == LineEntry::Kind::Status || entry.kind == LineEntry::Kind::Error) {
@@ -423,7 +458,52 @@ void SubtitleOverlayWindow::replaceSubtitleEntries(const QList<LineEntry> &entri
     lines_.swap(kept);
     trimHistory();
     scrollOffset_ = 0.0F;
+    if (wasAtBottom) {
+        historyScrollOffset_ = 0.0F;
+    } else {
+        historyScrollOffset_ = std::min(historyScrollOffset_, maxHistoryScrollOffset());
+    }
+    updateJumpBottomButtonVisibility();
     update();
+}
+
+float SubtitleOverlayWindow::maxHistoryScrollOffset() const {
+    const QRect content = rect().adjusted(20, 44, -20, -18);
+    const QFontMetrics fm(font());
+    const int width = std::max(1, content.width());
+    int totalHeight = 0;
+    for (const auto &entry : lines_) {
+        totalHeight += measureLineHeight(entry.text, fm, width);
+    }
+    return std::max(0.0F, static_cast<float>(totalHeight - content.height()));
+}
+
+bool SubtitleOverlayWindow::isAtBottom() const {
+    return historyScrollOffset_ <= 1.0F;
+}
+
+void SubtitleOverlayWindow::scrollToBottom() {
+    historyScrollOffset_ = 0.0F;
+    updateJumpBottomButtonVisibility();
+    update();
+}
+
+void SubtitleOverlayWindow::updateJumpBottomButtonGeometry() {
+    if (jumpBottomButton_ == nullptr) {
+        return;
+    }
+    constexpr int size = 26;
+    constexpr int margin = 14;
+    const int x = std::max(0, width() - size - margin);
+    const int y = std::max(0, height() - size - margin);
+    jumpBottomButton_->setGeometry(x, y, size, size);
+}
+
+void SubtitleOverlayWindow::updateJumpBottomButtonVisibility() {
+    if (jumpBottomButton_ == nullptr) {
+        return;
+    }
+    jumpBottomButton_->setVisible(!isAtBottom());
 }
 
 QString SubtitleOverlayWindow::normalizeInlineText(const QString &text) {

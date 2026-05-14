@@ -116,10 +116,15 @@ set(SRC_FILES
     src/main.cpp
     src/app_controller.cpp
     src/runtime_logger.cpp
+    src/runtime/runtime_settings.cpp
+    src/runtime/runtime_update.cpp
+    src/settings/i18n.cpp
+    src/settings/mapping.cpp
     src/settings_dialog.cpp
     src/subtitle_overlay_window.cpp
     src/tray_controller.cpp
     src/whisper_config.cpp
+    src/audio/discovery.cpp
     src/audio/loopback_capture.cpp
     src/stt/whisper_engine.cpp
     src/translation/translation_engine.cpp
@@ -128,11 +133,16 @@ set(SRC_FILES
 set(HDR_FILES
     src/app_controller.h
     src/runtime_logger.h
+    src/runtime/runtime_settings.h
+    src/runtime/runtime_update.h
+    src/settings/i18n.h
+    src/settings/mapping.h
     src/settings_dialog.h
     src/subtitle_overlay_window.h
     src/tray_controller.h
     src/whisper_config.h
     src/audio/loopback_capture.h
+    src/audio/discovery.h
     src/stt/whisper_engine.h
     src/translation/translation_engine.h
 )

@@ -12,287 +12,18 @@
 #include <QFileInfo>
 #include <QFont>
 #include <QThread>
-#include <QSet>
 #include <QStringList>
 #include <QTextStream>
 
-#ifdef Q_OS_WIN
-#ifndef NOMINMAX
-#define NOMINMAX
-#endif
-#include <windows.h>
-#include <audiopolicy.h>
-#include <mmdeviceapi.h>
-#include <functiondiscoverykeys_devpkey.h>
-#endif
-
 #include "app_controller.h"
+#include "audio/discovery.h"
 #include "runtime_logger.h"
+#include "runtime/runtime_settings.h"
+#include "runtime/runtime_update.h"
 #include "settings_dialog.h"
 #include "subtitle_overlay_window.h"
 #include "tray_controller.h"
 #include "whisper_config.h"
-
-#ifdef Q_OS_WIN
-template <typename T>
-void safeRelease(T **ptr) {
-    if (ptr != nullptr && *ptr != nullptr) {
-        (*ptr)->Release();
-        *ptr = nullptr;
-    }
-}
-#endif
-
-static QString processNameFromPid(DWORD pid) {
-    if (pid == 0) {
-        return {};
-    }
-
-#ifdef Q_OS_WIN
-    const HANDLE process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
-    if (process == nullptr || process == INVALID_HANDLE_VALUE) {
-        return {};
-    }
-
-    DWORD length = 32767;
-    std::unique_ptr<wchar_t[]> pathBuffer(new (std::nothrow) wchar_t[length + 1]);
-    QString name;
-    if (pathBuffer != nullptr &&
-        QueryFullProcessImageNameW(process, 0, pathBuffer.get(), &length)) {
-        const QString fullPath = QString::fromWCharArray(pathBuffer.get(), static_cast<int>(length));
-        const int slash = std::max(fullPath.lastIndexOf('\\'), fullPath.lastIndexOf('/'));
-        name = (slash >= 0 ? fullPath.mid(slash + 1) : fullPath).trimmed();
-    }
-    CloseHandle(process);
-    return name;
-#endif
-
-    return {};
-}
-
-static QList<SourceDeviceEntry> listMixerAppSessionEntries() {
-    QList<SourceDeviceEntry> entries;
-
-#ifdef Q_OS_WIN
-    HRESULT hr = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
-    const bool comReady = SUCCEEDED(hr) || hr == RPC_E_CHANGED_MODE;
-    const bool shouldUninitialize = SUCCEEDED(hr);
-    if (!comReady) {
-        return entries;
-    }
-
-    IMMDeviceEnumerator *enumerator = nullptr;
-    IMMDevice *device = nullptr;
-    IAudioSessionManager2 *sessionManager = nullptr;
-    IAudioSessionEnumerator *sessionEnumerator = nullptr;
-    int sessionCount = 0;
-    QSet<QString> seenIds;
-
-    hr = CoCreateInstance(__uuidof(MMDeviceEnumerator),
-                          nullptr,
-                          CLSCTX_ALL,
-                          __uuidof(IMMDeviceEnumerator),
-                          reinterpret_cast<void **>(&enumerator));
-    if (FAILED(hr)) {
-        goto cleanup;
-    }
-
-    hr = enumerator->GetDefaultAudioEndpoint(eRender, eConsole, &device);
-    if (FAILED(hr)) {
-        goto cleanup;
-    }
-
-    hr = device->Activate(__uuidof(IAudioSessionManager2),
-                          CLSCTX_ALL,
-                          nullptr,
-                          reinterpret_cast<void **>(&sessionManager));
-    if (FAILED(hr)) {
-        goto cleanup;
-    }
-
-    hr = sessionManager->GetSessionEnumerator(&sessionEnumerator);
-    if (FAILED(hr)) {
-        goto cleanup;
-    }
-
-    hr = sessionEnumerator->GetCount(&sessionCount);
-    if (FAILED(hr)) {
-        goto cleanup;
-    }
-
-    for (int index = 0; index < sessionCount; ++index) {
-        IAudioSessionControl *control = nullptr;
-        IAudioSessionControl2 *control2 = nullptr;
-        LPWSTR displayNameRaw = nullptr;
-
-        if (FAILED(sessionEnumerator->GetSession(index, &control)) || control == nullptr) {
-            continue;
-        }
-
-        AudioSessionState state = AudioSessionStateExpired;
-        if (FAILED(control->GetState(&state)) || state == AudioSessionStateExpired) {
-            safeRelease(&control);
-            continue;
-        }
-
-        control->GetDisplayName(&displayNameRaw);
-
-        DWORD processId = 0;
-        if (SUCCEEDED(control->QueryInterface(__uuidof(IAudioSessionControl2),
-                                              reinterpret_cast<void **>(&control2))) &&
-            control2 != nullptr) {
-            control2->GetProcessId(&processId);
-        }
-
-        const QString processName = processNameFromPid(processId).trimmed();
-        const QString displayName =
-            (displayNameRaw != nullptr) ? QString::fromWCharArray(displayNameRaw).trimmed() : QString{};
-
-        if (!processName.isEmpty()) {
-            const QString id = processName.toLower();
-            if (!seenIds.contains(id)) {
-                seenIds.insert(id);
-
-                QString label = processName;
-                if (!displayName.isEmpty() &&
-                    displayName.compare(processName, Qt::CaseInsensitive) != 0) {
-                    label = QString("%1 (%2)").arg(displayName, processName);
-                }
-
-                entries.push_back(SourceDeviceEntry{processName, label});
-            }
-        }
-
-        if (displayNameRaw != nullptr) {
-            CoTaskMemFree(displayNameRaw);
-            displayNameRaw = nullptr;
-        }
-        safeRelease(&control2);
-        safeRelease(&control);
-    }
-
-cleanup:
-    safeRelease(&sessionEnumerator);
-    safeRelease(&sessionManager);
-    safeRelease(&device);
-    safeRelease(&enumerator);
-    if (shouldUninitialize) {
-        CoUninitialize();
-    }
-#endif
-
-    std::sort(entries.begin(), entries.end(), [](const SourceDeviceEntry &lhs, const SourceDeviceEntry &rhs) {
-        return lhs.label.compare(rhs.label, Qt::CaseInsensitive) < 0;
-    });
-    return entries;
-}
-
-static QStringList listMixerAppSessionProcessNames() {
-    QStringList names;
-    const QList<SourceDeviceEntry> entries = listMixerAppSessionEntries();
-    for (const SourceDeviceEntry &entry : entries) {
-        const QString id = entry.id.trimmed();
-        if (!id.isEmpty()) {
-            names.push_back(id);
-        }
-    }
-
-    names.removeDuplicates();
-    std::sort(names.begin(), names.end(), [](const QString &lhs, const QString &rhs) {
-        return lhs.compare(rhs, Qt::CaseInsensitive) < 0;
-    });
-    return names;
-}
-
-static QList<SourceDeviceEntry> listLoopbackDeviceEntries() {
-    QList<SourceDeviceEntry> devices;
-
-#ifdef Q_OS_WIN
-    HRESULT hr = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
-    const bool comReady = SUCCEEDED(hr) || hr == RPC_E_CHANGED_MODE;
-    const bool shouldUninitialize = SUCCEEDED(hr);
-    if (!comReady) {
-        return devices;
-    }
-
-    IMMDeviceEnumerator *enumerator = nullptr;
-    IMMDeviceCollection *collection = nullptr;
-    UINT count = 0;
-
-    hr = CoCreateInstance(__uuidof(MMDeviceEnumerator),
-                          nullptr,
-                          CLSCTX_ALL,
-                          __uuidof(IMMDeviceEnumerator),
-                          reinterpret_cast<void **>(&enumerator));
-    if (FAILED(hr)) {
-        goto cleanup;
-    }
-
-    hr = enumerator->EnumAudioEndpoints(eRender, DEVICE_STATE_ACTIVE, &collection);
-    if (FAILED(hr)) {
-        goto cleanup;
-    }
-
-    hr = collection->GetCount(&count);
-    if (FAILED(hr)) {
-        goto cleanup;
-    }
-
-    for (UINT index = 0; index < count; ++index) {
-        IMMDevice *device = nullptr;
-        IPropertyStore *props = nullptr;
-        LPWSTR idRaw = nullptr;
-        PROPVARIANT friendlyName;
-        PropVariantInit(&friendlyName);
-
-        if (FAILED(collection->Item(index, &device))) {
-            PropVariantClear(&friendlyName);
-            continue;
-        }
-
-        QString id;
-        QString label;
-
-        if (SUCCEEDED(device->GetId(&idRaw)) && idRaw != nullptr) {
-            id = QString::fromWCharArray(idRaw).trimmed();
-        }
-
-        if (SUCCEEDED(device->OpenPropertyStore(STGM_READ, &props)) && props != nullptr) {
-            if (SUCCEEDED(props->GetValue(PKEY_Device_FriendlyName, &friendlyName)) &&
-                friendlyName.vt == VT_LPWSTR && friendlyName.pwszVal != nullptr) {
-                label = QString::fromWCharArray(friendlyName.pwszVal).trimmed();
-            }
-        }
-
-        if (!id.isEmpty()) {
-            if (label.isEmpty()) {
-                label = id;
-            }
-            devices.push_back(SourceDeviceEntry{id, label});
-        }
-
-        PropVariantClear(&friendlyName);
-        if (idRaw != nullptr) {
-            CoTaskMemFree(idRaw);
-            idRaw = nullptr;
-        }
-        safeRelease(&props);
-        safeRelease(&device);
-    }
-
-cleanup:
-    safeRelease(&collection);
-    safeRelease(&enumerator);
-    if (shouldUninitialize) {
-        CoUninitialize();
-    }
-#endif
-
-    std::sort(devices.begin(), devices.end(), [](const SourceDeviceEntry &lhs, const SourceDeviceEntry &rhs) {
-        return lhs.label.compare(rhs.label, Qt::CaseInsensitive) < 0;
-    });
-    return devices;
-}
 
 static QString resolveModelPath(const QString &cliValue) {
     const QString cliPath = cliValue.trimmed();
@@ -349,6 +80,44 @@ static QString resolveModelPath(const QString &cliValue) {
     }
 
     return {};
+}
+
+static QStringList discoverModelCandidates() {
+    QStringList out;
+    const QString envPath = qEnvironmentVariable("WHISPER_MODEL_PATH").trimmed();
+    if (!envPath.isEmpty() && QFileInfo::exists(envPath)) {
+        out.push_back(QFileInfo(envPath).absoluteFilePath());
+    }
+
+    const QString appDir = QCoreApplication::applicationDirPath();
+    const QString cwd = QDir::currentPath();
+    QStringList roots;
+    roots << appDir << QDir(appDir).absoluteFilePath("..") << QDir(appDir).absoluteFilePath("../..")
+          << cwd << QDir(cwd).absoluteFilePath("..");
+    roots.removeDuplicates();
+    const QStringList relDirs = {
+        "models", "third_party/whisper.cpp/models", "../models", "../third_party/whisper.cpp/models",
+        "../../models", "../../third_party/whisper.cpp/models",
+    };
+    const QStringList modelNames = {
+        "ggml-large-v3-turbo.bin", "ggml-large-v3.bin", "ggml-medium.bin", "ggml-small.bin",
+        "ggml-base.bin",           "ggml-tiny.bin",     "ggml-medium.en.bin", "ggml-small.en.bin",
+        "ggml-base.en.bin",        "ggml-tiny.en.bin",
+    };
+    for (const QString &root : roots) {
+        const QDir rootDir(root);
+        for (const QString &relDir : relDirs) {
+            const QDir candidateDir(rootDir.absoluteFilePath(relDir));
+            for (const QString &modelName : modelNames) {
+                const QString modelPath = candidateDir.absoluteFilePath(modelName);
+                if (QFileInfo::exists(modelPath)) {
+                    out.push_back(QFileInfo(modelPath).absoluteFilePath());
+                }
+            }
+        }
+    }
+    out.removeDuplicates();
+    return out;
 }
 
 static CaptureSourceMode captureModeFromString(const QString &modeRaw) {
@@ -408,11 +177,18 @@ int main(int argc, char *argv[]) {
                                         "Sliding hop interval in seconds.",
                                         "sec",
                                         "1.5");
+    QCommandLineOption vadEnabledOption("vad", "Enable RMS VAD filtering.");
+    QCommandLineOption noVadOption("no-vad", "Disable VAD filtering.");
+    QCommandLineOption noAdaptiveVadOption("no-adaptive-vad", "Disable adaptive VAD threshold.");
+    QCommandLineOption vadRmsThresholdOption("vad-rms-threshold",
+                                             "VAD RMS threshold (0.001-0.2).",
+                                             "value",
+                                             "0.010");
     QCommandLineOption overlapMergeMethodOption(
         "overlap-merge-method",
-        "Overlap merge method: replace-window|suffix-overlap|fuzzy-overlap|append-only.",
+        "Overlap merge method: stable-tail|commit-on-break (legacy aliases accepted).",
         "method",
-        "replace-window");
+        "stable-tail");
     QCommandLineOption maxContextOption(QStringList() << "mc" << "max-context",
                                         "Whisper max context tokens (0 disables context carry).",
                                         "tokens",
@@ -467,6 +243,10 @@ int main(int argc, char *argv[]) {
     parser.addOption(sourceLanguageOption);
     parser.addOption(segmentSecondsOption);
     parser.addOption(hopSecondsOption);
+    parser.addOption(vadEnabledOption);
+    parser.addOption(noVadOption);
+    parser.addOption(noAdaptiveVadOption);
+    parser.addOption(vadRmsThresholdOption);
     parser.addOption(overlapMergeMethodOption);
     parser.addOption(maxContextOption);
     parser.addOption(entropyTholdOption);
@@ -485,7 +265,7 @@ int main(int argc, char *argv[]) {
 
     if (parser.isSet(listAppSessionsOption)) {
         QTextStream out(stdout);
-        for (const QString &name : listMixerAppSessionProcessNames()) {
+        for (const QString &name : discoverMixerAppSessionProcessNames()) {
             out << name << "\n";
         }
         return 0;
@@ -498,6 +278,7 @@ int main(int argc, char *argv[]) {
     runtime.fromLang = parser.value(fromLangOption).trimmed().toLower();
     runtime.toLang = parser.value(toLangOption).trimmed().toLower();
     runtime.sourceLanguage = parser.value(sourceLanguageOption).trimmed().toLower();
+    runtime.modelPath = modelPath;
     if (runtime.sourceLanguage.isEmpty()) {
         runtime.sourceLanguage = "auto";
     }
@@ -505,11 +286,14 @@ int main(int argc, char *argv[]) {
     runtime.segmentSeconds = std::clamp(parser.value(segmentSecondsOption).toFloat(), 1.0F, 12.0F);
     runtime.hopSeconds =
         std::clamp(parser.value(hopSecondsOption).toFloat(), 0.1F, std::max(0.1F, runtime.segmentSeconds - 0.1F));
-
-    runtime.overlapMergeMethod = parser.value(overlapMergeMethodOption).trimmed().toLower();
-    if (runtime.overlapMergeMethod.isEmpty()) {
-        runtime.overlapMergeMethod = "replace-window";
+    runtime.vadEnabled = parser.isSet(noVadOption) ? false : true;
+    if (parser.isSet(vadEnabledOption)) {
+        runtime.vadEnabled = true;
     }
+    runtime.vadAdaptiveEnabled = !parser.isSet(noAdaptiveVadOption);
+    runtime.vadRmsThreshold = std::clamp(parser.value(vadRmsThresholdOption).toFloat(), 0.001F, 0.2F);
+
+    runtime.overlapMergeMethod = normalizeOverlapMergeMethod(parser.value(overlapMergeMethodOption));
 
     whisperParams.maxContext = std::clamp(parser.value(maxContextOption).toInt(), 0, 8192);
     whisperParams.entropyThold = std::clamp(parser.value(entropyTholdOption).toFloat(), 0.0F, 10.0F);
@@ -566,11 +350,11 @@ int main(int argc, char *argv[]) {
                                 runtime.translatedColor,
                                 runtime.backgroundColor);
 
-    if (modelPath.isEmpty()) {
+    if (runtime.modelPath.isEmpty()) {
         overlay.pushStatus(
             "No model file detected. STT is disabled. Provide --model-path or set WHISPER_MODEL_PATH.");
     } else {
-        overlay.pushStatus(QString("Using model: %1").arg(modelPath));
+        overlay.pushStatus(QString("Using model: %1").arg(runtime.modelPath));
     }
     if (!whisperConfigPath.trimmed().isEmpty()) {
         overlay.pushStatus(QString("Whisper config loaded: %1").arg(whisperConfigPath));
@@ -614,7 +398,7 @@ int main(int argc, char *argv[]) {
     const auto startController = [&]() -> bool {
         stopController();
 
-        controller = std::make_unique<AppController>(modelPath,
+        controller = std::make_unique<AppController>(runtime.modelPath,
                                                      captureModeFromString(runtime.sourceMode),
                                                      runtime.loopbackDeviceId,
                                                      runtime.sourceApps,
@@ -622,6 +406,9 @@ int main(int argc, char *argv[]) {
                                                      runtime.segmentSeconds,
                                                      runtime.overlapMergeMethod,
                                                      runtime.hopSeconds,
+                                                     runtime.vadEnabled,
+                                                     runtime.vadAdaptiveEnabled,
+                                                     runtime.vadRmsThreshold,
                                                      whisperParams,
                                                      runtime.translationEnabled,
                                                      runtime.fromLang,
@@ -648,31 +435,20 @@ int main(int argc, char *argv[]) {
                                     runtime.translatedColor,
                                     runtime.backgroundColor);
 
-        const auto changedFloat = [](float lhs, float rhs) {
-            return std::abs(lhs - rhs) > 0.0001F;
-        };
-
-        const bool requiresRestart =
-            previous.sourceMode != runtime.sourceMode ||
-            previous.loopbackDeviceId != runtime.loopbackDeviceId ||
-            previous.sourceApps != runtime.sourceApps ||
-            previous.sourceLanguage != runtime.sourceLanguage ||
-            changedFloat(previous.segmentSeconds, runtime.segmentSeconds) ||
-            changedFloat(previous.hopSeconds, runtime.hopSeconds) ||
-            previous.overlapMergeMethod != runtime.overlapMergeMethod ||
-            previous.translationEnabled != runtime.translationEnabled ||
-            previous.fromLang != runtime.fromLang || previous.toLang != runtime.toLang;
+        const bool requiresRestart = requiresCaptureRestart(previous, runtime);
 
         if (requiresRestart) {
             if (startController()) {
-                overlay.pushStatus("Runtime settings applied. Capture restarted.");
+                overlay.pushStatus(QString("Runtime settings applied. Capture restarted. model=%1")
+                                       .arg(effectiveModelLabel(runtime.modelPath)));
             } else {
                 overlay.pushError("Capture restart failed after settings update.");
             }
             return;
         }
 
-        overlay.pushStatus("UI settings applied.");
+        overlay.pushStatus(QString("UI settings applied. model=%1")
+                               .arg(effectiveModelLabel(runtime.modelPath)));
     };
 
     TrayController tray(&app,
@@ -682,10 +458,13 @@ int main(int argc, char *argv[]) {
                         },
                         applySettings,
                         []() {
-                            return listLoopbackDeviceEntries();
+                            return discoverLoopbackDeviceEntries();
                         },
                         []() {
-                            return listMixerAppSessionEntries();
+                            return discoverMixerAppSessionEntries();
+                        },
+                        []() {
+                            return discoverModelCandidates();
                         });
     Q_UNUSED(tray);
 
@@ -701,7 +480,7 @@ int main(int argc, char *argv[]) {
         };
 
         auto chooseAppTarget = []() {
-            const QList<SourceDeviceEntry> running = listMixerAppSessionEntries();
+            const QList<SourceDeviceEntry> running = discoverMixerAppSessionEntries();
             for (const SourceDeviceEntry &entry : running) {
                 const QString lowered = entry.id.trimmed().toLower();
                 if (lowered.isEmpty()) {
@@ -770,3 +549,4 @@ int main(int argc, char *argv[]) {
 
     return app.exec();
 }
+

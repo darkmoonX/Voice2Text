@@ -1,23 +1,34 @@
+﻿"""System tray controller that bridges user actions to overlay/controller runtime updates."""
 from __future__ import annotations
 
 from PySide6.QtCore import QObject
 from PySide6.QtGui import QAction, QColor, QFont, QIcon, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import QApplication, QMenu, QSystemTrayIcon
 
-from .audio_capture import list_active_app_sessions, list_audio_devices
+from .capture import list_active_app_sessions, list_audio_devices
 from .config import RuntimeConfig
 from .settings_dialog import SettingsDialog
 
+_I18N = {
+    "zh": {
+        "show": "顯示",
+        "minimize": "最小化",
+        "settings": "設定",
+        "exit": "離開",
+        "applied": "設定已套用。",
+    },
+    "en": {
+        "show": "Show",
+        "minimize": "Minimize",
+        "settings": "Settings",
+        "exit": "Exit",
+        "applied": "Settings applied.",
+    },
+}
+
 
 class Voice2TextTrayController(QObject):
-    def __init__(
-        self,
-        app: QApplication,
-        overlay,
-        config: RuntimeConfig,
-        on_settings_applied,
-        parent: QObject | None = None,
-    ) -> None:
+    def __init__(self, app: QApplication, overlay, config: RuntimeConfig, on_settings_applied, parent: QObject | None = None) -> None:
         super().__init__(parent)
         self._app = app
         self._overlay = overlay
@@ -26,7 +37,6 @@ class Voice2TextTrayController(QObject):
 
         self._tray = QSystemTrayIcon(self)
         self._icon = self._build_icon()
-
         self._app.setWindowIcon(self._icon)
         self._overlay.setWindowIcon(self._icon)
         self._tray.setIcon(self._icon)
@@ -35,19 +45,26 @@ class Voice2TextTrayController(QObject):
         self._tray.activated.connect(self._on_tray_activated)
         self._tray.show()
 
+    def _lang(self) -> str:
+        value = (self._config.ui_language or "zh").strip().lower()
+        return value if value in _I18N else "zh"
+
+    def _t(self, key: str) -> str:
+        return _I18N[self._lang()][key]
+
+    def refresh_locale(self) -> None:
+        self._tray.setContextMenu(self._build_menu())
+
     def _build_menu(self) -> QMenu:
         menu = QMenu()
-
-        show_action = QAction("顯示", menu)
-        minimize_action = QAction("縮小", menu)
-        settings_action = QAction("設定", menu)
-        exit_action = QAction("離開", menu)
-
+        show_action = QAction(self._t("show"), menu)
+        minimize_action = QAction(self._t("minimize"), menu)
+        settings_action = QAction(self._t("settings"), menu)
+        exit_action = QAction(self._t("exit"), menu)
         show_action.triggered.connect(self.show_overlay)
         minimize_action.triggered.connect(self.hide_overlay)
         settings_action.triggered.connect(self.open_settings)
         exit_action.triggered.connect(QApplication.quit)
-
         menu.addAction(show_action)
         menu.addAction(minimize_action)
         menu.addSeparator()
@@ -65,23 +82,22 @@ class Voice2TextTrayController(QObject):
         self._overlay.hide()
 
     def open_settings(self) -> None:
+        old_lang = self._lang()
         dialog = SettingsDialog(
             config=self._config,
             devices=list_audio_devices(),
             app_sessions=list_active_app_sessions(),
+            device_provider=list_audio_devices,
+            app_session_provider=list_active_app_sessions,
             parent=self._overlay,
         )
-
         if dialog.exec() != SettingsDialog.DialogCode.Accepted:
             return
 
         self._on_settings_applied(dialog.updates)
-        self._tray.showMessage(
-            "Voice2Text",
-            "設定已套用。",
-            QSystemTrayIcon.MessageIcon.Information,
-            1800,
-        )
+        if self._lang() != old_lang:
+            self.refresh_locale()
+        self._tray.showMessage("Voice2Text", self._t("applied"), QSystemTrayIcon.MessageIcon.Information, 1800)
 
     def _on_tray_activated(self, reason: QSystemTrayIcon.ActivationReason) -> None:
         if reason == QSystemTrayIcon.ActivationReason.Trigger:
@@ -94,22 +110,18 @@ class Voice2TextTrayController(QObject):
     def _build_icon() -> QIcon:
         pixmap = QPixmap(64, 64)
         pixmap.fill(QColor(0, 0, 0, 0))
-
         painter = QPainter(pixmap)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
-
         painter.setBrush(QColor("#0A101A"))
         painter.setPen(QPen(QColor("#8CC8FF"), 3))
         painter.drawRoundedRect(6, 6, 52, 52, 12, 12)
-
         painter.setPen(QPen(QColor("#E8F2FF"), 3))
         painter.drawLine(16, 23, 48, 23)
         painter.drawLine(16, 32, 40, 32)
         painter.drawLine(16, 41, 46, 41)
-
         painter.setPen(QColor("#8CC8FF"))
         painter.setFont(QFont("Segoe UI", 8, QFont.Weight.Bold))
         painter.drawText(10, 58, "V2T")
-
         painter.end()
         return QIcon(pixmap)
+

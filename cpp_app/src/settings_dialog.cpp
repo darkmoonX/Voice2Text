@@ -1,4 +1,4 @@
-#include "settings_dialog.h"
+﻿#include "settings_dialog.h"
 
 #include <algorithm>
 #include <cmath>
@@ -18,6 +18,9 @@
 #include <QVBoxLayout>
 #include <QWidget>
 
+#include "settings/i18n.h"
+#include "settings/mapping.h"
+
 namespace {
 
 class SourceSelectionDialog : public QDialog {
@@ -25,6 +28,7 @@ public:
     SourceSelectionDialog(const QString &title,
                           const QList<SourceDeviceEntry> &entries,
                           const QStringList &selected,
+                          const QString &uiLang,
                           QWidget *parent)
         : QDialog(parent) {
         setWindowTitle(title);
@@ -32,7 +36,7 @@ public:
 
         auto *root = new QVBoxLayout(this);
 
-        selectAll_ = new QCheckBox("全選", this);
+        selectAll_ = new QCheckBox(settings_i18n::selectAll(uiLang), this);
         root->addWidget(selectAll_);
 
         auto *body = new QWidget(this);
@@ -41,7 +45,7 @@ public:
         bodyLayout->setSpacing(4);
 
         if (entries.isEmpty()) {
-            bodyLayout->addWidget(new QLabel("(沒有可選來源)", body));
+            bodyLayout->addWidget(new QLabel(settings_i18n::noSources(uiLang), body));
         } else {
             for (const SourceDeviceEntry &entry : entries) {
                 auto *cb = new QCheckBox(entry.label, body);
@@ -129,26 +133,32 @@ private:
 SettingsDialog::SettingsDialog(const RuntimeSettings &initial,
                                const QList<SourceDeviceEntry> &loopbackDevices,
                                const QList<SourceDeviceEntry> &appSessions,
+                               const QStringList &modelCandidates,
                                QWidget *parent)
     : QDialog(parent) {
+    uiLang_ = settings_i18n::normalizeUiLanguage(initial.uiLanguage);
     loopbackDevices_ = loopbackDevices;
     appSessions_ = appSessions;
     selectedLoopbackDeviceId_ = initial.loopbackDeviceId;
     selectedAppNames_ = initial.sourceApps;
 
-    setWindowTitle("Voice2Text 設定");
+    setWindowTitle(settings_i18n::settingsTitle(uiLang_));
     setMinimumWidth(580);
 
     auto *root = new QVBoxLayout(this);
     auto *form = new QFormLayout();
 
     sourceModeCombo_ = new QComboBox(this);
-    sourceModeCombo_->addItem("輸出回放", "loopback");
-    sourceModeCombo_->addItem("麥克風", "microphone");
-    sourceModeCombo_->addItem("指定應用", "app");
+    sourceModeCombo_->addItem(settings_i18n::modeLoopbackLabel(uiLang_), "loopback");
+    sourceModeCombo_->addItem(settings_i18n::modeMicrophoneLabel(uiLang_), "microphone");
+    sourceModeCombo_->addItem(settings_i18n::modeAppLabel(uiLang_), "app");
     setComboData(sourceModeCombo_, initial.sourceMode);
+    uiLanguageCombo_ = new QComboBox(this);
+    uiLanguageCombo_->addItem("繁體中文", "zh");
+    uiLanguageCombo_->addItem("English", "en");
+    setComboData(uiLanguageCombo_, uiLang_);
 
-    sourceSelectButton_ = new QPushButton("選擇來源", this);
+    sourceSelectButton_ = new QPushButton(settings_i18n::selectSource(uiLang_), this);
     sourceSummaryLabel_ = new QLabel(this);
     sourceSummaryLabel_->setWordWrap(true);
 
@@ -165,34 +175,52 @@ SettingsDialog::SettingsDialog(const RuntimeSettings &initial,
     hopSpin_->setValue(static_cast<double>(initial.hopSeconds));
 
     overlapMergeMethodCombo_ = new QComboBox(this);
-    overlapMergeMethodCombo_->addItem("覆蓋最近視窗（推薦）", "replace-window");
-    overlapMergeMethodCombo_->addItem("字尾重疊合併", "suffix-overlap");
-    overlapMergeMethodCombo_->addItem("模糊重疊合併", "fuzzy-overlap");
-    overlapMergeMethodCombo_->addItem("僅追加（舊行為）", "append-only");
-    setComboData(overlapMergeMethodCombo_, initial.overlapMergeMethod);
+    overlapMergeMethodCombo_->addItem("stable-tail", "stable-tail");
+    overlapMergeMethodCombo_->addItem("commit-on-break", "commit-on-break");
+    setComboData(overlapMergeMethodCombo_, normalizeOverlapMergeMethod(initial.overlapMergeMethod));
 
     sourceLanguageCombo_ = new QComboBox(this);
-    sourceLanguageCombo_->addItem("自動", "auto");
-    sourceLanguageCombo_->addItem("英文", "en");
-    sourceLanguageCombo_->addItem("中文（繁體）", "zh-hant");
-    sourceLanguageCombo_->addItem("中文（簡體）", "zh-hans");
-    sourceLanguageCombo_->addItem("日文", "ja");
-    sourceLanguageCombo_->addItem("韓文", "ko");
+    sourceLanguageCombo_->addItem("auto", "auto");
+    sourceLanguageCombo_->addItem("en", "en");
+    sourceLanguageCombo_->addItem("zh-hant", "zh-hant");
+    sourceLanguageCombo_->addItem("zh-hans", "zh-hans");
+    sourceLanguageCombo_->addItem("ja", "ja");
+    sourceLanguageCombo_->addItem("ko", "ko");
     setComboData(sourceLanguageCombo_, initial.sourceLanguage);
+
+    modelCombo_ = new QComboBox(this);
+    modelCombo_->setEditable(true);
+    for (const QString &candidate : modelCandidates) {
+        modelCombo_->addItem(candidate, candidate);
+    }
+    if (!initial.modelPath.trimmed().isEmpty() && modelCombo_->findText(initial.modelPath.trimmed()) < 0) {
+        modelCombo_->addItem(initial.modelPath.trimmed(), initial.modelPath.trimmed());
+    }
+    modelCombo_->setCurrentText(initial.modelPath.trimmed());
+
+    vadEnabledCheck_ = new QCheckBox(this);
+    vadEnabledCheck_->setChecked(initial.vadEnabled);
+    vadAdaptiveCheck_ = new QCheckBox(this);
+    vadAdaptiveCheck_->setChecked(initial.vadAdaptiveEnabled);
+    vadThresholdSpin_ = new QDoubleSpinBox(this);
+    vadThresholdSpin_->setDecimals(3);
+    vadThresholdSpin_->setRange(0.001, 0.200);
+    vadThresholdSpin_->setSingleStep(0.001);
+    vadThresholdSpin_->setValue(initial.vadRmsThreshold);
 
     translationEnabledCheck_ = new QCheckBox(this);
     translationEnabledCheck_->setChecked(initial.translationEnabled);
 
     translationStyleCombo_ = new QComboBox(this);
-    translationStyleCombo_->addItem("上下分行", "stacked");
-    translationStyleCombo_->addItem("僅翻譯", "translation-only");
+    translationStyleCombo_->addItem(settings_i18n::translationStyleStacked(uiLang_), "stacked");
+    translationStyleCombo_->addItem(settings_i18n::translationStyleTranslatedOnly(uiLang_), "translation-only");
     setComboData(translationStyleCombo_, initial.translationStyle);
 
     translationLanguageCombo_ = new QComboBox(this);
-    translationLanguageCombo_->addItem("英文", "en");
-    translationLanguageCombo_->addItem("中文", "zh");
-    translationLanguageCombo_->addItem("日文", "ja");
-    translationLanguageCombo_->addItem("韓文", "ko");
+    translationLanguageCombo_->addItem("en", "en");
+    translationLanguageCombo_->addItem("zh", "zh");
+    translationLanguageCombo_->addItem("ja", "ja");
+    translationLanguageCombo_->addItem("ko", "ko");
     setComboData(translationLanguageCombo_, initial.toLang);
 
     fontSizeSpin_ = new QSpinBox(this);
@@ -215,38 +243,43 @@ SettingsDialog::SettingsDialog(const RuntimeSettings &initial,
     setButtonColor(translatedColorButton_, initial.translatedColor);
     setButtonColor(backgroundColorButton_, initial.backgroundColor);
 
-    form->addRow("聲音來源模式", sourceModeCombo_);
+    form->addRow(settings_i18n::uiLanguageLabel(uiLang_), uiLanguageCombo_);
+    form->addRow(settings_i18n::modeLabel(uiLang_), sourceModeCombo_);
 
     auto *sourceRow = new QHBoxLayout();
     sourceRow->addWidget(sourceSelectButton_);
     sourceRow->addWidget(sourceSummaryLabel_, 1);
-    form->addRow("來源選擇", sourceRow);
+    form->addRow(settings_i18n::sourceLabel(uiLang_), sourceRow);
 
-    form->addRow("分段秒數", segmentSpin_);
-    form->addRow("滑動步長秒數", hopSpin_);
-    form->addRow("重疊整合方法", overlapMergeMethodCombo_);
-    form->addRow("偵測語言", sourceLanguageCombo_);
+    form->addRow(settings_i18n::segmentLabel(uiLang_), segmentSpin_);
+    form->addRow(settings_i18n::hopLabel(uiLang_), hopSpin_);
+    form->addRow(settings_i18n::mergeLabel(uiLang_), overlapMergeMethodCombo_);
+    form->addRow(settings_i18n::sourceLanguageLabel(uiLang_), sourceLanguageCombo_);
+    form->addRow("STT Model", modelCombo_);
+    form->addRow("VAD Enabled", vadEnabledCheck_);
+    form->addRow("Adaptive VAD", vadAdaptiveCheck_);
+    form->addRow("VAD RMS Threshold", vadThresholdSpin_);
 
     auto *translationLabel = new QWidget(this);
     auto *translationLabelLayout = new QHBoxLayout(translationLabel);
     translationLabelLayout->setContentsMargins(0, 0, 0, 0);
     translationLabelLayout->setSpacing(6);
-    translationLabelLayout->addWidget(new QLabel("翻譯", translationLabel));
+    translationLabelLayout->addWidget(new QLabel(settings_i18n::translationLabel(uiLang_), translationLabel));
     translationLabelLayout->addWidget(translationEnabledCheck_);
     translationLabelLayout->addStretch(1);
 
     form->addRow(translationLabel, translationStyleCombo_);
-    form->addRow("翻譯語言", translationLanguageCombo_);
-    form->addRow("字體大小", fontSizeSpin_);
+    form->addRow(settings_i18n::translationLanguageLabel(uiLang_), translationLanguageCombo_);
+    form->addRow(settings_i18n::fontSizeLabel(uiLang_), fontSizeSpin_);
 
     auto *opacityRow = new QHBoxLayout();
     opacityRow->addWidget(opacitySlider_, 1);
     opacityRow->addWidget(opacityValueLabel_);
-    form->addRow("透明度", opacityRow);
+    form->addRow(settings_i18n::opacityLabel(uiLang_), opacityRow);
 
-    form->addRow("來源文字顏色", sourceColorButton_);
-    form->addRow("翻譯文字顏色", translatedColorButton_);
-    form->addRow("背景顏色", backgroundColorButton_);
+    form->addRow(settings_i18n::sourceColorLabel(uiLang_), sourceColorButton_);
+    form->addRow(settings_i18n::translatedColorLabel(uiLang_), translatedColorButton_);
+    form->addRow(settings_i18n::backgroundColorLabel(uiLang_), backgroundColorButton_);
 
     root->addLayout(form);
 
@@ -283,55 +316,47 @@ SettingsDialog::SettingsDialog(const RuntimeSettings &initial,
     connect(opacitySlider_, &QSlider::valueChanged, this, [this](int value) {
         opacityValueLabel_->setText(QString("%1%").arg(value));
     });
+    connect(vadEnabledCheck_, &QCheckBox::checkStateChanged, this, [this](int) {
+        const bool enabled = vadEnabledCheck_->isChecked();
+        vadAdaptiveCheck_->setEnabled(enabled);
+        vadThresholdSpin_->setEnabled(enabled);
+    });
 
     onModeChanged();
     segmentSpin_->valueChanged(segmentSpin_->value());
     opacitySlider_->valueChanged(opacitySlider_->value());
     onTranslationToggle();
+    vadEnabledCheck_->checkStateChanged(vadEnabledCheck_->checkState());
 }
 
 RuntimeSettings SettingsDialog::settings() const {
-    RuntimeSettings out;
-    out.sourceMode = sourceModeCombo_->currentData().toString();
-    out.loopbackDeviceId = selectedLoopbackDeviceId_;
-    if (out.sourceMode == "app") {
-        out.sourceApps = selectedAppNames_;
-    }
-
-    out.sourceLanguage = sourceLanguageCombo_->currentData().toString();
-    if (out.sourceLanguage.isEmpty()) {
-        out.sourceLanguage = "auto";
-    }
-
-    out.segmentSeconds = static_cast<float>(segmentSpin_->value());
-    out.hopSeconds = static_cast<float>(hopSpin_->value());
-    if (out.hopSeconds > out.segmentSeconds) {
-        out.hopSeconds = out.segmentSeconds;
-    }
-    out.overlapMergeMethod = overlapMergeMethodCombo_->currentData().toString();
-
-    out.translationEnabled = translationEnabledCheck_->isChecked();
-    out.toLang = translationLanguageCombo_->currentData().toString();
-
-    if (out.sourceLanguage == "auto") {
-        out.fromLang = "auto";
-    } else if (out.sourceLanguage == "zh-hant" || out.sourceLanguage == "zh-hans") {
-        out.fromLang = "zh";
-    } else {
-        out.fromLang = out.sourceLanguage;
-    }
-
-    out.translationStyle = translationStyleCombo_->currentData().toString();
-    out.fontSize = fontSizeSpin_->value();
-    out.opacity = static_cast<float>(opacitySlider_->value()) / 100.0F;
-    out.sourceColor = buttonColor(sourceColorButton_);
-    out.translatedColor = buttonColor(translatedColorButton_);
-    out.backgroundColor = buttonColor(backgroundColorButton_);
-    return out;
+    SettingsInputPayload payload;
+    payload.uiLanguage = uiLanguageCombo_->currentData().toString();
+    payload.sourceMode = sourceModeCombo_->currentData().toString();
+    payload.loopbackDeviceId = selectedLoopbackDeviceId_;
+    payload.appNames = selectedAppNames_;
+    payload.sourceLanguage = sourceLanguageCombo_->currentData().toString();
+    payload.modelPath = modelCombo_->currentText().trimmed();
+    payload.segmentSeconds = static_cast<float>(segmentSpin_->value());
+    payload.hopSeconds = static_cast<float>(hopSpin_->value());
+    payload.overlapMergeMethod = overlapMergeMethodCombo_->currentData().toString();
+    payload.vadEnabled = vadEnabledCheck_->isChecked();
+    payload.vadAdaptiveEnabled = vadAdaptiveCheck_->isChecked();
+    payload.vadRmsThreshold = static_cast<float>(vadThresholdSpin_->value());
+    payload.translationEnabled = translationEnabledCheck_->isChecked();
+    payload.translationTo = translationLanguageCombo_->currentData().toString();
+    payload.translationStyle = translationStyleCombo_->currentData().toString();
+    payload.fontSize = fontSizeSpin_->value();
+    payload.opacity = static_cast<float>(opacitySlider_->value()) / 100.0F;
+    payload.sourceColor = buttonColor(sourceColorButton_);
+    payload.translatedColor = buttonColor(translatedColorButton_);
+    payload.backgroundColor = buttonColor(backgroundColorButton_);
+    return buildRuntimeSettingsFromPayload(payload);
 }
 
 void SettingsDialog::pickSourceColor() {
-    const QColor picked = QColorDialog::getColor(buttonColor(sourceColorButton_), this, "來源文字顏色");
+    const QColor picked = QColorDialog::getColor(
+        buttonColor(sourceColorButton_), this, settings_i18n::pickSourceColorTitle(uiLang_));
     if (picked.isValid()) {
         setButtonColor(sourceColorButton_, picked);
     }
@@ -339,14 +364,17 @@ void SettingsDialog::pickSourceColor() {
 
 void SettingsDialog::pickTranslatedColor() {
     const QColor picked =
-        QColorDialog::getColor(buttonColor(translatedColorButton_), this, "翻譯文字顏色");
+        QColorDialog::getColor(buttonColor(translatedColorButton_),
+                               this,
+                               settings_i18n::pickTranslatedColorTitle(uiLang_));
     if (picked.isValid()) {
         setButtonColor(translatedColorButton_, picked);
     }
 }
 
 void SettingsDialog::pickBackgroundColor() {
-    const QColor picked = QColorDialog::getColor(buttonColor(backgroundColorButton_), this, "背景顏色");
+    const QColor picked = QColorDialog::getColor(
+        buttonColor(backgroundColorButton_), this, settings_i18n::pickBackgroundColorTitle(uiLang_));
     if (picked.isValid()) {
         setButtonColor(backgroundColorButton_, picked);
     }
@@ -379,7 +407,7 @@ void SettingsDialog::openSourceSelection() {
         const QStringList selected = selectedLoopbackDeviceId_.isEmpty()
                                          ? QStringList{}
                                          : QStringList{selectedLoopbackDeviceId_};
-        SourceSelectionDialog dialog("選擇輸出回放來源", entries, selected, this);
+        SourceSelectionDialog dialog(settings_i18n::selectLoopback(uiLang_), entries, selected, uiLang_, this);
         if (dialog.exec() != QDialog::Accepted) {
             return;
         }
@@ -394,7 +422,7 @@ void SettingsDialog::openSourceSelection() {
         return;
     }
 
-    SourceSelectionDialog dialog("選擇應用來源", appSessions_, selectedAppNames_, this);
+    SourceSelectionDialog dialog(settings_i18n::selectApps(uiLang_), appSessions_, selectedAppNames_, uiLang_, this);
     if (dialog.exec() != QDialog::Accepted) {
         return;
     }
@@ -406,13 +434,13 @@ void SettingsDialog::openSourceSelection() {
 void SettingsDialog::refreshSourceSummary() {
     const QString mode = sourceModeCombo_->currentData().toString();
     if (mode == "microphone") {
-        sourceSummaryLabel_->setText("使用預設麥克風來源");
+        sourceSummaryLabel_->setText(settings_i18n::microphoneDefaultSummary(uiLang_));
         return;
     }
 
     if (mode == "loopback") {
         if (selectedLoopbackDeviceId_.isEmpty()) {
-            sourceSummaryLabel_->setText("使用預設輸出回放來源");
+            sourceSummaryLabel_->setText(settings_i18n::loopbackDefaultSummary(uiLang_));
             return;
         }
 
@@ -425,15 +453,16 @@ void SettingsDialog::refreshSourceSummary() {
         }
 
         if (label.isEmpty()) {
-            sourceSummaryLabel_->setText("已選擇裝置不可用，將回退預設來源");
+            sourceSummaryLabel_->setText(settings_i18n::loopbackMissingSummary(uiLang_));
         } else {
-            sourceSummaryLabel_->setText(QString("已選擇裝置: %1").arg(label));
+            sourceSummaryLabel_->setText(
+                QString("%1 %2").arg(settings_i18n::loopbackSelectedPrefix(uiLang_), label));
         }
         return;
     }
 
     if (selectedAppNames_.isEmpty()) {
-        sourceSummaryLabel_->setText("尚未選擇應用");
+        sourceSummaryLabel_->setText(settings_i18n::appNoneSummary(uiLang_));
     } else {
         QStringList labels;
         for (const QString &selected : selectedAppNames_) {
@@ -446,7 +475,8 @@ void SettingsDialog::refreshSourceSummary() {
             }
             labels.push_back(label.isEmpty() ? selected : label);
         }
-        sourceSummaryLabel_->setText(QString("已選擇應用: %1").arg(labels.join(", ")));
+        sourceSummaryLabel_->setText(
+            QString("%1 %2").arg(settings_i18n::appSelectedPrefix(uiLang_), labels.join(", ")));
     }
 }
 
@@ -472,3 +502,5 @@ QColor SettingsDialog::buttonColor(const QPushButton *button) const {
     }
     return QColor("#FFFFFF");
 }
+
+

@@ -7,11 +7,13 @@
 #include <QSize>
 #include <QString>
 #include <QTimer>
+#include <QToolButton>
 #include <QWidget>
 
 #include <deque>
 
 class QEvent;
+class QWheelEvent;
 
 class SubtitleOverlayWindow : public QWidget {
     Q_OBJECT
@@ -50,6 +52,7 @@ protected:
     void mouseMoveEvent(QMouseEvent *event) override;
     void mouseReleaseEvent(QMouseEvent *event) override;
     void leaveEvent(QEvent *event) override;
+    void wheelEvent(QWheelEvent *event) override;
 
 private slots:
     void onTick();
@@ -73,6 +76,11 @@ private:
     static QString normalizeInlineText(const QString &text);
     void trimHistory();
     int visibleLineCapacity() const;
+    float maxHistoryScrollOffset() const;
+    bool isAtBottom() const;
+    void scrollToBottom();
+    void updateJumpBottomButtonGeometry();
+    void updateJumpBottomButtonVisibility();
     int measureLineHeight(const QString &text, const QFontMetrics &fm, int width) const;
     QColor colorForKind(LineEntry::Kind kind) const;
     int hitTestEdges(const QPoint &pos) const;
@@ -82,7 +90,9 @@ private:
     std::deque<LineEntry> lines_;
     int lineHeight_{32};
     float scrollOffset_{0.0F};
+    float historyScrollOffset_{0.0F};
     float scrollSpeed_{2.8F};
+    QToolButton *jumpBottomButton_{nullptr};
 
     bool translationEnabled_{false};
     QString translationStyle_{"stacked"};

@@ -10,6 +10,7 @@
 #include <QPen>
 #include <QPixmap>
 
+#include "settings/i18n.h"
 #include "settings_dialog.h"
 #include "subtitle_overlay_window.h"
 
@@ -19,6 +20,7 @@ TrayController::TrayController(QApplication *app,
                                std::function<void(const RuntimeSettings &)> applySettings,
                                std::function<QList<SourceDeviceEntry>()> loopbackDeviceProvider,
                                std::function<QList<SourceDeviceEntry>()> appSessionProvider,
+                               std::function<QStringList()> modelCandidatesProvider,
                                QObject *parent)
         : QObject(parent),
             app_(app),
@@ -27,6 +29,7 @@ TrayController::TrayController(QApplication *app,
             applySettings_(std::move(applySettings)),
             loopbackDeviceProvider_(std::move(loopbackDeviceProvider)),
             appSessionProvider_(std::move(appSessionProvider)),
+            modelCandidatesProvider_(std::move(modelCandidatesProvider)),
             tray_(this) {
     if (app_ == nullptr || overlay_ == nullptr) {
         return;
@@ -87,14 +90,17 @@ void TrayController::openSettings() {
         loopbackDeviceProvider_ ? loopbackDeviceProvider_() : QList<SourceDeviceEntry>{};
     const QList<SourceDeviceEntry> appSessions =
         appSessionProvider_ ? appSessionProvider_() : QList<SourceDeviceEntry>{};
+    const QStringList modelCandidates = modelCandidatesProvider_ ? modelCandidatesProvider_() : QStringList{};
 
-    SettingsDialog dialog(initial, loopbackDevices, appSessions, overlay_);
+    SettingsDialog dialog(initial, loopbackDevices, appSessions, modelCandidates, overlay_);
     if (dialog.exec() != QDialog::Accepted) {
         return;
     }
 
     applySettings_(dialog.settings());
-    tray_.showMessage("Voice2Text", "設定已套用。", QSystemTrayIcon::Information, 1800);
+    const RuntimeSettings current = currentSettingsProvider_ ? currentSettingsProvider_() : RuntimeSettings{};
+    tray_.showMessage(
+        "Voice2Text", settings_i18n::settingsApplied(current.uiLanguage), QSystemTrayIcon::Information, 1800);
 }
 
 void TrayController::onTrayActivated(QSystemTrayIcon::ActivationReason reason) {

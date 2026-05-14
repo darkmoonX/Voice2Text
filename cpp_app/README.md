@@ -37,6 +37,14 @@ cd cpp_app
 .\build.ps1 -Gpu
 ```
 
+Build outputs:
+- MSVC GPU build: `build-vs-gpu\Release\voice2text_cpp.exe`
+- MSVC CPU build: `build-vs-cpu\Release\voice2text_cpp.exe`
+
+`build.ps1` now also:
+- syncs whisper/ggml DLLs from `build-*\bin\Release` into `build-*\Release`
+- runs `windeployqt` for Qt runtime deployment when available
+
 Explicit path overrides:
 
 ```powershell
@@ -57,28 +65,28 @@ cmake --build build-vs --config Release
 ## 4. Run
 
 ```powershell
-build-vs\Release\voice2text_cpp.exe --model-path C:\models\ggml-small.bin
+build-vs-gpu\Release\voice2text_cpp.exe --model-path C:\models\ggml-small.bin
 ```
 
 Optional flags:
 
 ```powershell
-build-vs\Release\voice2text_cpp.exe --model-path C:\models\ggml-medium.bin --translate --from-lang en --to-lang zh
-build-vs\Release\voice2text_cpp.exe --source-mode microphone
-build-vs\Release\voice2text_cpp.exe --source-mode app --source-apps chrome.exe,discord.exe
-build-vs\Release\voice2text_cpp.exe --list-app-sessions
-build-vs\Release\voice2text_cpp.exe --source-language ja
-build-vs\Release\voice2text_cpp.exe --source-language zh-hant
-build-vs\Release\voice2text_cpp.exe --source-language zh-hans
-build-vs\Release\voice2text_cpp.exe --segment-seconds 6 --hop-seconds 1.5
-build-vs\Release\voice2text_cpp.exe -mc 128 --entropy-thold 2.4 --logprob-thold -1.0 --no-speech-thold 0.6
-build-vs\Release\voice2text_cpp.exe --temperature 0.0 --beam-size 1 --best-of 1
-build-vs\Release\voice2text_cpp.exe --overlap-merge-method replace-window
-build-vs\Release\voice2text_cpp.exe --overlap-merge-method suffix-overlap
-build-vs\Release\voice2text_cpp.exe --overlap-merge-method fuzzy-overlap
-build-vs\Release\voice2text_cpp.exe --overlap-merge-method append-only
-build-vs\Release\voice2text_cpp.exe --bilingual-style translation-only
-build-vs\Release\voice2text_cpp.exe --source-text-color "#F0F2F5" --translated-text-color "#FFD98A" --background-color "#0A101A" --overlay-opacity 0.8
+build-vs-gpu\Release\voice2text_cpp.exe --model-path C:\models\ggml-medium.bin --translate --from-lang en --to-lang zh
+build-vs-gpu\Release\voice2text_cpp.exe --source-mode microphone
+build-vs-gpu\Release\voice2text_cpp.exe --source-mode app --source-apps chrome.exe,discord.exe
+build-vs-gpu\Release\voice2text_cpp.exe --list-app-sessions
+build-vs-gpu\Release\voice2text_cpp.exe --source-language ja
+build-vs-gpu\Release\voice2text_cpp.exe --source-language zh-hant
+build-vs-gpu\Release\voice2text_cpp.exe --source-language zh-hans
+build-vs-gpu\Release\voice2text_cpp.exe --segment-seconds 6 --hop-seconds 1.5
+build-vs-gpu\Release\voice2text_cpp.exe -mc 128 --entropy-thold 2.4 --logprob-thold -1.0 --no-speech-thold 0.6
+build-vs-gpu\Release\voice2text_cpp.exe --temperature 0.0 --beam-size 1 --best-of 1
+build-vs-gpu\Release\voice2text_cpp.exe --overlap-merge-method stable-tail
+build-vs-gpu\Release\voice2text_cpp.exe --overlap-merge-method commit-on-break
+build-vs-gpu\Release\voice2text_cpp.exe --overlap-merge-method replace-window   # legacy alias -> stable-tail
+build-vs-gpu\Release\voice2text_cpp.exe --overlap-merge-method append-only      # legacy alias -> commit-on-break
+build-vs-gpu\Release\voice2text_cpp.exe --bilingual-style translation-only
+build-vs-gpu\Release\voice2text_cpp.exe --source-text-color "#F0F2F5" --translated-text-color "#FFD98A" --background-color "#0A101A" --overlay-opacity 0.8
 ```
 
 If built via MinGW fallback, run with Qt/MinGW runtime paths:
@@ -122,31 +130,34 @@ Rolling model:
 - Lock ratio uses `hopMs / windowMs`, clamped to `[0.05, 0.95]`.
 
 Methods:
-- `append-only`
-	- Keeps appending by exact overlap.
-	- Most conservative, but may retain old recognition mistakes longer.
-- `suffix-overlap`
-	- Uses strict suffix/prefix exact overlap.
-	- Best when recognition output is stable and deterministic.
-- `fuzzy-overlap`
-	- Uses approximate overlap matching (LCS similarity) when exact overlap misses.
-	- Better resilience to minor wording drift.
-- `replace-window`
-	- Splits previous overlap tail into stable head + mutable tail, then reconciles mutable part with latest chunk.
-	- Current factors:
-		- `preserveRatio = clamp(lockRatio * 2.0, 0.22, 0.55)`
-		- `keepChars = clamp(round(previousTailLen * preserveRatio), 10, previousTailLen)`
-	- If overlap confidence is weak (`mergeByFuzzyOverlap` falls back to latest), engine skips about 18% leading chars of latest chunk before merge, reducing low-context head pollution at the start of new segments.
+- `stable-tail` (recommended)
+	- Locks a prefix from current rolling window and only reconciles mutable tail with incoming segment.
+	- Includes extra overlap repair and repeated-tail collapse for mixed English/CJK transcripts.
+- `commit-on-break`
+	- Keeps incremental append behavior in active sentence and commits/freeze on sentence break timing.
+	- Lower rewrite aggressiveness, useful when you prefer conservative transcript evolution.
+
+Legacy aliases:
+- `replace-window`, `suffix-overlap`, `fuzzy-overlap` -> `stable-tail`
+- `append-only` -> `commit-on-break`
 
 ## 7. Current status
 
 - Overlay UI: implemented (drag + edge resize + source/translated colors + auto-fit history).
-- Capture mode: `loopback` / `microphone` / `app` implemented; `app` uses Windows Core Audio process loopback (first running match from `--source-apps`) when available, and auto-falls back to default render loopback on toolchains/SDKs that do not expose process-loopback APIs.
+- Capture mode: `loopback` / `microphone` / `app` implemented; `app` uses Windows Core Audio process loopback (first running match from `--source-apps`) when available.
+- App-mode strict isolation fallback policy:
+	- if process-loopback is unavailable, runtime auto-selects a VB-CABLE loopback endpoint when available.
+	- if neither process-loopback nor VB-CABLE is available, app capture aborts (no mixed default-loopback fallback).
 - whisper.cpp bridge: implemented with configurable segment/hop windows and selectable overlap merge methods:
-	- `replace-window`: lock old prefix, replace recent overlap tail with latest window (recommended)
-	- `suffix-overlap`: exact suffix/prefix merge on overlap tail
-	- `fuzzy-overlap`: approximate overlap merge for minor recognition drift
-	- `append-only`: conservative append behavior
+	- `stable-tail`: lock stable prefix and reconcile mutable tail (recommended)
+	- `commit-on-break`: conservative append model with sentence-break commit
+- Startup/settings status now includes effective model label (`model=...`) after runtime apply.
+- Architecture improvement: `RuntimeSettings` and merge-method normalization are now centralized in `src/runtime/runtime_settings.*` instead of being embedded in settings UI.
+- Architecture improvement (round 2): audio/session discovery moved to `src/audio/discovery.*`; runtime restart-decision mapping moved to `src/runtime/runtime_update.*`.
+- Architecture improvement (round 3):
+	- settings payload mapping/validation moved to `src/settings/mapping.*`.
+	- settings UI string resources moved to `src/settings/i18n.*` and wired into Settings dialog/tray for zh/en labels.
+	- `RuntimeSettings` now carries `uiLanguage` and settings payload mapping persists this field.
 - Translation stage: implemented via Python bridge (`tools/argos_translate_bridge.py`) to Argos Translate, with one-time package auto-install support and stacked/translation-only render style wiring.
 - Status/error logging: persisted to `cpp_app/logs/voice2text_cpp.log`, including `STT:` and `TRANSLATE:` lines.
 - Translation bridge runtime picks Python from `VOICE2TEXT_PYTHON`, then `python`, then `py -3`; if Argos is unavailable it degrades to STT-only and reports the reason in status logs.

@@ -2,6 +2,7 @@
 
 #include <QByteArray>
 #include <QObject>
+#include <QRegularExpression>
 #include <QString>
 
 #include <cstdint>
@@ -16,8 +17,11 @@ public:
     explicit WhisperEngine(QString modelPath,
                            QString sourceLanguage = "auto",
                            float segmentSeconds = 6.0F,
-                           QString overlapMergeMethod = "replace-window",
+                           QString overlapMergeMethod = "stable-tail",
                            float hopSeconds = 1.5F,
+                           bool vadEnabled = true,
+                           bool vadAdaptiveEnabled = true,
+                           float vadRmsThreshold = 0.010F,
                            WhisperRuntimeParams runtimeParams = {},
                            QObject *parent = nullptr);
     ~WhisperEngine() override;
@@ -38,18 +42,25 @@ private:
     std::vector<float> resampleTo16k(const std::vector<float> &input, int sampleRate) const;
     QString mergeIncremental(const QString &incoming);
     float lockRatio() const;
-    QString mergeReplaceWindow(const QString &overlapTail,
-                               const QString &incoming,
-                               float lockRatio) const;
+    QString mergeStableTail(const QString &overlapTail,
+                            const QString &incoming,
+                            float lockRatio) const;
     QString mergeByExactOverlap(const QString &base, const QString &incoming) const;
     QString mergeByFuzzyOverlap(const QString &base, const QString &incoming) const;
+    QString normalizeOutputText(const QString &text) const;
+    QString collapseRepeatedPhrases(const QString &text) const;
+    QString collapseRepeatedCharSpans(const QString &text) const;
+    int softSuffixPrefixOverlap(const QString &base, const QString &incoming) const;
+    bool containsCjk(const QString &text) const;
+    bool shouldProcessByVad(const std::vector<float> &audio16k);
+    QString joinSeparator(const QString &base, const QString &incoming) const;
     QString normalizeChineseScript(const QString &text) const;
     static int overlapPrefixSuffix(const QString &base, const QString &incoming);
 
     QString modelPath_;
     QString sourceLanguage_{"auto"};
     QString chineseScript_{"none"};
-    QString overlapMergeMethod_{"replace-window"};
+    QString overlapMergeMethod_{"stable-tail"};
     WhisperRuntimeParams runtimeParams_{};
     std::vector<int16_t> pcmBuffer_;
     int inputSampleRate_{16000};
@@ -59,6 +70,10 @@ private:
     QString activeWindowTranscript_;
     QString lastEmittedTranscript_;
     bool sttEnabled_{false};
+    bool vadEnabled_{true};
+    bool vadAdaptiveEnabled_{true};
+    float vadRmsThreshold_{0.010F};
+    float vadAdaptiveNoiseFloor_{0.0F};
 
 #if HAS_WHISPER
     struct whisper_context *ctx_{nullptr};

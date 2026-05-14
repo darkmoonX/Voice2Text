@@ -1,5 +1,6 @@
 param(
     [switch]$Gpu = $true,
+    [switch]$CpuOnly,
     [string]$Qt6Dir = "",
     [string]$CudaRoot = "D:\CUDA",
     [string]$VsRoot = "D:\Microsoft Visual Studio",
@@ -9,6 +10,57 @@ param(
 
 $ErrorActionPreference = "Stop"
 Set-Location $PSScriptRoot
+
+function Resolve-WinDeployQt {
+    param([string]$ResolvedQt6Dir)
+    if (-not $ResolvedQt6Dir) { return "" }
+    $cmakeQt6Dir = [System.IO.DirectoryInfo]::new($ResolvedQt6Dir)
+    $qtRoot = $cmakeQt6Dir.Parent.Parent.Parent.FullName
+    $candidate = Join-Path $qtRoot "bin\\windeployqt.exe"
+    if (Test-Path $candidate) { return $candidate }
+    return ""
+}
+
+function Sync-NativeDepsToExeDir {
+    param([string]$BuildDir)
+    $exePathCandidates = @(
+        (Join-Path $BuildDir "Release\\voice2text_cpp.exe"),
+        (Join-Path $BuildDir "voice2text_cpp.exe")
+    )
+    $exePath = $exePathCandidates | Where-Object { Test-Path $_ } | Select-Object -First 1
+    if (-not $exePath) { return }
+    $exeDir = Split-Path -Path $exePath -Parent
+
+    $dllDirs = @(
+        (Join-Path $BuildDir "bin\\Release"),
+        (Join-Path $BuildDir "bin")
+    ) | Where-Object { Test-Path $_ }
+
+    foreach ($dllDir in $dllDirs) {
+        Get-ChildItem -Path $dllDir -Filter *.dll -File -ErrorAction SilentlyContinue | ForEach-Object {
+            Copy-Item -Path $_.FullName -Destination (Join-Path $exeDir $_.Name) -Force
+        }
+    }
+}
+
+function Deploy-QtRuntime {
+    param([string]$BuildDir, [string]$ResolvedQt6Dir)
+    $exePathCandidates = @(
+        (Join-Path $BuildDir "Release\\voice2text_cpp.exe"),
+        (Join-Path $BuildDir "voice2text_cpp.exe")
+    )
+    $exePath = $exePathCandidates | Where-Object { Test-Path $_ } | Select-Object -First 1
+    if (-not (Test-Path $exePath)) { return }
+    $windeployqt = Resolve-WinDeployQt -ResolvedQt6Dir $ResolvedQt6Dir
+    if (-not $windeployqt) {
+        Write-Warning "windeployqt.exe not found. Runtime may require manual PATH setup."
+        return
+    }
+    & $windeployqt --release --no-translations --no-system-d3d-compiler --no-opengl-sw $exePath | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+        Write-Warning "windeployqt failed. Runtime may require manual PATH setup."
+    }
+}
 
 function Resolve-Qt6Dir {
     param([string]$PreferredQt6Dir)
@@ -176,6 +228,10 @@ if (Test-Path $CudaRoot) {
     }
 }
 
+if ($CpuOnly) {
+    $Gpu = $false
+}
+
 if ($Gpu -and -not (Get-Command nvcc -ErrorAction SilentlyContinue)) {
     Write-Warning "nvcc not found in PATH. Falling back to CPU build."
     $Gpu = $false
@@ -273,6 +329,8 @@ if ($LASTEXITCODE -ne 0) {
             if ($LASTEXITCODE -ne 0) {
                 Write-Warning "MSVC fallback failed. cl.exe or Windows SDK toolset may be missing from installed workloads."
             } else {
+                Sync-NativeDepsToExeDir -BuildDir $fallbackBuildDir
+                Deploy-QtRuntime -BuildDir $fallbackBuildDir -ResolvedQt6Dir $resolvedQt6Dir
                 Write-Host "Build completed via MSVC fallback. Output directory: $fallbackBuildDir"
                 exit 0
             }
@@ -303,6 +361,7 @@ if ($LASTEXITCODE -ne 0) {
         $env:Qt6_DIR = $oldQt6Dir
 
         if ($LASTEXITCODE -eq 0) {
+            Sync-NativeDepsToExeDir -BuildDir $mingwBuildDir
             Write-Host "Build completed via MinGW fallback. Output directory: $mingwBuildDir"
             exit 0
         }
@@ -319,5 +378,8 @@ cmake --build $buildDir --config Release
 if ($LASTEXITCODE -ne 0) {
     throw "CMake build failed."
 }
+
+Sync-NativeDepsToExeDir -BuildDir $buildDir
+Deploy-QtRuntime -BuildDir $buildDir -ResolvedQt6Dir $resolvedQt6Dir
 
 Write-Host "Build completed. Output directory: $buildDir"

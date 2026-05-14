@@ -1,4 +1,5 @@
 #include "audio/loopback_capture.h"
+#include "audio/discovery.h"
 
 #include <Windows.h>
 #include <audioclient.h>
@@ -399,7 +400,7 @@ void LoopbackCapture::captureLoop() {
     QString modeLabel = "loopback";
     const REFERENCE_TIME bufferDuration = 2000000;
     bool useDefaultEndpoint = true;
-    const QString requestedDeviceId = targetDeviceId_.trimmed();
+    QString requestedDeviceId = targetDeviceId_.trimmed();
 
     if (mode_ == CaptureSourceMode::App) {
         if (targetAppNames_.isEmpty()) {
@@ -422,10 +423,16 @@ void LoopbackCapture::captureLoop() {
                 QString("Process loopback unavailable for pid %1: %2")
                     .arg(static_cast<qulonglong>(targetPid))
                     .arg(activateError));
-            emit statusRaised(
-                "Falling back to default render loopback (app-mode metadata only, not strict isolation)."
-            );
-            modeLabel = "app-fallback-loopback";
+            if (requestedDeviceId.isEmpty()) {
+                requestedDeviceId = discoverVirtualCableLoopbackDeviceId();
+            }
+            if (requestedDeviceId.isEmpty()) {
+                emit errorRaised(
+                    "App mode requires process loopback or VB-CABLE endpoint for strict isolation. Capture aborted.");
+                goto cleanup;
+            }
+            emit statusRaised("Process loopback unavailable; fallback to VB-CABLE loopback endpoint.");
+            modeLabel = "app-virtual-cable-loopback";
             useDefaultEndpoint = true;
         } else {
             useDefaultEndpoint = false;
@@ -467,15 +474,24 @@ void LoopbackCapture::captureLoop() {
         if (canUseConfiguredDevice) {
             hr = enumerator->GetDevice(reinterpret_cast<LPCWSTR>(requestedDeviceId.utf16()), &device);
             if (FAILED(hr)) {
+                if (mode_ == CaptureSourceMode::App) {
+                    emit errorRaised("App mode VB-CABLE endpoint unavailable. Capture aborted.");
+                    goto cleanup;
+                }
                 emit statusRaised("Selected output device unavailable, fallback to default endpoint.");
             } else if (mode_ == CaptureSourceMode::Loopback) {
                 modeLabel = "loopback-selected";
             } else if (mode_ == CaptureSourceMode::App && useDefaultEndpoint) {
-                modeLabel = "app-fallback-selected-loopback";
+                modeLabel = "app-virtual-cable-loopback";
             }
         }
 
         if (device == nullptr) {
+            if (mode_ == CaptureSourceMode::App) {
+                emit errorRaised(
+                    "App mode strict isolation refused default endpoint fallback. Configure VB-CABLE and retry.");
+                goto cleanup;
+            }
             hr = enumerator->GetDefaultAudioEndpoint(dataFlow, eConsole, &device);
             if (FAILED(hr)) {
                 emit errorRaised("Unable to access default audio endpoint.");

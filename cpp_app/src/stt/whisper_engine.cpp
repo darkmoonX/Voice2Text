@@ -8,6 +8,8 @@
 
 #include <QStringList>
 
+#include "runtime/runtime_settings.h"
+
 #if defined(Q_OS_WIN)
 #ifndef NOMINMAX
 #define NOMINMAX
@@ -30,12 +32,18 @@ WhisperEngine::WhisperEngine(QString modelPath,
                                                          float segmentSeconds,
                                                          QString overlapMergeMethod,
                                                          float hopSeconds,
+                                                         bool vadEnabled,
+                                                         bool vadAdaptiveEnabled,
+                                                         float vadRmsThreshold,
                                                          WhisperRuntimeParams runtimeParams,
                                                          QObject *parent)
         : QObject(parent),
             modelPath_(std::move(modelPath)),
             sourceLanguage_(sourceLanguage.trimmed().toLower()),
             overlapMergeMethod_(overlapMergeMethod.trimmed().toLower()),
+            vadEnabled_(vadEnabled),
+            vadAdaptiveEnabled_(vadAdaptiveEnabled),
+            vadRmsThreshold_(std::clamp(vadRmsThreshold, 0.001F, 0.2F)),
             runtimeParams_(runtimeParams) {
         if (sourceLanguage_.isEmpty()) {
                 sourceLanguage_ = "auto";
@@ -49,14 +57,7 @@ WhisperEngine::WhisperEngine(QString modelPath,
             chineseScript_ = "hans";
         }
 
-        if (overlapMergeMethod_.isEmpty()) {
-            overlapMergeMethod_ = "replace-window";
-        }
-
-        if (overlapMergeMethod_ != "replace-window" && overlapMergeMethod_ != "suffix-overlap" &&
-            overlapMergeMethod_ != "fuzzy-overlap" && overlapMergeMethod_ != "append-only") {
-            overlapMergeMethod_ = "replace-window";
-        }
+        overlapMergeMethod_ = normalizeOverlapMergeMethod(overlapMergeMethod_);
 
         windowMs_ = std::max(500, static_cast<int>(segmentSeconds * 1000.0F));
         hopMs_ = std::max(100, static_cast<int>(hopSeconds * 1000.0F));
@@ -78,6 +79,7 @@ bool WhisperEngine::initialize() {
     activeWindowTranscript_.clear();
     lastEmittedTranscript_.clear();
     pcmBuffer_.clear();
+    vadAdaptiveNoiseFloor_ = 0.0F;
 
     if (modelPath_.trimmed().isEmpty()) {
         sttEnabled_ = false;
@@ -145,6 +147,10 @@ void WhisperEngine::processIfReady() {
 
         const std::vector<float> audio16k = resampleTo16k(mono, inputSampleRate_);
         if (audio16k.empty()) {
+            continue;
+        }
+
+        if (!shouldProcessByVad(audio16k)) {
             continue;
         }
 
@@ -261,9 +267,10 @@ QString WhisperEngine::mergeIncremental(const QString &incoming) {
         return lastEmittedTranscript_;
     }
 
-    if (overlapMergeMethod_ == "append-only") {
+    if (overlapMergeMethod_ == "commit-on-break") {
         const QString combinedPrev = mergeByExactOverlap(frozenTranscript_, activeWindowTranscript_);
         QString combined = mergeByExactOverlap(combinedPrev, cleaned);
+        combined = normalizeOutputText(combined);
         if (combined.size() > 1800) {
             combined = combined.right(1800);
         }
@@ -291,19 +298,14 @@ QString WhisperEngine::mergeIncremental(const QString &incoming) {
         }
     }
 
-    if (overlapMergeMethod_ == "suffix-overlap") {
-        activeWindowTranscript_ = mergeByExactOverlap(overlapTail, cleaned);
-    } else if (overlapMergeMethod_ == "fuzzy-overlap") {
-        activeWindowTranscript_ = mergeByFuzzyOverlap(overlapTail, cleaned);
-    } else {
-        activeWindowTranscript_ = mergeReplaceWindow(overlapTail, cleaned, lockRatio());
-    }
+    activeWindowTranscript_ = mergeStableTail(overlapTail, cleaned, lockRatio());
 
     if (activeWindowTranscript_.size() > 1200) {
         activeWindowTranscript_ = activeWindowTranscript_.right(1200);
     }
 
     QString combined = mergeByExactOverlap(frozenTranscript_, activeWindowTranscript_);
+    combined = normalizeOutputText(combined);
     if (combined.size() > 1800) {
         combined = combined.right(1800);
     }
@@ -325,9 +327,9 @@ float WhisperEngine::lockRatio() const {
     return std::clamp(ratio, 0.05F, 0.95F);
 }
 
-QString WhisperEngine::mergeReplaceWindow(const QString &overlapTail,
-                                          const QString &incoming,
-                                          float lockRatio) const {
+QString WhisperEngine::mergeStableTail(const QString &overlapTail,
+                                       const QString &incoming,
+                                       float lockRatio) const {
     const QString previous = overlapTail.simplified();
     const QString latest = incoming.simplified();
 
@@ -338,23 +340,53 @@ QString WhisperEngine::mergeReplaceWindow(const QString &overlapTail,
         return previous;
     }
 
-    const float preserveRatio = std::clamp(lockRatio * 2.0F, 0.22F, 0.55F);
+    float confidence = 0.0F;
+    {
+        const int exact = overlapPrefixSuffix(previous, latest);
+        if (exact > 0) {
+            const int minLen = std::max<int>(1, std::min<int>(static_cast<int>(previous.size()),
+                                                              static_cast<int>(latest.size())));
+            confidence = std::min(1.0F, static_cast<float>(exact) /
+                                            static_cast<float>(minLen));
+        } else {
+            const int probe = std::min<int>(48, std::min<int>(static_cast<int>(previous.size()),
+                                                              static_cast<int>(latest.size())));
+            if (probe >= 4) {
+                const QString tail = previous.right(probe);
+                const QString head = latest.left(probe);
+                int same = 0;
+                for (int i = 0; i < probe; ++i) {
+                    if (tail.at(i) == head.at(i)) {
+                        ++same;
+                    }
+                }
+                confidence = static_cast<float>(same) / static_cast<float>(probe);
+            }
+        }
+    }
+    const float confidenceScale = 0.7F + 0.8F * confidence;
+    const float preserveRatio = std::clamp(lockRatio * 1.35F * confidenceScale, 0.10F, 0.38F);
     int keepChars = static_cast<int>(std::round(previous.size() * preserveRatio));
-    keepChars = std::clamp(keepChars, 10, static_cast<int>(previous.size()));
+    const int minKeep = containsCjk(previous + latest) ? 4 : 6;
+    keepChars = std::clamp(keepChars, minKeep, static_cast<int>(previous.size()));
+    if (previous.contains(' ') && keepChars < previous.size()) {
+        const int leftSpace = previous.lastIndexOf(' ', keepChars);
+        const int rightSpace = previous.indexOf(' ', keepChars);
+        if (leftSpace >= 0 && keepChars - leftSpace <= 6) {
+            keepChars = leftSpace + 1;
+        } else if (rightSpace >= 0 && rightSpace - keepChars <= 6) {
+            keepChars = rightSpace + 1;
+        }
+    }
 
     const QString stableHead = previous.left(keepChars).trimmed();
     const QString mutableTail = previous.mid(keepChars).trimmed();
 
     QString reconciledTail = mergeByFuzzyOverlap(mutableTail, latest);
     if (reconciledTail == latest && !mutableTail.isEmpty()) {
-        // If overlap is weak, avoid trusting unstable leading tokens from latest chunk.
-        const int skipChars = std::max(4, static_cast<int>(std::round(latest.size() * 0.18F)));
-        const QString conservative = latest.mid(skipChars).trimmed();
-        if (!conservative.isEmpty()) {
-            reconciledTail = mergeByExactOverlap(mutableTail, conservative);
-        }
-        if (reconciledTail.isEmpty()) {
-            reconciledTail = mutableTail;
+        const QString exactTail = mergeByExactOverlap(mutableTail, latest);
+        if (!exactTail.isEmpty() && exactTail != mutableTail) {
+            reconciledTail = exactTail;
         }
     }
 
@@ -392,17 +424,7 @@ QString WhisperEngine::mergeByExactOverlap(const QString &base, const QString &i
         return left;
     }
 
-    QString separator;
-    if (!left.isEmpty()) {
-        const QChar last = left.at(left.size() - 1);
-        if (QStringLiteral("。！？，,. ").contains(last)) {
-            separator = "";
-        } else {
-            separator = " ";
-        }
-    }
-
-    return (left + separator + right).trimmed();
+    return (left + joinSeparator(left, right) + right).trimmed();
 }
 
 QString WhisperEngine::mergeByFuzzyOverlap(const QString &base, const QString &incoming) const {
@@ -479,7 +501,153 @@ QString WhisperEngine::mergeByFuzzyOverlap(const QString &base, const QString &i
         return (left + right.mid(bestSize)).trimmed();
     }
 
+    const int softOverlap = softSuffixPrefixOverlap(left, right);
+    if (softOverlap > 0) {
+        return (left + right.mid(softOverlap)).trimmed();
+    }
+
     return right;
+}
+
+bool WhisperEngine::shouldProcessByVad(const std::vector<float> &audio16k) {
+    if (!vadEnabled_ || audio16k.empty()) {
+        return true;
+    }
+
+    float rms = 0.0F;
+    for (float v : audio16k) {
+        rms += v * v;
+    }
+    rms = std::sqrt(rms / static_cast<float>(audio16k.size()));
+
+    float threshold = vadRmsThreshold_;
+    if (vadAdaptiveEnabled_) {
+        if (vadAdaptiveNoiseFloor_ <= 0.0F) {
+            vadAdaptiveNoiseFloor_ = rms;
+        } else {
+            vadAdaptiveNoiseFloor_ = vadAdaptiveNoiseFloor_ * 0.92F + rms * 0.08F;
+        }
+        const float adaptive = vadAdaptiveNoiseFloor_ * 2.6F + 0.002F;
+        threshold = std::clamp(std::max(vadRmsThreshold_, adaptive), 0.001F, 0.2F);
+    }
+
+    return rms >= threshold;
+}
+
+QString WhisperEngine::normalizeOutputText(const QString &text) const {
+    const QString cleaned = text.simplified();
+    if (cleaned.isEmpty()) {
+        return {};
+    }
+    return collapseRepeatedCharSpans(collapseRepeatedPhrases(cleaned)).simplified();
+}
+
+QString WhisperEngine::collapseRepeatedPhrases(const QString &text) const {
+    const QStringList tokens = text.split(' ', Qt::SkipEmptyParts);
+    if (tokens.size() < 6) {
+        return text;
+    }
+
+    QList<QString> parts;
+    for (const QString &token : tokens) {
+        parts.push_back(token);
+    }
+
+    bool changed = true;
+    while (changed) {
+        changed = false;
+        const int maxN = std::min<int>(14, static_cast<int>(parts.size() / 2));
+        for (int n = maxN; n >= 2 && !changed; --n) {
+            for (int i = 0; i + 2 * n <= static_cast<int>(parts.size());) {
+                bool same = true;
+                for (int k = 0; k < n; ++k) {
+                    if (parts[i + k] != parts[i + n + k]) {
+                        same = false;
+                        break;
+                    }
+                }
+                if (same) {
+                    for (int k = 0; k < n; ++k) {
+                        parts.removeAt(i + n);
+                    }
+                    changed = true;
+                } else {
+                    ++i;
+                }
+            }
+        }
+    }
+
+    return parts.join(" ");
+}
+
+QString WhisperEngine::collapseRepeatedCharSpans(const QString &text) const {
+    QString collapsed = text;
+    for (int loop = 0; loop < 3; ++loop) {
+        bool changed = false;
+        const int maxSize = std::min<int>(static_cast<int>(collapsed.size() / 2), 80);
+        for (int size = maxSize; size > 2; --size) {
+            const QString left = collapsed.mid(collapsed.size() - 2 * size, size);
+            const QString right = collapsed.right(size);
+            if (left.trimmed().isEmpty() || right.trimmed().isEmpty()) {
+                continue;
+            }
+            if (left == right) {
+                collapsed = collapsed.left(collapsed.size() - size).trimmed();
+                changed = true;
+                break;
+            }
+        }
+        if (!changed) {
+            break;
+        }
+    }
+    return collapsed;
+}
+
+int WhisperEngine::softSuffixPrefixOverlap(const QString &base, const QString &incoming) const {
+    const int maxLen = std::min<int>(std::min<int>(static_cast<int>(base.size()),
+                                                    static_cast<int>(incoming.size())),
+                                     80);
+    if (maxLen < 3) {
+        return 0;
+    }
+
+    const bool cjk = containsCjk(base + incoming);
+    const int minLen = cjk ? 2 : 4;
+    const float threshold = cjk ? 0.78F : 0.84F;
+
+    for (int size = maxLen; size >= minLen; --size) {
+        const QString tail = base.right(size);
+        const QString head = incoming.left(size);
+        int same = 0;
+        for (int i = 0; i < size; ++i) {
+            if (tail.at(i) == head.at(i)) {
+                ++same;
+            }
+        }
+        if (static_cast<float>(same) / static_cast<float>(size) >= threshold) {
+            return size;
+        }
+    }
+    return 0;
+}
+
+bool WhisperEngine::containsCjk(const QString &text) const {
+    static const QRegularExpression re(
+        QStringLiteral("[\\x{4E00}-\\x{9FFF}\\x{3040}-\\x{30FF}\\x{AC00}-\\x{D7A3}]"));
+    return re.match(text).hasMatch();
+}
+
+QString WhisperEngine::joinSeparator(const QString &base, const QString &incoming) const {
+    if (base.endsWith('?') || base.endsWith('!') || base.endsWith(',') || base.endsWith('.') ||
+        base.endsWith(' ')) {
+        return {};
+    }
+    if (containsCjk(base.right(2) + incoming.left(2))) {
+        return {};
+    }
+    return " ";
 }
 
 int WhisperEngine::overlapPrefixSuffix(const QString &base, const QString &incoming) {
@@ -548,3 +716,4 @@ QString WhisperEngine::normalizeChineseScript(const QString &text) const {
     return text;
 #endif
 }
+
