@@ -78,6 +78,54 @@ class AdaptiveRMSGate(VADStage):
             alpha = 0.01
         self._noise_floor = (1.0 - alpha) * floor + alpha * rms
 
+class SileroVADGate(VADStage):
+    name = 'silero-vad'
+
+    def __init__(self, *, threshold: float=0.5, min_speech_ms: int=120, min_silence_ms: int=90) -> None:
+        self._threshold = float(np.clip(threshold, 0.05, 0.95))
+        self._min_speech_ms = max(30, int(min_speech_ms))
+        self._min_silence_ms = max(30, int(min_silence_ms))
+        self._model = None
+        self._get_speech_timestamps = None
+        try:
+            from silero_vad import load_silero_vad, get_speech_timestamps  # type: ignore
+            self._model = load_silero_vad()
+            self._get_speech_timestamps = get_speech_timestamps
+        except Exception:
+            self._model = None
+            self._get_speech_timestamps = None
+
+    @property
+    def available(self) -> bool:
+        return self._model is not None and self._get_speech_timestamps is not None
+
+    def evaluate(self, audio: np.ndarray, sample_rate: int) -> VADStepResult:
+        if audio.size == 0:
+            return VADStepResult(name=self.name, passed=False, reason='empty-audio', metrics={'speech_samples': 0.0, 'speech_ratio': 0.0, 'threshold': self._threshold})
+        if not self.available:
+            return VADStepResult(name=self.name, passed=True, reason='silero-unavailable-bypass', metrics={'threshold': self._threshold})
+        try:
+            timestamps = self._get_speech_timestamps(
+                audio,
+                self._model,
+                threshold=self._threshold,
+                sampling_rate=sample_rate,
+                min_speech_duration_ms=self._min_speech_ms,
+                min_silence_duration_ms=self._min_silence_ms,
+            )
+        except Exception:
+            return VADStepResult(name=self.name, passed=True, reason='silero-error-bypass', metrics={'threshold': self._threshold})
+
+        speech_samples = 0
+        for item in timestamps or []:
+            start = int(item.get('start', 0) or 0)
+            end = int(item.get('end', 0) or 0)
+            if end > start:
+                speech_samples += (end - start)
+        ratio = float(speech_samples) / float(max(1, int(audio.size)))
+        passed = speech_samples > 0
+        return VADStepResult(name=self.name, passed=passed, reason='speech-detected' if passed else 'silero-no-speech', metrics={'speech_samples': float(speech_samples), 'speech_ratio': ratio, 'threshold': self._threshold})
+
 class SherpaNoiseGuard(VADStage):
     name = 'sherpa-noise-guard'
 
@@ -139,10 +187,22 @@ def create_vad_pipeline(config: RuntimeConfig, provider: STTProvider) -> VADPipe
     """Build VAD stage list from runtime config and active provider."""
     if not bool(config.vad_enabled):
         return VADPipeline([])
-    if bool(getattr(config, 'vad_adaptive_enabled', True)):
-        stages: list[VADStage] = [AdaptiveRMSGate(base_threshold=config.vad_rms_threshold, min_threshold=getattr(config, 'vad_adaptive_min_threshold', 0.004), max_threshold=getattr(config, 'vad_adaptive_max_threshold', 0.08), noise_multiplier=getattr(config, 'vad_adaptive_noise_multiplier', 2.6), margin=getattr(config, 'vad_adaptive_margin', 0.002))]
-    else:
+
+    backend = str(getattr(config, 'vad_backend', 'silero') or 'silero').strip().lower()
+    stages: list[VADStage]
+    if backend == 'silero':
+        silero = SileroVADGate(threshold=0.5)
+        if silero.available:
+            stages = [silero]
+        else:
+            backend = 'adaptive-rms'
+    if backend == 'adaptive-rms':
+        stages = [AdaptiveRMSGate(base_threshold=config.vad_rms_threshold, min_threshold=getattr(config, 'vad_adaptive_min_threshold', 0.004), max_threshold=getattr(config, 'vad_adaptive_max_threshold', 0.08), noise_multiplier=getattr(config, 'vad_adaptive_noise_multiplier', 2.6), margin=getattr(config, 'vad_adaptive_margin', 0.002))]
+    elif backend == 'rms':
         stages = [RMSGate(config.vad_rms_threshold)]
+    elif backend != 'silero':
+        stages = [AdaptiveRMSGate(base_threshold=config.vad_rms_threshold, min_threshold=getattr(config, 'vad_adaptive_min_threshold', 0.004), max_threshold=getattr(config, 'vad_adaptive_max_threshold', 0.08), noise_multiplier=getattr(config, 'vad_adaptive_noise_multiplier', 2.6), margin=getattr(config, 'vad_adaptive_margin', 0.002))]
+
     if provider == 'sherpa-onnx' and bool(config.vad_sherpa_noise_guard):
         stages.append(SherpaNoiseGuard())
     return VADPipeline(stages)

@@ -126,6 +126,9 @@ python main.py --list-app-sessions
 python main.py --stt-health-check --stt-health-check-scope all
 python main.py --stt-health-check --stt-health-check-scope active --stt-provider sherpa-onnx
 python main.py --stt-provider whisper --model small
+python main.py --stt-provider whisperx --model small --stt-auto-download
+python main.py --stt-provider whisperx --model small --whisperx-forced-alignment --whisperx-vad
+python main.py --stt-provider whisperx --model small --whisperx-diarization --whisperx-hf-token <HF_TOKEN>
 python main.py --stt-provider whisper --stt-variant gpu --model small
 python main.py --stt-provider whisper --stt-variant cpu --model small
 python main.py --stt-provider vosk --stt-model-path C:\models\vosk-model-small-en-us-0.15
@@ -258,7 +261,7 @@ Legacy aliases (for backward compatibility):
 - CUDA compatibility fallback logic is only applied to the whisper provider.
 - Sherpa-ONNX GPU requires CUDAExecutionProvider and a sherpa-onnx build compiled with `-DSHERPA_ONNX_ENABLE_GPU=ON`; otherwise runtime auto-falls back to CPU.
 - FunASR GPU requires a CUDA-enabled torch build; if `torch.cuda.is_available()` is false, runtime auto-falls back to CPU.
-- STT provider can be selected at startup with `--stt-provider` (`whisper`, `vosk`, `sherpa-onnx`, `riva`, `funasr`).
+- STT provider can be selected at startup with `--stt-provider` (`whisper`, `whisperx`, `vosk`, `sherpa-onnx`, `riva`, `funasr`).
 - STT runtime variant can be selected with `--stt-variant` (`auto`, `cpu`, `gpu`).
 - `--stt-health-check` can validate provider dependencies/model availability/connectivity before running UI.
 - Audio preprocessing runs before VAD/STT. `--preprocess-modules auto` tries WebRTC NS/RNNoise if installed, otherwise uses built-in spectral-gate plus adaptive-gain. Explicit modules can include `webrtc-ns`, `webrtc-agc`, `webrtc-aec`, `rnnoise`, `spectral-gate`, and `adaptive-gain`.
@@ -274,6 +277,11 @@ Legacy aliases (for backward compatibility):
 - Settings dialog supports UI language selection (`zh`/`en`) and source selectors now refresh device/app-session lists on open and via an in-dialog refresh button.
 - Subtitle merge strategy is user-selectable (`stable-tail`, `commit-on-break`), with legacy aliases accepted for CLI compatibility.
 - Startup and settings-applied status now include effective model information (`model=<name-or-path>`).
+- WhisperX provider supports dedicated settings for phoneme-ASR path, forced alignment, internal VAD, and diarization.
+- WhisperX model download behavior:
+  - STT model: auto-fetched by WhisperX when missing (`--stt-auto-download` path).
+  - Alignment model: auto-fetched on first forced-alignment use.
+  - Diarization model: auto-fetched on first diarization use, but requires a valid Hugging Face token for pyannote access.
 - On Windows, an explicit AppUserModelID is set so taskbar grouping/icon follows the app icon instead of the default Python icon.
 - Argos translation modules are now loaded lazily only when translation is enabled, so normal STT startup does not depend on spaCy/Argos import chain.
 - Subtitle rendering now keeps a rolling sentence and wraps only when width is exceeded.

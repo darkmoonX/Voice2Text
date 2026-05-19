@@ -19,7 +19,7 @@ except Exception:
     AudioUtilities = None
     IAudioMeterInformation = None
 _SESSION_LIST_CACHE: list[str] = []
-_VIRTUAL_CABLE_KEYWORDS = ('vb cable', 'vb-cable', 'vb-audio', 'virtual audio cable', 'virtual cable', 'cable output', 'cable input', 'cable-a', 'cable-b', 'voicemeeter', 'virtual audio', '虛擬')
+_VIRTUAL_CABLE_KEYWORDS = ('vb cable', 'vb-cable', 'vb-audio', 'virtual audio cable', 'virtual cable', 'cable output', 'cable input', 'cable-a', 'cable-b', 'voicemeeter', 'virtual audio')
 
 @dataclass(frozen=True)
 class AudioDevice:
@@ -609,12 +609,10 @@ def build_capture_from_config(config: RuntimeConfig, on_error: Optional[Callable
             elif selected is not None and on_status is not None:
                 selected_name = selected.name if selected is not None else str(source_indices[0])
                 on_status(f'Selected app-mode source is not a virtual cable loopback endpoint; using session-gated app capture. selected={selected_name}')
-        elif app_names:
-            auto_virtual = _find_virtual_cable_loopback_device(devices)
-            if auto_virtual is not None:
-                virtual_index = auto_virtual.index
-                if on_status is not None:
-                    on_status(f'App mode auto-selected virtual cable endpoint for stricter isolation: {auto_virtual.name}')
+        # IMPORTANT:
+        # Do not auto-switch to VB-CABLE when user did not explicitly select a source device.
+        # Auto-picking virtual cable often leads to silent capture if app output is not routed there.
+        # Keep default behavior as session-gated capture on current loopback endpoint.
         if virtual_index is not None:
             if on_status is not None:
                 selected = ', '.join(app_names) if app_names else '(not specified)'
@@ -689,3 +687,6 @@ def _find_virtual_cable_loopback_device(devices: list[AudioDevice]) -> Optional[
 def _is_virtual_cable_name(name: str) -> bool:
     lowered = (name or '').lower()
     return any((token in lowered for token in _VIRTUAL_CABLE_KEYWORDS))
+
+
+

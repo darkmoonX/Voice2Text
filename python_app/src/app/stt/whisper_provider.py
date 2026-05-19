@@ -95,6 +95,10 @@ class FasterWhisperTranscriber:
         self._temperature = 0.0 if temperature is None else float(temperature)
         self._beam_size = max(1, int(beam_size)) if beam_size is not None else 1
         self._best_of = max(1, int(best_of)) if best_of is not None else 1
+        self._progress_callback = progress_callback
+        self._last_stability_bucket: int | None = None
+        self._last_transcription_meta: dict[str, object] = {}
+        self._current_token_stats: list[tuple[float, float]] = []
         model_ref = model_size.strip() or 'small'
         model_path = Path(model_ref)
         model_arg = self._resolve_model_arg(model_ref, model_path, auto_download=auto_download, progress_callback=progress_callback)
@@ -215,7 +219,9 @@ class FasterWhisperTranscriber:
         if audio.size < self._target_sample_rate // 4:
             return ''
         (whisper_language, zh_script) = self._normalize_language_hint(language)
+        self._current_token_stats = []
         text = self._transcribe_with_long_window_splitting(audio, language=whisper_language)
+        self._finalize_transcription_meta()
         return self._normalize_chinese_script(text, zh_script)
 
     def _transcribe_with_long_window_splitting(self, audio: np.ndarray, language: Optional[str]) -> str:
@@ -249,10 +255,26 @@ class FasterWhisperTranscriber:
             kwargs['no_speech_threshold'] = self._no_speech_thold
         (segments, _) = self._model.transcribe(audio, **kwargs)
         texts: list[str] = []
+        token_stats: list[tuple[float, float]] = []
         for seg in segments:
             cleaned = seg.text.strip()
             if cleaned:
                 texts.append(cleaned)
+            words = getattr(seg, 'words', None) or []
+            for word in words:
+                start = getattr(word, 'start', None)
+                end = getattr(word, 'end', None)
+                prob = getattr(word, 'probability', None)
+                if start is None or end is None or prob is None:
+                    continue
+                try:
+                    duration = float(end) - float(start)
+                    token_stats.append((float(prob), duration))
+                except Exception:
+                    continue
+        if token_stats:
+            self._current_token_stats.extend(token_stats)
+        self._emit_token_stability(token_stats)
         if not texts:
             return ''
         return ' '.join(texts).replace('  ', ' ').strip()
@@ -284,6 +306,53 @@ class FasterWhisperTranscriber:
             if base.endswith(incoming[:size]):
                 return size
         return 0
+
+    def _finalize_transcription_meta(self) -> None:
+        stats = list(self._current_token_stats)
+        if not stats:
+            self._last_transcription_meta = {'stability_ratio': 1.0, 'token_count': 0}
+            return
+        stable = 0
+        total = len(stats)
+        weighted_conf = 0.0
+        total_weight = 0.0
+        for (prob, duration) in stats:
+            dur = max(0.01, min(1.5, float(duration)))
+            weighted_conf += prob * dur
+            total_weight += dur
+            if prob >= 0.60 and 0.02 <= duration <= 1.20:
+                stable += 1
+        ratio = stable / max(1, total)
+        self._last_transcription_meta = {
+            'stability_ratio': float(ratio),
+            'token_count': int(total),
+            'stable_token_count': int(stable),
+            'avg_token_confidence': float((weighted_conf / total_weight) if total_weight > 0 else 0.0),
+        }
+
+    def get_last_transcription_meta(self) -> dict[str, object]:
+        return dict(self._last_transcription_meta)
+
+    def _emit_token_stability(self, token_stats: list[tuple[float, float]]) -> None:
+        if not token_stats:
+            return
+        total = len(token_stats)
+        stable = 0
+        weighted_conf = 0.0
+        total_weight = 0.0
+        for (prob, duration) in token_stats:
+            dur = max(0.01, min(1.5, float(duration)))
+            weighted_conf += prob * dur
+            total_weight += dur
+            if prob >= 0.60 and 0.02 <= duration <= 1.20:
+                stable += 1
+        ratio = stable / max(1, total)
+        avg_conf = (weighted_conf / total_weight) if total_weight > 0 else 0.0
+        bucket = int(ratio * 20)
+        if self._last_stability_bucket is not None and abs(bucket - self._last_stability_bucket) < 1 and total < 10:
+            return
+        self._last_stability_bucket = bucket
+        emit_progress(self._progress_callback, f'[stability] whisper token-ts stable={ratio*100:.0f}% ({stable}/{total}), conf={avg_conf:.2f}')
 
     @staticmethod
     def _pcm16_to_mono_float(pcm16: bytes, channels: int, channel_mode: str='mono') -> np.ndarray:
