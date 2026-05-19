@@ -1,4 +1,4 @@
-"""Low-level download and progress-format utilities shared by STT model acquisition flows."""
+﻿"""Low-level download and progress-format utilities shared by STT model acquisition flows."""
 from __future__ import annotations
 from pathlib import Path
 from typing import Callable, Optional
@@ -101,14 +101,47 @@ def download_hf_snapshot_with_progress(*, repo_id: str, output_dir: str, allow_p
     except Exception as exc:
         raise RuntimeError('huggingface_hub/tqdm is required for model download progress') from exc
 
+    total_expected_bytes: int | None = None
+    baseline_existing_bytes = 0
+    try:
+        dry_run_items = snapshot_download(
+            repo_id=repo_id,
+            allow_patterns=allow_patterns,
+            local_dir=output_dir,
+            dry_run=True,
+            token=token,
+            revision=revision,
+        )
+        items = dry_run_items if isinstance(dry_run_items, list) else []
+        total_sum = 0
+        for item in items:
+            file_size = getattr(item, 'size', None)
+            file_name = str(getattr(item, 'file_name', '') or '')
+            if isinstance(file_size, int) and file_size > 0:
+                total_sum += file_size
+            if file_name:
+                local_path = Path(output_dir) / file_name
+                if local_path.exists():
+                    try:
+                        baseline_existing_bytes += min(int(local_path.stat().st_size), int(file_size) if isinstance(file_size, int) and file_size > 0 else int(local_path.stat().st_size))
+                    except Exception:
+                        pass
+        if total_sum > 0:
+            total_expected_bytes = total_sum
+    except Exception:
+        total_expected_bytes = None
+
+    progress_by_file: dict[str, int] = {}
+    size_by_file: dict[str, int] = {}
+    last_emitted_percent = -1
+    last_emitted_unknown = -1
+
     class CallbackTqdm(tqdm):
 
         def __init__(self, *args, **kwargs) -> None:
             kwargs['disable'] = False
             super().__init__(*args, **kwargs)
-            self._last_percent = -1
-            self._last_unknown_bytes = -1
-            self._emit()
+            self._emit(force=True)
 
         def update(self, n=1):
             out = super().update(n)
@@ -120,19 +153,40 @@ def download_hf_snapshot_with_progress(*, repo_id: str, output_dir: str, allow_p
             super().close()
 
         def _emit(self, force: bool=False) -> None:
+            nonlocal last_emitted_percent, last_emitted_unknown
+            unit = str(getattr(self, 'unit', '') or '').lower()
+            desc = str(getattr(self, 'desc', '') or '')
             current = int(float(self.n))
             total_value = int(float(self.total)) if self.total else None
-            if total_value:
-                percent = int(current * 100 / max(1, total_value))
-                if not force and percent == self._last_percent and (current != total_value):
+
+            # Ignore file-count/progress bookkeeping bars; we only want byte-based bars.
+            if unit not in {'b', 'ib', 'bytes'}:
+                return
+
+            key = desc or f'file_{id(self)}'
+            progress_by_file[key] = max(0, current)
+            if total_value and total_value > 0:
+                size_by_file[key] = total_value
+
+            running_bytes = baseline_existing_bytes
+            for k, v in progress_by_file.items():
+                limit = size_by_file.get(k)
+                running_bytes += min(v, limit) if (limit and limit > 0) else v
+
+            if total_expected_bytes and total_expected_bytes > 0:
+                bounded = min(running_bytes, total_expected_bytes)
+                percent = int(bounded * 100 / max(1, total_expected_bytes))
+                if not force and percent == last_emitted_percent and bounded != total_expected_bytes:
                     return
-                self._last_percent = percent
+                last_emitted_percent = percent
+                emit_progress(progress_callback, format_download_progress(provider, model_name, bounded, total_expected_bytes))
             else:
                 step = 2 * 1024 * 1024
-                if not force and abs(current - self._last_unknown_bytes) < step:
+                if not force and abs(running_bytes - last_emitted_unknown) < step:
                     return
-                self._last_unknown_bytes = current
-            emit_progress(progress_callback, format_download_progress(provider, model_name, current, total_value))
+                last_emitted_unknown = running_bytes
+                emit_progress(progress_callback, format_download_progress(provider, model_name, running_bytes, None))
+
     kwargs: dict[str, object] = {'allow_patterns': allow_patterns, 'local_dir': output_dir, 'tqdm_class': CallbackTqdm}
     if cache_dir:
         kwargs['cache_dir'] = cache_dir
@@ -141,3 +195,4 @@ def download_hf_snapshot_with_progress(*, repo_id: str, output_dir: str, allow_p
     if token is not None:
         kwargs['token'] = token
     return str(snapshot_download(repo_id=repo_id, **kwargs))
+

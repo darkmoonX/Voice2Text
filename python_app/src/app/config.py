@@ -12,19 +12,22 @@ class RuntimeConfig:
     stt_variant: str = 'auto'
     stt_auto_download: bool = True
     stt_model_path: str = ''
-    sherpa_onnx_provider: str = 'cpu'
-    riva_uri: str = 'localhost:50051'
-    riva_use_ssl: bool = False
-    riva_ssl_cert: str = ''
-    riva_language_code: str = 'en-US'
-    riva_api_key: str = ''
-    funasr_device: str = 'cpu'
-    funasr_vad_model: str = 'fsmn-vad'
+    whisperx_enable_phoneme_asr: bool = True
+    whisperx_enable_forced_alignment: bool = True
+    whisperx_enable_vad: bool = True
+    whisperx_vad_method: str = 'silero-vad'
+    whisperx_enable_diarization: bool = False
+    whisperx_alignment_model: str = ''
+    whisperx_alignment_language: str = 'auto'
+    whisperx_diarization_model: str = 'pyannote/speaker-diarization-3.1'
+    whisperx_hf_token: str = ''
     cpu_fallback_on_cuda_error: bool = True
     cuda_compat_source_dll: str = 'D:\\CUDA\\bin\\x64\\cublas64_13.dll'
+    ffmpeg_dll_dir: str = 'D:\\FFmpeg\\ffmpeg-7.1.1-full_build-shared\\bin'
     segment_seconds: float = 6.0
     hop_seconds: float = 1.5
     source_language: Optional[str] = None
+    cjk_no_space_gap_seconds: float = 0.2
     source_mode: str = 'loopback'
     ui_language: str = 'zh'
     source_device_indices: list[int] = field(default_factory=list)
@@ -36,13 +39,13 @@ class RuntimeConfig:
     preprocess_enabled: bool = True
     preprocess_modules: str = 'auto'
     vad_enabled: bool = True
+    vad_backend: str = 'silero'
     vad_rms_threshold: float = 0.008
     vad_adaptive_enabled: bool = True
     vad_adaptive_min_threshold: float = 0.004
     vad_adaptive_max_threshold: float = 0.08
     vad_adaptive_noise_multiplier: float = 2.6
     vad_adaptive_margin: float = 0.002
-    vad_sherpa_noise_guard: bool = True
     whisper_max_context: Optional[int] = None
     whisper_entropy_thold: Optional[float] = None
     whisper_logprob_thold: Optional[float] = None
@@ -69,3 +72,5 @@ class RuntimeConfig:
     bilingual_style: str = 'stacked'
     device_index: Optional[int] = None
     log_dir: str = 'logs'
+    debug_mode: bool = False
+

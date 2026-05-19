@@ -1,7 +1,10 @@
-﻿"""Core orchestration loop: capture audio, preprocess/VAD, call STT, and emit UI-ready text/status signals."""
+"""Core orchestration loop: capture audio, preprocess/VAD, call STT, and emit UI-ready text/status signals."""
 from __future__ import annotations
 import logging
+from pathlib import Path
 import threading
+import time
+import wave
 from PySide6.QtCore import QObject, Signal
 from .capture import AudioChunk, AudioCaptureBase, build_capture_from_config
 from .config import RuntimeConfig
@@ -20,8 +23,10 @@ class TranscriptionController(QObject):
     subtitle_ready = Signal(str, str)
     status_message = Signal(str)
     error_message = Signal(str)
-    _bootstrap_ready = Signal(object, object)
-    _bootstrap_failed = Signal(str)
+    debug_event = Signal(object)
+    runtime_state_changed = Signal(bool)
+    _bootstrap_ready = Signal(int, object, object)
+    _bootstrap_failed = Signal(int, str)
 
     def __init__(self, config: RuntimeConfig, logger: logging.Logger | None=None, parent: QObject | None=None) -> None:
         super().__init__(parent)
@@ -41,6 +46,10 @@ class TranscriptionController(QObject):
         self._silence_hops = 0
         self._speech_hops = 0
         self._runtime_recovery_state = RuntimeRecoveryState()
+        self._runtime_epoch = 0
+        self._segment_debug_dir = Path(self._config.log_dir).resolve().parent / "segments"
+        self._latest_raw_segment_wav = self._segment_debug_dir / "latest_segment_raw.wav"
+        self._latest_stt_segment_wav = self._segment_debug_dir / "latest_segment_stt.wav"
         self._bootstrap_ready.connect(self._on_bootstrap_ready)
         self._bootstrap_failed.connect(self._on_bootstrap_failed)
 
@@ -52,19 +61,25 @@ class TranscriptionController(QObject):
             return
         if self._worker is not None and self._worker.is_alive():
             return
+        self._runtime_epoch += 1
+        current_epoch = self._runtime_epoch
         self._running.set()
+        # Keep runtime toggle in "paused" state until full bootstrap/warmup/capture init is done.
+        self.runtime_state_changed.emit(False)
         self._runtime_recovery_state = RuntimeRecoveryState()
         self._silence_hops = 0
         self._speech_hops = 0
         self._subtitle_assembler.reset()
         self._text_delta_logger.reset()
         self._emit_status('Initializing STT backend...')
-        self._bootstrap_thread = threading.Thread(target=self._bootstrap_stt_stack, daemon=True)
+        self._bootstrap_thread = threading.Thread(target=lambda: self._bootstrap_stt_stack(current_epoch), daemon=True)
         self._bootstrap_thread.start()
 
     def stop(self) -> None:
         """Stop capture/worker threads and reset transient runtime state."""
+        self._runtime_epoch += 1
         self._running.clear()
+        self.runtime_state_changed.emit(False)
         bootstrap = self._bootstrap_thread
         if bootstrap and bootstrap.is_alive() and (threading.current_thread() is not bootstrap):
             bootstrap.join(timeout=2.0)
@@ -90,23 +105,26 @@ class TranscriptionController(QObject):
         self.stop()
         self.start()
 
-    def _bootstrap_stt_stack(self) -> None:
+
+    def is_running(self) -> bool:
+        return self._running.is_set()
+    def _bootstrap_stt_stack(self, epoch: int) -> None:
         try:
             transcriber = self._create_transcriber_with_fallback()
             if transcriber is None or not self._running.is_set():
-                self._bootstrap_failed.emit('')
+                self._bootstrap_failed.emit(epoch, '')
                 return
             translator = ArgosTranslator(enabled=self._config.translation_enabled, source_code=self._config.translation_from, target_code=self._config.translation_to)
             if not self._running.is_set():
                 return
-            self._bootstrap_ready.emit(transcriber, translator)
+            self._bootstrap_ready.emit(epoch, transcriber, translator)
         except Exception as exc:
-            self._bootstrap_failed.emit(str(exc))
+            self._bootstrap_failed.emit(epoch, str(exc))
         finally:
             self._bootstrap_thread = None
 
-    def _on_bootstrap_ready(self, transcriber: object, translator: object) -> None:
-        if not self._running.is_set():
+    def _on_bootstrap_ready(self, epoch: int, transcriber: object, translator: object) -> None:
+        if epoch != self._runtime_epoch or not self._running.is_set():
             return
         self._transcriber = transcriber
         provider = normalize_stt_provider(self._config.stt_provider)
@@ -128,6 +146,7 @@ class TranscriptionController(QObject):
                 self._emit_error(self._translator.state.message)
             else:
                 self._emit_status(self._translator.state.message)
+        self._warmup_transcriber()
         try:
             self._capture = build_capture_from_config(self._config, on_error=self._emit_error, on_status=self._emit_status)
             self._capture.start()
@@ -139,6 +158,7 @@ class TranscriptionController(QObject):
             self._vad_pipeline = None
             self._translator = None
             self._running.clear()
+            self.runtime_state_changed.emit(False)
             return
         if not self._running.is_set():
             self._stop_capture_once()
@@ -148,24 +168,32 @@ class TranscriptionController(QObject):
             self._translator = None
             return
         self._emit_status(f'Capture started @ {self._capture.sample_rate} Hz, {self._capture.channels} ch')
-        self._worker = threading.Thread(target=self._run_loop_guarded, daemon=True)
+        self.runtime_state_changed.emit(True)
+        self._worker = threading.Thread(target=lambda: self._run_loop_guarded(epoch), daemon=True)
         self._worker.start()
 
-    def _on_bootstrap_failed(self, message: str) -> None:
+    def _on_bootstrap_failed(self, epoch: int, message: str) -> None:
+        if epoch != self._runtime_epoch:
+            return
         if message.strip():
             self._emit_error(f'STT bootstrap failed: {message}')
         self._running.clear()
+        self.runtime_state_changed.emit(False)
 
-    def _run_loop_guarded(self) -> None:
+    def _run_loop_guarded(self, epoch: int) -> None:
         try:
             self._run_loop()
+        except Exception as exc:
+            self._emit_error(f'Run loop crashed: {exc}')
         finally:
             self._stop_capture_once()
             self._transcriber = None
             self._preprocess_pipeline = None
             self._vad_pipeline = None
             self._translator = None
-            self._running.clear()
+            if epoch == self._runtime_epoch:
+                self._running.clear()
+                self.runtime_state_changed.emit(False)
             self._worker = None
 
     def _stop_capture_once(self) -> None:
@@ -180,6 +208,18 @@ class TranscriptionController(QObject):
         except Exception:
             return
 
+
+    def _recover_capture_backend(self) -> bool:
+        try:
+            self._stop_capture_once()
+            self._capture = build_capture_from_config(self._config, on_error=self._emit_error, on_status=self._emit_status)
+            self._capture.start()
+            self._emit_status(f'Capture recovered @ {self._capture.sample_rate} Hz, {self._capture.channels} ch')
+            return True
+        except Exception as exc:
+            self._emit_error(f'Capture recovery failed: {exc}')
+            return False
+
     def _run_loop(self) -> None:
         assert self._capture is not None
         assert self._transcriber is not None
@@ -188,6 +228,8 @@ class TranscriptionController(QObject):
         stream_channels = self._capture.channels
         segment_seconds = min(max(1.0, float(self._config.segment_seconds)), 12.0)
         hop_seconds = min(max(0.1, float(self._config.hop_seconds)), max(0.1, segment_seconds - 0.1))
+        self._subtitle_assembler.set_language_context(self._config.source_language)
+        self._subtitle_assembler.set_cjk_no_space_gap_seconds(float(getattr(self._config, 'cjk_no_space_gap_seconds', 0.2) or 0.2))
 
         def aligned_window_sizes(rate: int, channels: int) -> tuple[int, int, int, int]:
             bytes_per_second_local = max(1, rate * channels * 2)
@@ -200,10 +242,24 @@ class TranscriptionController(QObject):
             hop_bytes_local = min(hop_bytes_local, segment_bytes_local)
             return (bytes_per_second_local, frame_bytes_local, segment_bytes_local, hop_bytes_local)
         (bytes_per_second, frame_bytes, segment_bytes, hop_bytes) = aligned_window_sizes(stream_rate, stream_channels)
+        last_chunk_at = time.monotonic()
+        last_recover_at = 0.0
+        window_elapsed_seconds = 0.0
         while self._running.is_set():
-            chunk = self._capture.read_chunk(timeout=0.25)
+            try:
+                chunk = self._capture.read_chunk(timeout=0.25)
+            except Exception as exc:
+                self._emit_error(f'Capture read failed: {exc}')
+                chunk = None
+            now = time.monotonic()
             if chunk is None:
+                if now - last_chunk_at >= 8.0 and now - last_recover_at >= 8.0:
+                    last_recover_at = now
+                    self._emit_status('No audio chunks for 8s. Restarting capture backend...')
+                    if self._recover_capture_backend():
+                        last_chunk_at = time.monotonic()
                 continue
+            last_chunk_at = now
             if chunk.sample_rate != stream_rate or chunk.channels != stream_channels or segment_bytes <= 0:
                 stream_rate = chunk.sample_rate
                 stream_channels = chunk.channels
@@ -225,10 +281,14 @@ class TranscriptionController(QObject):
             if len(buffer) > max_buffer_bytes:
                 del buffer[:len(buffer) - max_buffer_bytes]
             while len(buffer) >= segment_bytes and self._running.is_set():
+                current_window_elapsed = float(window_elapsed_seconds)
+                window_elapsed_seconds += float(hop_seconds)
                 window = bytes(buffer[:segment_bytes])
                 del buffer[:hop_bytes]
                 window_chunk = AudioChunk(pcm16=window, sample_rate=stream_rate, channels=stream_channels)
+                self._write_latest_segment_wav(window_chunk, self._latest_raw_segment_wav)
                 stt_chunk = self._preprocess_pipeline.process(window_chunk, channel_mode=self._config.source_channel_mode) if self._preprocess_pipeline is not None and self._preprocess_pipeline.stage_names else window_chunk
+                self._write_latest_segment_wav(stt_chunk, self._latest_stt_segment_wav)
                 has_signal = self._vad_pipeline.should_process(stt_chunk, channel_mode=self._config.source_channel_mode) if self._vad_pipeline is not None else self._transcriber.has_enough_signal(stt_chunk, channel_mode=self._config.source_channel_mode)
                 if not has_signal:
                     self._silence_hops += 1
@@ -244,7 +304,40 @@ class TranscriptionController(QObject):
                         continue
                     self._emit_error(f'Transcription failed: {exc}')
                     continue
-                source_rolling = self._subtitle_assembler.merge_incremental_text(source_text, overlap_merge_method=self._config.overlap_merge_method, segment_seconds=float(self._config.segment_seconds), hop_seconds=float(self._config.hop_seconds))
+                transcription_meta = getattr(self._transcriber, 'get_last_transcription_meta', lambda: {})()
+                if not isinstance(transcription_meta, dict):
+                    transcription_meta = {}
+                transcription_meta = dict(transcription_meta)
+                transcription_meta['elapsed_seconds'] = float(current_window_elapsed)
+                token_rows = transcription_meta.get('token_timestamps')
+                if isinstance(token_rows, list):
+                    enriched_rows: list[dict[str, object]] = []
+                    for row in token_rows:
+                        if not isinstance(row, dict):
+                            continue
+                        item = dict(row)
+                        try:
+                            start_rel = float(item.get('start'))
+                            end_rel = float(item.get('end'))
+                            item['absolute_start'] = float(current_window_elapsed + start_rel)
+                            item['absolute_end'] = float(current_window_elapsed + end_rel)
+                        except Exception:
+                            pass
+                        enriched_rows.append(item)
+                    transcription_meta['token_timestamps'] = enriched_rows
+                source_rolling = self._subtitle_assembler.merge_incremental_text(source_text, overlap_merge_method=self._config.overlap_merge_method, segment_seconds=float(self._config.segment_seconds), hop_seconds=float(self._config.hop_seconds), transcription_meta=transcription_meta)
+                if bool(getattr(self._config, 'debug_mode', False)):
+                    self.debug_event.emit({
+                        'provider': normalize_stt_provider(self._config.stt_provider),
+                        'raw_text': source_text,
+                        'merged_text': source_rolling,
+                        'history_text': self._subtitle_assembler.get_history_text(),
+                        'history_state': self._subtitle_assembler.get_history_state(),
+                        'stable_text': self._subtitle_assembler.get_stable_text(),
+                        'stable_state': self._subtitle_assembler.get_stable_state(),
+                        'partial_state': self._subtitle_assembler.get_partial_state(),
+                        'meta': transcription_meta,
+                    })
                 if not source_rolling:
                     continue
                 self._speech_hops += 1
@@ -259,6 +352,23 @@ class TranscriptionController(QObject):
                 if self._speech_hops * hop_seconds >= max(segment_seconds, hop_seconds * 2.0):
                     self._mark_sentence_break()
 
+    def _write_latest_segment_wav(self, chunk: AudioChunk, target_path: Path) -> None:
+        try:
+            self._segment_debug_dir.mkdir(parents=True, exist_ok=True)
+            pcm = bytes(chunk.pcm16 or b'')
+            if not pcm:
+                return
+            channels = max(1, int(chunk.channels))
+            sample_rate = max(8000, int(chunk.sample_rate))
+            with wave.open(str(target_path), 'wb') as wf:
+                wf.setnchannels(channels)
+                wf.setsampwidth(2)
+                wf.setframerate(sample_rate)
+                wf.writeframes(pcm)
+        except Exception:
+            # Debug artifact write failure must never break runtime.
+            return
+
     def _build_subtitle_payload(self, source_text: str) -> tuple[str, str]:
         if self._translator is None or not self._translator.enabled:
             return (source_text, '')
@@ -266,6 +376,29 @@ class TranscriptionController(QObject):
         if not translated:
             return (source_text, '')
         return (source_text, translated)
+
+    def _warmup_transcriber(self) -> None:
+        transcriber = self._transcriber
+        if transcriber is None:
+            return
+        provider = normalize_stt_provider(self._config.stt_provider)
+        if provider != 'whisperx':
+            return
+        self._emit_status('WhisperX warmup started (VAD/cache pre-init).')
+        try:
+            sample_rate = 16000
+            duration_sec = 1.0
+            channels = 1
+            pcm = b'\x00\x00' * int(sample_rate * duration_sec * channels)
+            warmup_chunk = AudioChunk(pcm16=pcm, sample_rate=sample_rate, channels=channels)
+            transcriber.transcribe(
+                warmup_chunk,
+                language=self._config.source_language,
+                channel_mode=self._config.source_channel_mode,
+            )
+            self._emit_status('WhisperX warmup completed.')
+        except Exception as exc:
+            self._emit_error(f'WhisperX warmup failed: {exc}')
 
     def _mark_sentence_break(self) -> None:
         self._subtitle_assembler.mark_sentence_break()
@@ -338,4 +471,11 @@ class TranscriptionController(QObject):
     def _emit_error(self, message: str) -> None:
         self._logger.error(message)
         self.error_message.emit(message)
+
+
+
+
+
+
+
 

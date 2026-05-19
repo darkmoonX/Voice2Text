@@ -13,10 +13,7 @@ def default_stt_model(provider: str) -> str:
     normalized = normalize_stt_provider(provider)
     mapping = {
         'whisper': 'small',
-        'vosk': 'vosk-model-small-en-us-0.15',
-        'sherpa-onnx': 'small',
-        'riva': '',
-        'funasr': 'paraformer-zh',
+        'whisperx': 'small',
     }
     return mapping.get(normalized, 'small')
 

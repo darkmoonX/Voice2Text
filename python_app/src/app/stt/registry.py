@@ -16,10 +16,7 @@ class STTProviderSpec:
 
 STT_PROVIDER_SPECS: tuple[STTProviderSpec, ...] = (
     STTProviderSpec(provider='whisper', aliases=('whisper', 'faster-whisper', 'faster_whisper'), supports_gpu_variant=True, supports_source_language_hint=True),
-    STTProviderSpec(provider='vosk', aliases=('vosk',), supports_gpu_variant=False, supports_source_language_hint=False),
-    STTProviderSpec(provider='sherpa-onnx', aliases=('sherpa-onnx', 'sherpa_onnx', 'sherpa'), supports_gpu_variant=True, supports_source_language_hint=False),
-    STTProviderSpec(provider='riva', aliases=('riva', 'nvidia-riva', 'nvidia_riva'), supports_gpu_variant=False, supports_source_language_hint=True),
-    STTProviderSpec(provider='funasr', aliases=('funasr', 'fun-asr', 'fun_asr'), supports_gpu_variant=True, supports_source_language_hint=True),
+    STTProviderSpec(provider='whisperx', aliases=('whisperx', 'whisper-x', 'whisper_x'), supports_gpu_variant=True, supports_source_language_hint=True),
 )
 
 

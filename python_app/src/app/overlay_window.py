@@ -1,18 +1,20 @@
-"""Transparent overlay window for subtitles, status messages, and error notifications."""
+﻿"""Transparent overlay window for subtitles, status messages, and error notifications."""
 from __future__ import annotations
 
 from collections import deque
 from typing import Deque
 
-from PySide6.QtCore import QPoint, QRect, QSize, Qt, QTimer
+from PySide6.QtCore import QPoint, QRect, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QFont, QFontMetrics, QKeyEvent, QMouseEvent, QPaintEvent, QPainter, QPen, QResizeEvent, QWheelEvent
-from PySide6.QtWidgets import QApplication, QStyle, QToolButton, QWidget
+from PySide6.QtWidgets import QApplication, QToolButton, QWidget
 
 from .config import RuntimeConfig
 
 
 class SubtitleOverlayWindow(QWidget):
     """Main subtitle/status surface shown on the desktop."""
+
+    toggle_runtime_requested = Signal()
 
     _EDGE_LEFT = 1
     _EDGE_RIGHT = 2
@@ -36,6 +38,8 @@ class SubtitleOverlayWindow(QWidget):
         self._resize_margin = 8
         self._minimum_size = QSize(480, 160)
         self._jump_bottom_btn = QToolButton(self)
+        self._runtime_toggle_btn = QToolButton(self)
+        self._runtime_running = True
         self._last_subtitle_payload: tuple[str, str] = ("", "")
         self._init_ui()
         self._tick = QTimer(self)
@@ -43,7 +47,6 @@ class SubtitleOverlayWindow(QWidget):
         self._tick.start(16)
 
     def push_subtitle(self, source_text: str, translated_text: str = "") -> None:
-        """Receive subtitle output from controller.subtitle_ready and update current subtitle rows."""
         source_text = self._normalize_inline_text(source_text)
         translated_text = self._normalize_inline_text(translated_text)
         if not source_text and not translated_text:
@@ -71,7 +74,6 @@ class SubtitleOverlayWindow(QWidget):
         self._replace_subtitle_entries(entries)
 
     def push_status(self, text: str) -> None:
-        """Receive status updates from controller.status_message and append into history."""
         if text.startswith("[download] "):
             self._upsert_download_status(text)
             return
@@ -79,15 +81,13 @@ class SubtitleOverlayWindow(QWidget):
         self._append_entries(entries)
 
     def push_error(self, text: str) -> None:
-        """Receive error updates from controller.error_message and append into history."""
         entries = [(line, "error") for line in self._split_lines(f"[error] {text}")]
         self._append_entries(entries)
 
     def apply_runtime_config(self, config: RuntimeConfig) -> None:
-        """Apply runtime UI settings from the settings dialog."""
         self._config = config
         current_font = self.font()
-        current_font.setPointSize(max(10, config.font_size))
+        current_font.setPointSize(self._safe_point_size(config.font_size))
         current_font.setStyleStrategy(QFont.StyleStrategy.PreferAntialias)
         self.setFont(current_font)
         self._line_height = QFontMetrics(self.font()).height() + 8
@@ -99,8 +99,14 @@ class SubtitleOverlayWindow(QWidget):
         )
         self._trim_history()
         self._update_jump_bottom_button_geometry()
+        self._update_runtime_button_geometry()
         self._update_jump_bottom_button_visibility()
+        self._update_runtime_button_label()
         self.update()
+
+    def set_runtime_running(self, running: bool) -> None:
+        self._runtime_running = bool(running)
+        self._update_runtime_button_label()
 
     def _init_ui(self) -> None:
         self.setWindowTitle("Voice2Text Overlay")
@@ -109,15 +115,29 @@ class SubtitleOverlayWindow(QWidget):
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
         self.setMouseTracking(True)
         self.setMinimumSize(self._minimum_size)
-        font = QFont("Segoe UI", max(10, self._config.font_size))
+
+        font = QFont("Segoe UI", self._safe_point_size(self._config.font_size))
         font.setStyleStrategy(QFont.StyleStrategy.PreferAntialias)
         self.setFont(font)
         self._line_height = QFontMetrics(self.font()).height() + 8
-        self._jump_bottom_btn.setAutoRaise(True)
-        self._jump_bottom_btn.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_ArrowDown))
+
+        self._jump_bottom_btn.setAutoRaise(False)
+        self._jump_bottom_btn.setText("↓")
         self._jump_bottom_btn.setToolTip("Back to latest")
+        jump_font = QFont("Segoe UI", 14, QFont.Weight.Bold)
+        jump_font.setStyleStrategy(QFont.StyleStrategy.PreferAntialias)
+        self._jump_bottom_btn.setFont(jump_font)
+        self._jump_bottom_btn.setStyleSheet("QToolButton { background:#0E1624; color:#FFFFFF; border:2px solid #5CC8FF; border-radius:18px; } QToolButton:hover { background:#17304A; border-color:#9FE0FF; }")
         self._jump_bottom_btn.clicked.connect(self._scroll_to_bottom)
+
+        self._runtime_toggle_btn.setAutoRaise(False)
+        self._runtime_toggle_btn.setToolTip("Toggle runtime")
+        self._runtime_toggle_btn.setStyleSheet("QToolButton { background:#1A2435; color:#FFFFFF; border:1px solid #7EA8CC; border-radius:8px; padding:5px 10px; font-weight:600; } QToolButton:hover { background:#23344D; border-color:#B4D5F3; }")
+        self._runtime_toggle_btn.clicked.connect(self.toggle_runtime_requested.emit)
+
         self._update_jump_bottom_button_geometry()
+        self._update_runtime_button_geometry()
+        self._update_runtime_button_label()
         self._jump_bottom_btn.hide()
         self.push_status("Overlay ready. Drag to move, edge resize enabled, ESC to quit.")
 
@@ -259,6 +279,7 @@ class SubtitleOverlayWindow(QWidget):
         super().resizeEvent(event)
         self._trim_history()
         self._update_jump_bottom_button_geometry()
+        self._update_runtime_button_geometry()
         self._update_jump_bottom_button_visibility()
 
     def paintEvent(self, event: QPaintEvent) -> None:
@@ -352,6 +373,7 @@ class SubtitleOverlayWindow(QWidget):
         self.setGeometry(rect.normalized())
         self._trim_history()
         self._update_jump_bottom_button_geometry()
+        self._update_runtime_button_geometry()
 
     @staticmethod
     def _parse_color(raw: str, fallback: QColor) -> QColor:
@@ -377,11 +399,38 @@ class SubtitleOverlayWindow(QWidget):
         self.update()
 
     def _update_jump_bottom_button_geometry(self) -> None:
-        size = 26
-        margin = 14
-        x = max(0, self.width() - size - margin)
-        y = max(0, self.height() - size - margin)
+        size = 36
+        margin_bottom = 12
+        x = max(0, (self.width() - size) // 2)
+        y = max(0, self.height() - size - margin_bottom)
         self._jump_bottom_btn.setGeometry(x, y, size, size)
 
     def _update_jump_bottom_button_visibility(self) -> None:
         self._jump_bottom_btn.setVisible(not self._is_at_bottom())
+
+    def _update_runtime_button_geometry(self) -> None:
+        width = 88
+        height = 34
+        margin = 12
+        x = max(0, self.width() - width - margin)
+        y = margin
+        self._runtime_toggle_btn.setGeometry(x, y, width, height)
+
+    def _update_runtime_button_label(self) -> None:
+        if self._runtime_running:
+            self._runtime_toggle_btn.setText("■")
+            self._runtime_toggle_btn.setToolTip("停止")
+        else:
+            self._runtime_toggle_btn.setText("▶")
+            self._runtime_toggle_btn.setToolTip("繼續")
+
+    @staticmethod
+    def _safe_point_size(raw_size: int | float | None) -> int:
+        try:
+            parsed = int(raw_size) if raw_size is not None else 10
+        except Exception:
+            parsed = 10
+        return max(10, parsed)
+
+
+

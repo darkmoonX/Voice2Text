@@ -32,6 +32,11 @@ Detailed setup instructions are inside each subfolder README.
 - Issue tracker is configured as GitHub Issues (`gh` CLI workflow).
 - Triage label vocabulary uses defaults: `needs-triage`, `needs-info`, `ready-for-agent`, `ready-for-human`, `wontfix`.
 - Domain-doc layout is configured as multi-context (`CONTEXT-MAP.md` + per-context docs).
+- Multi-context docs are now populated:
+  - root map: `CONTEXT-MAP.md`
+  - shared context: `docs/context/CONTEXT.md`
+  - Python context: `python_app/CONTEXT.md`
+  - C++ context: `cpp_app/CONTEXT.md`
 - Python logging path handling was hardened: default and relative `--log-dir` now resolve under `python_app/src` to avoid writing logs to repo-root `logs/` by accident.
 - Python architecture seam update: runtime callers now consume audio source discovery/factory via `python_app/src/app/capture/` instead of importing `audio_capture.py` directly.
 - Python pipeline architecture update: subtitle incremental assembly is now encapsulated in `python_app/src/app/pipeline/subtitle_assembler.py`, reducing controller coupling.
@@ -58,7 +63,15 @@ Detailed setup instructions are inside each subfolder README.
 - C++ fourth-round follow-up: settings dialog now consumes `settings/i18n.*` zh/en labels and `RuntimeSettings.uiLanguage` is persisted via settings mapping.
 - C++ build follow-up: fixed `whisper_engine.cpp` compile-time `std::min` type ambiguity (Qt `qsizetype` with `int`) and validated successful `voice2text_cpp` Release build under elevated tool execution.
 - C++ build script update: cpp_app/build.ps1 now supports explicit CPU mode (-CpuOnly) and deploys runtime dependencies for both multi-config (Release) and single-config fallback (*-nmake) output layouts.
-- C++ settings enhancement: STT model is now switchable from settings (auto-discovered model files + manual path), and VAD controls are exposed (enabled, daptive, ms-threshold).
+- C++ settings enhancement: STT model is now switchable from settings (auto-discovered model files + manual path), and VAD controls are exposed (enabled, adaptive, 
+ms-threshold).
 - C++ overlay enhancement: mouse wheel can browse older subtitle history, with a down-arrow jump button to return to latest lines instantly.
 - Python overlay enhancement: jump-to-bottom button now force-resets both history and arrival scroll offsets for immediate latest-position recovery.
 - Stable-tail merge hardening: lock/preserve ratio now adapts to overlap confidence to reduce bad early-token influence from new segment windows.
+- WhisperX path has been integrated in Python STT provider routing for subtitle-quality experimentation (switch via --stt-provider whisperx or settings UI).
+- WhisperX advanced controls are now exposed in settings/CLI, and model auto-download flow is documented (STT/alignment/diarization with HF-token requirement for pyannote).
+- WhisperX advanced controls are now available (phoneme-ASR, forced alignment, WhisperX VAD, diarization, alignment/diarization model IDs, HF token).
+- Python startup behavior update: when STT provider is WhisperX, runtime now performs startup warmup (silent pre-transcribe) to initialize WhisperX internal VAD/cache before first real speech chunk.
+- Python overlay runtime button semantics update: right-top runtime toggle remains in paused state during bootstrap/prep, and only switches to running after capture is fully started.
+- Troubleshooting note for WhisperX/pyannote users on Windows: `torchcodec` may still fail even when installed if FFmpeg shared DLLs are unavailable. Ensure runtime PATH points to an FFmpeg *shared* build exposing `avcodec*`, `avformat*`, `avutil*`, `swresample*`, and `swscale*` DLL files.
+- Windows runtime now explicitly registers FFmpeg shared DLL directory before STT bootstrap (`--ffmpeg-dll-dir`, default `D:\FFmpeg\ffmpeg-7.1.1-full_build-shared\bin`) to satisfy torchcodec/pyannote dynamic loading.

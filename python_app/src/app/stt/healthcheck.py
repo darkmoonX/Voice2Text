@@ -116,6 +116,29 @@ def _check_vosk(config: RuntimeConfig) -> ProviderHealthReport:
     report.ok = not report.issues
     return report
 
+def _check_whisperx(config: RuntimeConfig) -> ProviderHealthReport:
+    report = ProviderHealthReport(provider='whisperx', ok=True)
+    try:
+        import whisperx
+    except Exception as exc:
+        report.issues.append(f'Python package missing: whisperx ({exc})')
+    model_ref = (config.stt_model_path or '').strip() or (config.model_size or 'small').strip()
+    report.details['model_ref'] = model_ref
+    report.details['forced_alignment'] = 'on' if bool(getattr(config, 'whisperx_enable_forced_alignment', True)) else 'off'
+    report.details['vad'] = 'on' if bool(getattr(config, 'whisperx_enable_vad', True)) else 'off'
+    report.details['diarization'] = 'on' if bool(getattr(config, 'whisperx_enable_diarization', False)) else 'off'
+    if bool(getattr(config, 'whisperx_enable_diarization', False)) and (not str(getattr(config, 'whisperx_hf_token', '') or '').strip()):
+        report.warnings.append('WhisperX diarization is enabled but HF token is empty. pyannote model download/access may fail.')
+    if _is_path_like(model_ref):
+        model_path = Path(model_ref)
+        if not model_path.exists():
+            report.issues.append(f'Model path does not exist: {model_path}')
+    if normalize_stt_variant(config.stt_variant) == 'gpu':
+        if not can_load_cublas12():
+            report.warnings.append('GPU mode requested but cublas64_12.dll is unavailable. Runtime may fallback to CPU.')
+    report.ok = not report.issues
+    return report
+
 def _check_sherpa_onnx(config: RuntimeConfig) -> ProviderHealthReport:
     report = ProviderHealthReport(provider='sherpa-onnx', ok=True)
     try:
@@ -252,6 +275,7 @@ def _sherpa_model_layout_issue() -> str:
 
 _PROVIDER_CHECKERS: dict[STTProvider, Callable[[RuntimeConfig], ProviderHealthReport]] = {
     'whisper': _check_whisper,
+    'whisperx': _check_whisperx,
     'vosk': _check_vosk,
     'sherpa-onnx': _check_sherpa_onnx,
     'riva': _check_riva,

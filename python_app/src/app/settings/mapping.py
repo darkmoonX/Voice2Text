@@ -1,4 +1,4 @@
-﻿"""Mapping and validation helpers for settings dialog payload."""
+"""Mapping and validation helpers for settings dialog payload."""
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -12,14 +12,15 @@ class SettingsPayloadInput:
     stt_variant: str
     stt_model_path: str
     stt_auto_download: bool
-    sherpa_onnx_provider: str
-    riva_uri: str
-    riva_use_ssl: bool
-    riva_ssl_cert: str
-    riva_language_code: str
-    riva_api_key: str
-    funasr_device: str
-    funasr_vad_model: str
+    whisperx_enable_phoneme_asr: bool
+    whisperx_enable_forced_alignment: bool
+    whisperx_enable_vad: bool
+    whisperx_vad_method: str
+    whisperx_enable_diarization: bool
+    whisperx_alignment_model: str
+    whisperx_alignment_language: str
+    whisperx_diarization_model: str
+    whisperx_hf_token: str
     source_language: str
     translation_to: str
     segment_seconds: float
@@ -38,13 +39,12 @@ class SettingsPayloadInput:
     source_text_color: str
     translated_text_color: str
     background_color: str
+    debug_mode: bool
 
 
-def build_settings_updates(payload: SettingsPayloadInput, *, lang: str, need_riva_uri_message: str, hop_gt_segment_message: str) -> dict[str, object]:
+def build_settings_updates(payload: SettingsPayloadInput, *, lang: str, hop_gt_segment_message: str) -> dict[str, object]:
     stt_provider = payload.stt_provider.strip() or 'whisper'
     stt_model_path = payload.stt_model_path.strip()
-    if stt_provider == 'riva' and not payload.riva_uri.strip():
-        raise ValueError(need_riva_uri_message)
 
     source_lang_data = payload.source_language
     if source_lang_data == 'auto':
@@ -72,14 +72,15 @@ def build_settings_updates(payload: SettingsPayloadInput, *, lang: str, need_riv
         'stt_variant': payload.stt_variant or 'auto',
         'stt_auto_download': bool(payload.stt_auto_download),
         'stt_model_path': stt_model_path,
-        'sherpa_onnx_provider': payload.sherpa_onnx_provider or 'cpu',
-        'riva_uri': payload.riva_uri.strip() or 'localhost:50051',
-        'riva_use_ssl': bool(payload.riva_use_ssl),
-        'riva_ssl_cert': payload.riva_ssl_cert.strip(),
-        'riva_language_code': payload.riva_language_code.strip() or 'en-US',
-        'riva_api_key': payload.riva_api_key.strip(),
-        'funasr_device': payload.funasr_device.strip() or 'cpu',
-        'funasr_vad_model': payload.funasr_vad_model.strip(),
+        'whisperx_enable_phoneme_asr': bool(payload.whisperx_enable_phoneme_asr),
+        'whisperx_enable_forced_alignment': bool(payload.whisperx_enable_forced_alignment),
+        'whisperx_enable_vad': True,
+        'whisperx_vad_method': (payload.whisperx_vad_method.strip() or 'silero-vad'),
+        'whisperx_enable_diarization': bool(payload.whisperx_enable_diarization),
+        'whisperx_alignment_model': payload.whisperx_alignment_model.strip(),
+        'whisperx_alignment_language': payload.whisperx_alignment_language.strip() or 'auto',
+        'whisperx_diarization_model': payload.whisperx_diarization_model.strip() or 'pyannote/speaker-diarization-3.1',
+        'whisperx_hf_token': payload.whisperx_hf_token.strip(),
         'source_mode': payload.source_mode,
         'source_device_indices': source_device_indices,
         'source_app_name': source_app_names[0] if source_app_names else '',
@@ -102,4 +103,6 @@ def build_settings_updates(payload: SettingsPayloadInput, *, lang: str, need_riv
         'source_text_color': payload.source_text_color.strip(),
         'translated_text_color': payload.translated_text_color.strip(),
         'background_color': payload.background_color.strip(),
+        'debug_mode': bool(payload.debug_mode),
     }
+
