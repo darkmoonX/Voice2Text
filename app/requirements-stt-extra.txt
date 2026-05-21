@@ -1,0 +1,10 @@
+# Optional STT backends (install only if you need these providers)
+whisperx>=3.3.0
+
+# Optional audio preprocessing backends. Install one manually if available for
+# your Python/Windows build; otherwise the app falls back to built-in
+# spectral-gate/adaptive-gain preprocessing.
+# webrtc-audio-processing
+# rnnoise
+
+silero-vad>=5.1.2
