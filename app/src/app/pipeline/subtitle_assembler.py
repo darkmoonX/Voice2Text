@@ -124,11 +124,11 @@ class SubtitleAssembler:
         for word in incoming:
             target = self._find_match(self._stable_words, word)
             if target is not None:
-                self._update_word(target, word, increment_count=False)
+                self._update_word(target, word)
                 continue
             target = self._find_match(self._partial_words, word)
             if target is not None:
-                self._update_word(target, word, increment_count=True)
+                self._update_word(target, word)
             else:
                 self._partial_words.append(word)
 
@@ -226,15 +226,14 @@ class SubtitleAssembler:
         return None
 
     @staticmethod
-    def _update_word(target: _WordState, incoming: _WordState, *, increment_count: bool) -> None:
+    def _update_word(target: _WordState, incoming: _WordState) -> None:
         target_weight = max(1, int(target.count))
-        incoming_weight = max(1, int(incoming.count)) if increment_count else 1
+        incoming_weight = max(1, int(incoming.count))
         total_weight = target_weight + incoming_weight
         target.start = ((target.start * target_weight) + (incoming.start * incoming_weight)) / float(total_weight)
         target.end = ((target.end * target_weight) + (incoming.end * incoming_weight)) / float(total_weight)
         target.score = ((target.score * target_weight) + (incoming.score * incoming_weight)) / float(total_weight)
-        if increment_count:
-            target.count = target_weight + incoming_weight
+        target.count = target_weight + incoming_weight
         target.last_seen = max(target.last_seen, incoming.last_seen)
 
     def _words_to_text(self, words: list[_WordState]) -> str:
@@ -307,8 +306,7 @@ class SubtitleAssembler:
             if found is None:
                 deduped.append(word)
             else:
-                self._update_word(found, word, increment_count=False)
-                found.count = max(found.count, word.count)
+                self._update_word(found, word)
         return deduped
 
     def _normalize_output_text(self, text: str) -> str:

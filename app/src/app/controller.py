@@ -2,6 +2,7 @@
 from __future__ import annotations
 import logging
 from pathlib import Path
+import subprocess
 import threading
 import time
 import wave
@@ -50,6 +51,10 @@ class TranscriptionController(QObject):
         self._segment_debug_dir = Path(self._config.log_dir).resolve().parent / "segments"
         self._latest_raw_segment_wav = self._segment_debug_dir / "latest_segment_raw.wav"
         self._latest_stt_segment_wav = self._segment_debug_dir / "latest_segment_stt.wav"
+        self._last_gpu_telemetry_at = 0.0
+        self._gpu_telemetry_interval_seconds = 10.0
+        self._gpu_index: int | None = None
+        self._gpu_telemetry_unavailable_logged = False
         self._bootstrap_ready.connect(self._on_bootstrap_ready)
         self._bootstrap_failed.connect(self._on_bootstrap_failed)
 
@@ -252,6 +257,7 @@ class TranscriptionController(QObject):
                 self._emit_error(f'Capture read failed: {exc}')
                 chunk = None
             now = time.monotonic()
+            self._maybe_log_gpu_telemetry(now)
             if chunk is None:
                 if now - last_chunk_at >= 8.0 and now - last_recover_at >= 8.0:
                     last_recover_at = now
@@ -386,6 +392,9 @@ class TranscriptionController(QObject):
             return
         self._emit_status('WhisperX warmup started (VAD/cache pre-init).')
         try:
+            prewarm_fn = getattr(transcriber, 'prewarm', None)
+            if callable(prewarm_fn):
+                prewarm_fn(self._config.source_language)
             sample_rate = 16000
             duration_sec = 1.0
             channels = 1
@@ -404,6 +413,116 @@ class TranscriptionController(QObject):
         self._subtitle_assembler.mark_sentence_break()
         self._silence_hops = 0
         self._speech_hops = 0
+
+    def _maybe_log_gpu_telemetry(self, now_monotonic: float) -> None:
+        if not bool(getattr(self._config, 'debug_mode', False)):
+            return
+        if 'cuda' not in str(getattr(self._config, 'model_device', '') or '').strip().lower():
+            return
+        if now_monotonic - self._last_gpu_telemetry_at < self._gpu_telemetry_interval_seconds:
+            return
+        self._last_gpu_telemetry_at = now_monotonic
+        message = self._build_gpu_telemetry_message()
+        if not message:
+            if not self._gpu_telemetry_unavailable_logged:
+                self._gpu_telemetry_unavailable_logged = True
+                self._emit_status('GPU telemetry unavailable (no CUDA/nvidia-smi stats).')
+            return
+        self._gpu_telemetry_unavailable_logged = False
+        self._emit_status(message)
+
+    def _build_gpu_telemetry_message(self) -> str:
+        torch_stats = self._collect_torch_cuda_stats()
+        smi_stats = self._collect_nvidia_smi_stats()
+        if not torch_stats and not smi_stats:
+            return ''
+        parts: list[str] = ['[gpu-telemetry]']
+        if torch_stats:
+            parts.append(
+                'torch'
+                f"(dev={int(torch_stats['device_index'])},"
+                f"alloc={torch_stats['alloc_mb']:.0f}MB,"
+                f"reserved={torch_stats['reserved_mb']:.0f}MB,"
+                f"max_alloc={torch_stats['max_alloc_mb']:.0f}MB,"
+                f"total={torch_stats['total_mb']:.0f}MB)"
+            )
+        if smi_stats:
+            parts.append(
+                'nvidia-smi'
+                f"(gpu={int(smi_stats['index'])},"
+                f"util={smi_stats['gpu_util_pct']:.0f}%,"
+                f"mem_util={smi_stats['mem_util_pct']:.0f}%,"
+                f"vram={smi_stats['mem_used_mb']:.0f}/{smi_stats['mem_total_mb']:.0f}MB)"
+            )
+        return ' '.join(parts)
+
+    def _collect_torch_cuda_stats(self) -> dict[str, float] | None:
+        try:
+            import torch  # type: ignore
+        except Exception:
+            return None
+        try:
+            if not torch.cuda.is_available():
+                return None
+            device_index = int(torch.cuda.current_device())
+            if self._gpu_index is None:
+                self._gpu_index = device_index
+            alloc_mb = float(torch.cuda.memory_allocated(device_index)) / (1024.0 * 1024.0)
+            reserved_mb = float(torch.cuda.memory_reserved(device_index)) / (1024.0 * 1024.0)
+            max_alloc_mb = float(torch.cuda.max_memory_allocated(device_index)) / (1024.0 * 1024.0)
+            total_mb = float(torch.cuda.get_device_properties(device_index).total_memory) / (1024.0 * 1024.0)
+            return {
+                'device_index': float(device_index),
+                'alloc_mb': alloc_mb,
+                'reserved_mb': reserved_mb,
+                'max_alloc_mb': max_alloc_mb,
+                'total_mb': total_mb,
+            }
+        except Exception:
+            return None
+
+    def _collect_nvidia_smi_stats(self) -> dict[str, float] | None:
+        try:
+            result = subprocess.run(
+                [
+                    'nvidia-smi',
+                    '--query-gpu=index,utilization.gpu,utilization.memory,memory.used,memory.total',
+                    '--format=csv,noheader,nounits',
+                ],
+                capture_output=True,
+                text=True,
+                timeout=1.5,
+                check=False,
+            )
+        except Exception:
+            return None
+        if result.returncode != 0:
+            return None
+        rows: list[dict[str, float]] = []
+        for raw in (result.stdout or '').splitlines():
+            line = raw.strip()
+            if not line:
+                continue
+            cols = [c.strip() for c in line.split(',')]
+            if len(cols) < 5:
+                continue
+            try:
+                rows.append({
+                    'index': float(cols[0]),
+                    'gpu_util_pct': float(cols[1]),
+                    'mem_util_pct': float(cols[2]),
+                    'mem_used_mb': float(cols[3]),
+                    'mem_total_mb': float(cols[4]),
+                })
+            except Exception:
+                continue
+        if not rows:
+            return None
+        target_index = self._gpu_index if self._gpu_index is not None else 0
+        for row in rows:
+            if int(row.get('index', -1)) == int(target_index):
+                return row
+        return rows[0]
 
     def _build_stt_transcriber(self, *, device_override: str | None=None, compute_type_override: str | None=None) -> STTTranscriber:
         """Construct provider-specific STT transcriber using current RuntimeConfig."""

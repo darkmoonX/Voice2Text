@@ -150,6 +150,16 @@ class WhisperXTranscriber:
             self._emit("WhisperX produced empty text after alignment/postprocess.")
         return text
 
+    def prewarm(self, language: Optional[str] = None) -> None:
+        """Preload alignment assets for configured language without waiting for first spoken segment."""
+        if not self._enable_forced_alignment:
+            return
+        (lang_hint, _) = normalize_language_hint(language)
+        align_lang = self._resolve_alignment_language(lang_hint, "")
+        if not align_lang:
+            return
+        self._ensure_alignment_model_loaded(align_lang)
+
 
     def _transcribe_with_compat(self, audio, kwargs: dict[str, object]):
         active = dict(kwargs)
@@ -212,50 +222,59 @@ class WhisperXTranscriber:
         if not segments or not language_code:
             return segments
         try:
-            align_repo_id = self._resolve_alignment_repo_id(language_code)
-            align_local_dir = self._resolve_alignment_local_dir(language_code, align_repo_id)
-            explicit_model = self._alignment_model.strip()
-            model_selection = explicit_model if explicit_model else f"auto:{align_repo_id or language_code}"
-            cache_key = f"{language_code}|{model_selection.lower()}"
-
-            if cache_key not in self._align_cache:
-                self._emit(
-                    f"WhisperX alignment model loading: language={language_code}; "
-                    f"model={model_selection}; repo={(align_repo_id or 'auto-map')}; cache_key={cache_key}"
-                )
-                self._prepare_optional_hf_repo_download(
-                    repo_id=align_repo_id,
-                    local_dir=align_local_dir,
-                    provider="whisperx-align",
-                    model_name=(explicit_model or language_code),
-                )
-                kwargs: dict[str, object] = {
-                    "language_code": language_code,
-                    "device": self._device,
-                    "model_dir": str(self._model_root / "align"),
-                }
-                local_repo_ready = bool(align_repo_id) and align_local_dir.exists() and any(align_local_dir.rglob('*'))
-                if local_repo_ready:
-                    kwargs["model_name"] = str(align_local_dir)
-                    model_selection = str(align_local_dir)
-                elif explicit_model:
-                    kwargs["model_name"] = explicit_model
-                model_a, metadata = self._run_with_external_download_progress(
-                    f"align-{language_code}",
-                    lambda: self._whisperx.load_align_model(**kwargs),
-                )
-                self._align_cache[cache_key] = (model_a, metadata)
-                self._emit(
-                    f"WhisperX alignment model ready: language={language_code}; "
-                    f"model={model_selection}; cache_key={cache_key}"
-                )
-
-            (align_model, metadata) = self._align_cache[cache_key]
+            cached = self._ensure_alignment_model_loaded(language_code)
+            if cached is None:
+                return segments
+            (align_model, metadata) = cached
             aligned_result = self._whisperx.align(segments, align_model, metadata, audio, self._device, return_char_alignments=False)
             return list(aligned_result.get("segments", segments))
         except Exception as exc:
             self._emit(f"WhisperX alignment skipped: {exc}")
             return segments
+
+    def _ensure_alignment_model_loaded(self, language_code: str) -> tuple[object, object] | None:
+        if not language_code:
+            return None
+        align_repo_id = self._resolve_alignment_repo_id(language_code)
+        align_local_dir = self._resolve_alignment_local_dir(language_code, align_repo_id)
+        explicit_model = self._alignment_model.strip()
+        model_selection = explicit_model if explicit_model else f"auto:{align_repo_id or language_code}"
+        cache_key = f"{language_code}|{model_selection.lower()}"
+        cached = self._align_cache.get(cache_key)
+        if cached is not None:
+            return cached
+
+        self._emit(
+            f"WhisperX alignment model loading: language={language_code}; "
+            f"model={model_selection}; repo={(align_repo_id or 'auto-map')}; cache_key={cache_key}"
+        )
+        self._prepare_optional_hf_repo_download(
+            repo_id=align_repo_id,
+            local_dir=align_local_dir,
+            provider="whisperx-align",
+            model_name=(explicit_model or language_code),
+        )
+        kwargs: dict[str, object] = {
+            "language_code": language_code,
+            "device": self._device,
+            "model_dir": str(self._model_root / "align"),
+        }
+        local_repo_ready = bool(align_repo_id) and align_local_dir.exists() and any(align_local_dir.rglob('*'))
+        if local_repo_ready:
+            kwargs["model_name"] = str(align_local_dir)
+            model_selection = str(align_local_dir)
+        elif explicit_model:
+            kwargs["model_name"] = explicit_model
+        model_a, metadata = self._run_with_external_download_progress(
+            f"align-{language_code}",
+            lambda: self._whisperx.load_align_model(**kwargs),
+        )
+        self._align_cache[cache_key] = (model_a, metadata)
+        self._emit(
+            f"WhisperX alignment model ready: language={language_code}; "
+            f"model={model_selection}; cache_key={cache_key}"
+        )
+        return self._align_cache.get(cache_key)
 
     def _attach_speaker_labels(self, audio, segments: list[dict]) -> list[dict]:
         if not self._enable_diarization:

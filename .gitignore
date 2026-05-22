@@ -1,4 +1,4 @@
-.venv/
+﻿.venv/
 __pycache__/
 *.pyc
 .vscode/
@@ -12,6 +12,7 @@ app/src/debug_logs/
 app/src/runtime_bin/
 app/src/models/
 app/src/segments/
+app/src/runtime_settings.json
 app/src/__pycache__/
 app/native/audio_bridge/build*
 app/src/tests/

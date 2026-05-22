@@ -16,6 +16,7 @@ from .logging_utils import configure_app_logger
 from .overlay_window import SubtitleOverlayWindow
 from .stt import has_failed_reports, run_provider_health_check, summarize_health_reports
 from .stt.whisper_provider import WhisperRuntimeParams, load_whisper_runtime_params
+from .settings_persistence import apply_updates_to_config, load_persisted_updates, save_runtime_settings
 from .tray_controller import Voice2TextTrayController
 
 
@@ -211,6 +212,11 @@ def run_qt_app(cfg: RuntimeConfig) -> int:
     """Create overlay + controller + tray, wire signals, and run Qt event loop."""
     logger = configure_app_logger(cfg.log_dir)
     logger.info('Voice2Text startup')
+    persisted_updates = load_persisted_updates()
+    if persisted_updates:
+        changed_keys = apply_updates_to_config(cfg, persisted_updates)
+        if changed_keys:
+            logger.info('Loaded persisted settings: %s', sorted(changed_keys))
     _configure_windows_dll_search_paths(cfg, on_status=lambda msg: logger.info(msg))
     if cfg.stt_provider == 'whisper' and cfg.model_device.lower().startswith('cuda'):
         ok = ensure_cublas12_from_source(source_dll=cfg.cuda_compat_source_dll, on_status=lambda msg: logger.info(msg))
@@ -262,19 +268,17 @@ def run_qt_app(cfg: RuntimeConfig) -> int:
     tray_holder: dict[str, Voice2TextTrayController] = {}
 
     def apply_settings(updates: dict[str, object]) -> None:
-        requires_restart = False
-        for (key, value) in updates.items():
-            if not hasattr(cfg, key):
-                continue
-            if getattr(cfg, key) == value:
-                continue
-            setattr(cfg, key, value)
-            if key in restart_keys:
-                requires_restart = True
+        changed_keys = apply_updates_to_config(cfg, updates)
+        requires_restart = any((key in restart_keys for key in changed_keys))
         overlay.apply_runtime_config(cfg)
         tray = tray_holder.get('tray')
         if tray is not None and 'ui_language' in updates:
             tray.refresh_locale()
+        try:
+            settings_path = save_runtime_settings(cfg)
+            logger.info('Persisted settings saved: %s', settings_path)
+        except Exception:
+            logger.exception('Failed to save persisted settings')
         logger.info('Settings updated: %s', updates)
         ensure_debug_window_state()
         if requires_restart:
@@ -310,7 +314,6 @@ def main(argv: list[str] | None=None) -> int:
         print(summarize_health_reports(reports))
         return 2 if has_failed_reports(reports) else 0
     return run_qt_app(cfg)
-
 
 
 

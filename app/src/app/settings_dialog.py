@@ -162,6 +162,7 @@ class SettingsDialog(QDialog):
     ) -> None:
         super().__init__(parent)
         self._config = config
+        self._default_config = RuntimeConfig()
         self._devices = list(devices)
         self._app_sessions = list(app_sessions)
         self._device_provider = device_provider
@@ -364,60 +365,76 @@ class SettingsDialog(QDialog):
         self._update_opacity_label(self._opacity_slider.value())
         root.addLayout(form)
 
+        footer = QHBoxLayout()
+        self._reset_defaults_btn = QPushButton(self._t("reset_defaults"))
+        self._reset_defaults_btn.clicked.connect(self._reset_to_defaults)
+        footer.addWidget(self._reset_defaults_btn)
+        footer.addStretch(1)
+
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
-        root.addWidget(buttons)
+        footer.addWidget(buttons)
+        root.addLayout(footer)
 
         self._on_mode_changed()
         self._on_stt_provider_changed()
         self._on_translation_toggle()
         self._apply_help_tooltips()
 
-    def _init_loopback_indices(self) -> list[int]:
-        indices = list(self._config.source_device_indices)
-        if not indices and self._config.device_index is not None:
-            indices = [self._config.device_index]
+    @staticmethod
+    def _loopback_indices_from_config(config: RuntimeConfig) -> list[int]:
+        indices = list(config.source_device_indices)
+        if not indices and config.device_index is not None:
+            indices = [config.device_index]
         return indices
 
-    def _init_app_names(self) -> list[str]:
-        names = list(self._config.source_app_names)
-        if not names and self._config.source_app_name:
-            names = [self._config.source_app_name]
+    @staticmethod
+    def _app_names_from_config(config: RuntimeConfig) -> list[str]:
+        names = list(config.source_app_names)
+        if not names and config.source_app_name:
+            names = [config.source_app_name]
         return names
 
-    def _sync_from_config(self) -> None:
-        self._set_combo_data(self._ui_language_combo, self._config.ui_language)
-        self._set_combo_data(self._mode_combo, self._config.source_mode)
-        self._set_combo_data(self._stt_provider_combo, self._config.stt_provider)
-        self._set_combo_data(self._stt_variant_combo, self._config.stt_variant)
-        self._stt_model_path_edit.setText(self._config.stt_model_path)
-        self._stt_auto_download_check.setChecked(self._config.stt_auto_download)
-        self._set_combo_data(self._whisperx_vad_check, str(getattr(self._config, "whisperx_vad_method", "silero-vad") or "silero-vad"))
-        self._whisperx_diarization_check.setChecked(self._config.whisperx_enable_diarization)
-        self._set_combo_data(self._whisperx_align_language_combo, str(getattr(self._config, 'whisperx_alignment_language', 'auto') or 'auto'))
-        self._set_alignment_model_value(self._config.whisperx_alignment_model)
-        self._whisperx_diar_model_edit.setText(self._config.whisperx_diarization_model)
-        self._whisperx_hf_token_edit.setText(self._config.whisperx_hf_token)
-        self._segment_spin.setValue(self._config.segment_seconds)
-        self._hop_spin.setValue(self._config.hop_seconds)
-        self._set_combo_data(self._merge_method_combo, self._config.overlap_merge_method)
-        self._vad_threshold_spin.setValue(self._config.vad_rms_threshold)
-        self._translation_enabled_check.setChecked(self._config.translation_enabled)
-        style = self._config.bilingual_style if self._config.bilingual_style != "inline" else "stacked"
+    def _init_loopback_indices(self) -> list[int]:
+        return self._loopback_indices_from_config(self._config)
+
+    def _init_app_names(self) -> list[str]:
+        return self._app_names_from_config(self._config)
+
+    def _sync_from_config(self, config: RuntimeConfig | None = None) -> None:
+        cfg = config or self._config
+        self._set_combo_data(self._ui_language_combo, cfg.ui_language)
+        self._set_combo_data(self._mode_combo, cfg.source_mode)
+        self._set_combo_data(self._stt_provider_combo, cfg.stt_provider)
+        self._set_combo_data(self._stt_variant_combo, cfg.stt_variant)
+        self._stt_model_path_edit.setText(cfg.stt_model_path)
+        self._stt_auto_download_check.setChecked(cfg.stt_auto_download)
+        self._set_combo_data(self._whisperx_vad_check, str(getattr(cfg, "whisperx_vad_method", "silero-vad") or "silero-vad"))
+        self._whisperx_diarization_check.setChecked(cfg.whisperx_enable_diarization)
+        self._set_combo_data(self._whisperx_align_language_combo, str(getattr(cfg, 'whisperx_alignment_language', 'auto') or 'auto'))
+        self._set_alignment_model_value(cfg.whisperx_alignment_model)
+        self._whisperx_diar_model_edit.setText(cfg.whisperx_diarization_model)
+        self._whisperx_hf_token_edit.setText(cfg.whisperx_hf_token)
+        self._segment_spin.setValue(cfg.segment_seconds)
+        self._hop_spin.setValue(cfg.hop_seconds)
+        self._set_combo_data(self._merge_method_combo, cfg.overlap_merge_method)
+        self._vad_threshold_spin.setValue(cfg.vad_rms_threshold)
+        self._translation_enabled_check.setChecked(cfg.translation_enabled)
+        style = cfg.bilingual_style if cfg.bilingual_style != "inline" else "stacked"
         self._set_combo_data(self._bilingual_combo, style)
-        self._set_combo_data(self._translation_language_combo, self._config.translation_to)
-        source_language = self._config.source_language or "auto"
+        self._set_combo_data(self._translation_language_combo, cfg.translation_to)
+        source_language = cfg.source_language or "auto"
         if source_language == "zh":
             source_language = "zh-hant"
         self._set_combo_data(self._source_language_combo, source_language)
-        self._font_size_spin.setValue(self._config.font_size)
-        self._opacity_slider.setValue(int(self._config.overlay_opacity * 100))
-        source_color = self._config.source_text_color or self._config.text_color
+        self._font_size_spin.setValue(cfg.font_size)
+        self._opacity_slider.setValue(int(cfg.overlay_opacity * 100))
+        source_color = cfg.source_text_color or cfg.text_color
         self._set_color_button(self._source_color_btn, source_color)
-        self._set_color_button(self._translated_color_btn, self._config.translated_text_color)
-        self._set_color_button(self._bg_color_btn, self._config.background_color)
-        self._debug_mode_check.setChecked(bool(getattr(self._config, "debug_mode", False)))
+        self._set_color_button(self._translated_color_btn, cfg.translated_text_color)
+        self._set_color_button(self._bg_color_btn, cfg.background_color)
+        self._debug_mode_check.setChecked(bool(getattr(cfg, "debug_mode", False)))
 
     def _on_mode_changed(self) -> None:
         mode = self._mode_combo.currentData()
@@ -646,12 +663,23 @@ class SettingsDialog(QDialog):
             self._translated_color_btn: "Translated text color.",
             self._bg_color_btn: "Overlay background color.",
             self._debug_mode_check: "Enable or disable Debug trace window and debug log output.",
+            self._reset_defaults_btn: "Reset all settings in this dialog back to default values.",
         }
         for (widget, tip) in tips.items():
             try:
                 widget.setToolTip(tip)
             except Exception:
                 pass
+
+    def _reset_to_defaults(self) -> None:
+        defaults = self._default_config
+        self._selected_loopback_indices = self._loopback_indices_from_config(defaults)
+        self._selected_app_names = self._app_names_from_config(defaults)
+        self._sync_from_config(defaults)
+        self._last_stt_provider = str(self._stt_provider_combo.currentData() or "whisper").strip() or "whisper"
+        self._on_mode_changed()
+        self._on_stt_provider_changed()
+        self._on_translation_toggle()
 
 
     def _collect_updates(self) -> dict[str, object]:
