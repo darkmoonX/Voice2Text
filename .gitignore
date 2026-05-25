@@ -16,6 +16,7 @@ app/src/runtime_settings.json
 app/src/__pycache__/
 app/native/audio_bridge/build*
 app/src/tests/
+app/scripts/
 
 *.obj
 *.pdb

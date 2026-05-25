@@ -4,8 +4,6 @@ from typing import Callable, Optional
 from ..config import RuntimeConfig
 from ..cuda_compat import can_load_cublas12, ensure_cublas12_from_source
 from .base import STTProvider, STTTranscriber
-from .whisper_provider import FasterWhisperTranscriber
-from .whisperx_provider import WhisperXTranscriber
 from .registry import normalize_stt_provider, normalize_stt_variant
 
 def _resolve_whisper_runtime(config: RuntimeConfig, *, device_override: Optional[str], compute_type_override: Optional[str], progress_callback: Callable[[str], None] | None) -> tuple[str, str]:
@@ -51,6 +49,8 @@ def create_stt_transcriber(config: RuntimeConfig, *, device_override: Optional[s
 
 
 def _build_whisper(config: RuntimeConfig, *, device_override: Optional[str], compute_type_override: Optional[str], progress_callback: Callable[[str], None] | None) -> STTTranscriber:
+    from .whisper_provider import FasterWhisperTranscriber
+
     auto_download = bool(config.stt_auto_download)
     model_ref = config.stt_model_path.strip() or config.model_size
     (device, compute_type) = _resolve_whisper_runtime(config, device_override=device_override, compute_type_override=compute_type_override, progress_callback=progress_callback)
@@ -58,6 +58,8 @@ def _build_whisper(config: RuntimeConfig, *, device_override: Optional[str], com
 
 
 def _build_whisperx(config: RuntimeConfig, *, device_override: Optional[str], compute_type_override: Optional[str], progress_callback: Callable[[str], None] | None) -> STTTranscriber:
+    from .whisperx_provider import WhisperXTranscriber
+
     model_ref = config.stt_model_path.strip() or config.model_size
     (device, compute_type) = _resolve_whisper_runtime(config, device_override=device_override, compute_type_override=compute_type_override, progress_callback=progress_callback)
     if str(device).lower().startswith('cuda') and (not _has_torch_cuda()):
@@ -76,6 +78,7 @@ def _build_whisperx(config: RuntimeConfig, *, device_override: Optional[str], co
         enable_diarization=bool(getattr(config, 'whisperx_enable_diarization', False)),
         alignment_model=str(getattr(config, 'whisperx_alignment_model', '') or ''),
         alignment_language=str(getattr(config, 'whisperx_alignment_language', 'auto') or 'auto'),
+        alignment_device=str(getattr(config, 'whisperx_alignment_device', 'auto') or 'auto'),
         source_language_hint=str(getattr(config, 'source_language', '') or ''),
         diarization_model=str(getattr(config, 'whisperx_diarization_model', 'pyannote/speaker-diarization-3.1') or 'pyannote/speaker-diarization-3.1'),
         hf_token=str(getattr(config, 'whisperx_hf_token', '') or ''),

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+import numpy as np
 from pathlib import Path
 from typing import Callable, Optional
 import threading
@@ -10,7 +11,7 @@ import warnings
 
 from ..model_paths import library_model_dir
 from .audio_utils import has_enough_signal, normalize_chinese_script, normalize_language_hint, pcm16_to_mono_float, resample
-from .model_download import download_hf_snapshot_with_progress, emit_progress, format_download_progress
+from .model_download import download_hf_files_with_progress, download_hf_snapshot_with_progress, emit_progress, format_download_progress
 import re
 
 
@@ -29,6 +30,7 @@ class WhisperXTranscriber:
         enable_diarization: bool = False,
         alignment_model: str = "",
         alignment_language: str = "auto",
+        alignment_device: str = "auto",
         source_language_hint: str | None = None,
         diarization_model: str = "pyannote/speaker-diarization-3.1",
         hf_token: str = "",
@@ -62,12 +64,16 @@ class WhisperXTranscriber:
         self._enable_diarization = bool(enable_diarization)
         self._alignment_model = (alignment_model or "").strip()
         self._alignment_language = (alignment_language or 'auto').strip().lower()
+        self._alignment_device_setting = (alignment_device or "auto").strip().lower()
         (normalized_source_lang, _) = normalize_language_hint(source_language_hint)
         self._source_language_hint = normalized_source_lang
         self._diarization_model = (diarization_model or "pyannote/speaker-diarization-3.1").strip()
         self._hf_token = (hf_token or "").strip()
         self._auto_download = bool(auto_download)
         self._progress_callback = progress_callback
+        self._trace_enabled = (os.environ.get("VOICE2TEXT_TRACE_WHISPERX", "0").strip().lower() not in {"", "0", "false", "no", "off"})
+        self._trace_counter = 0
+        self._alignment_device = self._resolve_alignment_device()
 
         self._model_root = library_model_dir("whisperx")
         self._download_probe_roots = self._build_download_probe_roots()
@@ -89,11 +95,18 @@ class WhisperXTranscriber:
         self._last_transcription_meta: dict[str, object] = {}
         self._language_route_logged: set[tuple[str, str, str, str]] = set()
         self._emit(f"WhisperX initialized: model={model_arg}, device={self._device}")
+        if self._alignment_device != self._device:
+            self._emit(
+                "WhisperX alignment device override active: "
+                f"asr_device={self._device}, align_device={self._alignment_device}"
+            )
 
     def has_enough_signal(self, chunk, threshold: float = 0.008, channel_mode: str = "mono") -> bool:
         return has_enough_signal(chunk, threshold=threshold, channel_mode=channel_mode)
 
     def transcribe(self, chunk, language: Optional[str] = None, channel_mode: str = "mono") -> str:
+        self._trace_counter += 1
+        trace_id = self._trace_counter
         audio = pcm16_to_mono_float(chunk.pcm16, chunk.channels, channel_mode=channel_mode)
         if audio.size == 0:
             return ""
@@ -101,6 +114,11 @@ class WhisperXTranscriber:
             audio = resample(audio, chunk.sample_rate, 16000)
         if audio.size == 0:
             return ""
+        if self._trace_enabled:
+            self._emit(
+                f"[whisperx-trace] #{trace_id} start: in={chunk.sample_rate}Hz/{chunk.channels}ch, "
+                f"resampled=16000Hz/1ch, samples={int(audio.size)}"
+            )
 
         (lang_hint, zh_script) = normalize_language_hint(language)
         kwargs: dict[str, object] = {"batch_size": self._batch_size}
@@ -114,7 +132,17 @@ class WhisperXTranscriber:
         lang_detected = str(result.get("language") or "").strip().lower()
         align_lang = self._resolve_alignment_language(lang_hint, lang_detected)
         self._emit_language_route(language, lang_hint, lang_detected, align_lang)
-        aligned = self._align_segments(audio, segments, align_lang) if self._enable_forced_alignment else segments
+        if self._trace_enabled:
+            self._emit(
+                f"[whisperx-trace] #{trace_id} asr-done: segments={len(segments)}, "
+                f"detected_lang={lang_detected or 'n/a'}"
+            )
+        aligned = self._align_segments(audio, segments, align_lang, trace_id=trace_id) if self._enable_forced_alignment else segments
+        if self._trace_enabled:
+            self._emit(
+                f"[whisperx-trace] #{trace_id} align-done: segments={len(aligned)}, "
+                f"align_lang={align_lang or 'n/a'}, align_device={self._alignment_device}"
+            )
         if self._enable_diarization:
             aligned = self._attach_speaker_labels(audio, aligned)
 
@@ -148,6 +176,8 @@ class WhisperXTranscriber:
             text = normalize_chinese_script(text, zh_script)
         if not text:
             self._emit("WhisperX produced empty text after alignment/postprocess.")
+        elif self._trace_enabled:
+            self._emit(f"[whisperx-trace] #{trace_id} text-done: chars={len(text)}")
         return text
 
     def prewarm(self, language: Optional[str] = None) -> None:
@@ -218,7 +248,7 @@ class WhisperXTranscriber:
             f"source={key[0] or 'auto'}; asr_hint={key[1] or 'auto'}; "
             f"detected={key[2] or 'n/a'}; align_mode={mode}; align={key[3] or 'n/a'}"
         )
-    def _align_segments(self, audio, segments: list[dict], language_code: str) -> list[dict]:
+    def _align_segments(self, audio, segments: list[dict], language_code: str, *, trace_id: int | None = None) -> list[dict]:
         if not segments or not language_code:
             return segments
         try:
@@ -226,11 +256,137 @@ class WhisperXTranscriber:
             if cached is None:
                 return segments
             (align_model, metadata) = cached
-            aligned_result = self._whisperx.align(segments, align_model, metadata, audio, self._device, return_char_alignments=False)
+            audio_f32 = np.asarray(audio, dtype=np.float32)
+            if audio_f32.ndim != 1:
+                audio_f32 = audio_f32.reshape(-1)
+            if not audio_f32.flags["C_CONTIGUOUS"]:
+                audio_f32 = np.ascontiguousarray(audio_f32)
+            if not np.isfinite(audio_f32).all():
+                audio_f32 = np.nan_to_num(audio_f32, nan=0.0, posinf=1.0, neginf=-1.0)
+
+            audio_duration = float(audio_f32.size) / 16000.0 if audio_f32.size > 0 else 0.0
+            segments_for_align = self._sanitize_alignment_segments(segments, audio_duration)
+            if not segments_for_align:
+                return segments
+
+            max_end = max(float(seg.get("end", 0.0) or 0.0) for seg in segments_for_align)
+            crop_samples = int(min(audio_duration, max(0.5, max_end + 0.2)) * 16000.0)
+            crop_samples = min(max(1, crop_samples), int(audio_f32.size))
+            audio_for_align = audio_f32[:crop_samples]
+            if self._trace_enabled:
+                tid = str(trace_id) if trace_id is not None else "?"
+                self._emit(
+                    f"[whisperx-trace] #{tid} align-input: lang={language_code}, "
+                    f"segments_raw={len(segments)}, segments_clean={len(segments_for_align)}, "
+                    f"audio_samples={int(audio_f32.size)}, crop_samples={int(crop_samples)}, "
+                    f"audio_sec={audio_duration:.3f}, max_end={max_end:.3f}, "
+                    f"align_device={self._alignment_device}"
+                )
+
+            if self._alignment_device == "cuda":
+                self._sync_cuda_if_available()
+
+            aligned_result = self._run_whisperx_align(
+                segments_for_align,
+                align_model,
+                metadata,
+                audio_for_align,
+                self._alignment_device,
+            )
+
+            if self._alignment_device == "cuda":
+                self._sync_cuda_if_available()
+            if self._trace_enabled:
+                tid = str(trace_id) if trace_id is not None else "?"
+                aligned_count = len(list(aligned_result.get("segments", segments) or [])) if isinstance(aligned_result, dict) else len(segments)
+                self._emit(f"[whisperx-trace] #{tid} align-success: aligned_segments={aligned_count}")
             return list(aligned_result.get("segments", segments))
         except Exception as exc:
             self._emit(f"WhisperX alignment skipped: {exc}")
             return segments
+
+    @staticmethod
+    def _sanitize_alignment_segments(segments: list[dict], audio_duration: float) -> list[dict]:
+        if audio_duration <= 0.0:
+            return []
+        cleaned: list[dict] = []
+        max_end_allowed = max(0.02, audio_duration - 0.01)
+        for raw in segments:
+            if not isinstance(raw, dict):
+                continue
+            text = str(raw.get("text") or "").strip()
+            if not text:
+                continue
+            try:
+                start = float(raw.get("start"))
+                end = float(raw.get("end"))
+            except Exception:
+                continue
+            start = max(0.0, min(start, max_end_allowed))
+            end = max(start + 0.02, min(end, audio_duration))
+            if end - start < 0.02:
+                continue
+            item = dict(raw)
+            item["start"] = float(start)
+            item["end"] = float(end)
+            cleaned.append(item)
+        return cleaned
+
+    def _run_whisperx_align(self, segments: list[dict], align_model, metadata, audio_f32: np.ndarray, device: str):
+        try:
+            import torch  # type: ignore
+        except Exception:
+            torch = None
+        if torch is not None:
+            with torch.inference_mode():
+                try:
+                    with torch.autocast(device_type="cuda", enabled=False):
+                        return self._whisperx.align(
+                            segments,
+                            align_model,
+                            metadata,
+                            audio_f32,
+                            device,
+                            interpolate_method="nearest",
+                            return_char_alignments=False,
+                        )
+                except TypeError:
+                    return self._whisperx.align(
+                        segments,
+                        align_model,
+                        metadata,
+                        audio_f32,
+                        device,
+                        return_char_alignments=False,
+                    )
+        try:
+            return self._whisperx.align(
+                segments,
+                align_model,
+                metadata,
+                audio_f32,
+                device,
+                interpolate_method="nearest",
+                return_char_alignments=False,
+            )
+        except TypeError:
+            return self._whisperx.align(
+                segments,
+                align_model,
+                metadata,
+                audio_f32,
+                device,
+                return_char_alignments=False,
+            )
+
+    @staticmethod
+    def _sync_cuda_if_available() -> None:
+        try:
+            import torch  # type: ignore
+            if torch.cuda.is_available():
+                torch.cuda.synchronize()
+        except Exception:
+            return
 
     def _ensure_alignment_model_loaded(self, language_code: str) -> tuple[object, object] | None:
         if not language_code:
@@ -256,15 +412,13 @@ class WhisperXTranscriber:
         )
         kwargs: dict[str, object] = {
             "language_code": language_code,
-            "device": self._device,
+            "device": self._alignment_device,
             "model_dir": str(self._model_root / "align"),
         }
-        local_repo_ready = bool(align_repo_id) and align_local_dir.exists() and any(align_local_dir.rglob('*'))
-        if local_repo_ready:
-            kwargs["model_name"] = str(align_local_dir)
-            model_selection = str(align_local_dir)
-        elif explicit_model:
-            kwargs["model_name"] = explicit_model
+        resolved_model_name = self._resolve_alignment_model_name_for_load(language_code)
+        if resolved_model_name:
+            kwargs["model_name"] = resolved_model_name
+            model_selection = resolved_model_name
         model_a, metadata = self._run_with_external_download_progress(
             f"align-{language_code}",
             lambda: self._whisperx.load_align_model(**kwargs),
@@ -275,6 +429,17 @@ class WhisperXTranscriber:
             f"model={model_selection}; cache_key={cache_key}"
         )
         return self._align_cache.get(cache_key)
+
+    def _resolve_alignment_model_name_for_load(self, language_code: str) -> str:
+        align_repo_id = self._resolve_alignment_repo_id(language_code)
+        align_local_dir = self._resolve_alignment_local_dir(language_code, align_repo_id)
+        explicit_model = self._alignment_model.strip()
+        local_repo_ready = bool(align_repo_id) and align_local_dir.exists() and any(align_local_dir.rglob('*'))
+        if local_repo_ready:
+            return str(align_local_dir)
+        if explicit_model:
+            return explicit_model
+        return ""
 
     def _attach_speaker_labels(self, audio, segments: list[dict]) -> list[dict]:
         if not self._enable_diarization:
@@ -308,24 +473,65 @@ class WhisperXTranscriber:
             return model_ref
 
         target_dir = self._model_root / "stt" / model_ref
-        if (target_dir / "model.bin").exists() and (target_dir / "config.json").exists():
+        if self._is_stt_model_dir_ready(target_dir):
             return str(target_dir)
+        if target_dir.exists() and (not self._is_stt_model_dir_ready(target_dir)):
+            self._emit(f"WhisperX STT model folder exists but incomplete: {target_dir.name}; attempting repair download")
 
         repo_id = self._resolve_whisper_repo_id(model_ref)
         if repo_id and self._auto_download:
             self._emit(f"WhisperX STT model download started: {model_ref}")
-            download_hf_snapshot_with_progress(
-                repo_id=repo_id,
-                output_dir=str(target_dir),
-                allow_patterns=["config.json", "preprocessor_config.json", "model.bin", "tokenizer.json", "vocabulary.*"],
-                progress_callback=self._progress_callback,
-                provider="whisperx",
-                model_name=model_ref,
-            )
+            self._download_stt_model_with_progress(repo_id=repo_id, target_dir=target_dir, model_ref=model_ref)
+            if not self._is_stt_model_dir_ready(target_dir):
+                raise RuntimeError(
+                    f"WhisperX STT model directory is incomplete after download: {target_dir}"
+                )
             self._emit(f"WhisperX STT model download completed: {model_ref}")
             return str(target_dir)
 
         return model_ref
+
+    @staticmethod
+    def _is_stt_model_dir_ready(path: Path) -> bool:
+        if not path.is_dir():
+            return False
+        model_bin = path / "model.bin"
+        config_json = path / "config.json"
+        if not model_bin.exists() or not config_json.exists():
+            return False
+        min_expected_bytes = 32 * 1024 * 1024
+        try:
+            return int(model_bin.stat().st_size) >= min_expected_bytes
+        except Exception:
+            return False
+
+    def _download_stt_model_with_progress(self, *, repo_id: str, target_dir: Path, model_ref: str) -> None:
+        allow_patterns = ["config.json", "preprocessor_config.json", "model.bin", "tokenizer.json", "vocabulary.*"]
+        try:
+            download_hf_files_with_progress(
+                repo_id=repo_id,
+                output_dir=str(target_dir),
+                allow_patterns=allow_patterns,
+                progress_callback=self._progress_callback,
+                provider="whisperx",
+                model_name=model_ref,
+                timeout_seconds=60,
+            )
+            return
+        except Exception as exc:
+            self._emit(f"WhisperX direct download failed: {exc}")
+            use_snapshot = str(os.environ.get("VOICE2TEXT_WHISPERX_USE_SNAPSHOT", "")).strip().lower() in {"1", "true", "yes"}
+            if not use_snapshot:
+                raise
+            self._emit("WhisperX snapshot fallback enabled by VOICE2TEXT_WHISPERX_USE_SNAPSHOT=1")
+            download_hf_snapshot_with_progress(
+                repo_id=repo_id,
+                output_dir=str(target_dir),
+                allow_patterns=allow_patterns,
+                progress_callback=self._progress_callback,
+                provider="whisperx",
+                model_name=model_ref,
+            )
 
     def _prepare_optional_hf_repo_download(self, *, repo_id: str, local_dir: Path, provider: str, model_name: str) -> None:
         if not repo_id or (not self._auto_download):
@@ -489,6 +695,42 @@ class WhisperXTranscriber:
 
     def get_last_transcription_meta(self) -> dict[str, object]:
         return dict(self._last_transcription_meta)
+
+    def _resolve_alignment_device(self) -> str:
+        if self._alignment_device_setting in {"cpu", "cuda"}:
+            resolved = self._alignment_device_setting
+            return self._apply_alignment_device_safety_policy(resolved)
+        raw = os.environ.get("VOICE2TEXT_WHISPERX_ALIGN_DEVICE", "auto").strip().lower()
+        if raw in {"cpu", "cuda"}:
+            return self._apply_alignment_device_safety_policy(raw)
+        if self._device != "cuda":
+            return self._apply_alignment_device_safety_policy(self._device)
+        model_token = (self._model_ref or "").strip().lower()
+        if model_token.startswith("large"):
+            return self._apply_alignment_device_safety_policy("cpu")
+        return self._apply_alignment_device_safety_policy(self._device)
+
+    def _apply_alignment_device_safety_policy(self, resolved: str) -> str:
+        """Apply platform-specific guardrails to avoid known WhisperX alignment crashes."""
+        token = (resolved or "").strip().lower()
+        if token != "cuda":
+            return token or "cpu"
+        if os.name != "nt":
+            return token
+        allow_unsafe = str(os.environ.get("VOICE2TEXT_WHISPERX_ALLOW_UNSAFE_CUDA_ALIGN", "")).strip().lower() in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }
+        if allow_unsafe:
+            self._emit("WhisperX alignment CUDA safety guard bypassed by VOICE2TEXT_WHISPERX_ALLOW_UNSAFE_CUDA_ALIGN=1.")
+            return token
+        self._emit(
+            "WhisperX alignment device downgraded to CPU on Windows due known CUDA align access-violation risk. "
+            "Set VOICE2TEXT_WHISPERX_ALLOW_UNSAFE_CUDA_ALIGN=1 to force CUDA alignment."
+        )
+        return "cpu"
 
 
 

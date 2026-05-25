@@ -12,15 +12,17 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Callable, Optional
 
 from ..audio_capture import AudioCaptureBase, AudioChunk
+from .bridge_probe import (
+    check_bridge_health,
+    check_process_loopback_support,
+    resolve_capture_bridge_executable,
+)
 
 if TYPE_CHECKING:
     from ..config import RuntimeConfig
 
 _FRAME_MAGIC = b"V2TB"
 _FRAME_HEADER_BYTES = 16
-_HEALTH_CACHE: dict[str, tuple[bool, str]] = {}
-_PROCESS_LOOPBACK_CACHE: dict[str, tuple[bool, str]] = {}
-_HELP_TEXT_CACHE: dict[str, str] = {}
 
 
 class CppBridgeCapture(AudioCaptureBase):
@@ -54,7 +56,7 @@ class CppBridgeCapture(AudioCaptureBase):
     def start(self) -> None:
         if self._running.is_set():
             return
-        bridge_exe = _resolve_capture_bridge_executable()
+        bridge_exe = resolve_capture_bridge_executable()
         if bridge_exe is None:
             raise RuntimeError(
                 "C++ capture bridge executable not found. Run `app/native/audio_bridge/build_bridge.ps1` or set VOICE2TEXT_CPP_CAPTURE_BRIDGE."
@@ -205,10 +207,10 @@ def build_cpp_capture_from_config(
     mode = (config.source_mode or "loopback").strip().lower()
     if mode not in {"loopback", "app"}:
         return None
-    bridge_exe = _resolve_capture_bridge_executable()
+    bridge_exe = resolve_capture_bridge_executable()
     if bridge_exe is None:
         return None
-    healthy, reason = _check_bridge_health(bridge_exe)
+    healthy, reason = check_bridge_health(bridge_exe)
     if not healthy:
         if on_status is not None:
             on_status(
@@ -224,7 +226,7 @@ def build_cpp_capture_from_config(
             )
         return None
     if mode == "app":
-        supports_process_loopback, reason = _check_process_loopback_support(bridge_exe)
+        supports_process_loopback, reason = check_process_loopback_support(bridge_exe)
         if not supports_process_loopback:
             if on_status is not None:
                 on_status(
@@ -260,24 +262,6 @@ def build_cpp_capture_from_config(
     )
 
 
-def _resolve_capture_bridge_executable() -> Path | None:
-    env = os.environ.get("VOICE2TEXT_CPP_CAPTURE_BRIDGE", "").strip()
-    if env:
-        p = Path(env)
-        if p.exists():
-            return p
-    repo_root = Path(__file__).resolve().parents[4]
-    candidates = [
-        repo_root / "app" / "src" / "runtime_bin" / "voice2text_capture_bridge.exe",
-        repo_root / "app" / "native" / "audio_bridge" / "build" / "Release" / "voice2text_capture_bridge.exe",
-        repo_root / "app" / "native" / "audio_bridge" / "build" / "voice2text_capture_bridge.exe",
-    ]
-    for path in candidates:
-        if path.exists():
-            return path
-    return None
-
-
 def _read_exact(stream, size: int) -> bytes | None:
     data = bytearray()
     while len(data) < size:
@@ -286,134 +270,6 @@ def _read_exact(stream, size: int) -> bytes | None:
             return None
         data.extend(chunk)
     return bytes(data)
-
-
-def _check_bridge_health(exe_path: Path) -> tuple[bool, str]:
-    key = str(exe_path.resolve())
-    cached = _HEALTH_CACHE.get(key)
-    if cached is not None:
-        return cached
-    creationflags = 0
-    if os.name == "nt":
-        creationflags = int(getattr(subprocess, "CREATE_NO_WINDOW", 0))
-    try:
-        proc = subprocess.run(
-            [str(exe_path), "--help"],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            stdin=subprocess.DEVNULL,
-            timeout=4.0,
-            creationflags=creationflags,
-            check=False,
-        )
-    except Exception as exc:
-        result = (False, f"probe-failed: {exc}")
-        _HEALTH_CACHE[key] = result
-        return result
-
-    code = int(proc.returncode)
-    if code in (0, 1):
-        # Accept 1 for stricter parser/build variants that still run correctly.
-        result = (True, f"probe-exit={code}")
-        _HEALTH_CACHE[key] = result
-        return result
-
-    # Windows loader/runtime crash codes may appear as negative or unsigned 32-bit.
-    if code < 0 or code >= 0x80000000:
-        signed = code
-        if code >= 0x80000000:
-            signed = code - 0x100000000
-        result = (
-            False,
-            f"probe-crashed exit={signed} (0x{code:08X}); likely missing/incompatible runtime DLL dependencies for bridge executable",
-        )
-        _HEALTH_CACHE[key] = result
-        return result
-
-    result = (False, f"probe-exit={code}")
-    _HEALTH_CACHE[key] = result
-    return result
-
-
-def _check_process_loopback_support(exe_path: Path) -> tuple[bool, str]:
-    key = str(exe_path.resolve())
-    cached = _PROCESS_LOOPBACK_CACHE.get(key)
-    if cached is not None:
-        return cached
-    help_text = _read_bridge_help_text(exe_path)
-    if "--probe-process-loopback" not in help_text:
-        result = (False, _legacy_probe_unavailable_reason(exe_path))
-        _PROCESS_LOOPBACK_CACHE[key] = result
-        return result
-    creationflags = 0
-    if os.name == "nt":
-        creationflags = int(getattr(subprocess, "CREATE_NO_WINDOW", 0))
-    try:
-        proc = subprocess.run(
-            [str(exe_path), "--probe-process-loopback"],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            stdin=subprocess.DEVNULL,
-            timeout=3.0,
-            creationflags=creationflags,
-            check=False,
-        )
-    except Exception as exc:
-        result = (False, f"probe-failed: {exc}")
-        _PROCESS_LOOPBACK_CACHE[key] = result
-        return result
-
-    code = int(proc.returncode)
-    stderr_text = (proc.stderr or b"").decode("utf-8", errors="replace").strip()
-    if code == 0:
-        result = (True, stderr_text or "supported")
-        _PROCESS_LOOPBACK_CACHE[key] = result
-        return result
-    result = (False, stderr_text or f"unsupported-exit={code}")
-    _PROCESS_LOOPBACK_CACHE[key] = result
-    return result
-
-
-def _read_bridge_help_text(exe_path: Path) -> str:
-    key = str(exe_path.resolve())
-    cached = _HELP_TEXT_CACHE.get(key)
-    if cached is not None:
-        return cached
-    creationflags = 0
-    if os.name == "nt":
-        creationflags = int(getattr(subprocess, "CREATE_NO_WINDOW", 0))
-    text = ""
-    try:
-        proc = subprocess.run(
-            [str(exe_path), "--help"],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            stdin=subprocess.DEVNULL,
-            timeout=4.0,
-            creationflags=creationflags,
-            check=False,
-        )
-        stdout_text = (proc.stdout or b"").decode("utf-8", errors="replace")
-        stderr_text = (proc.stderr or b"").decode("utf-8", errors="replace")
-        text = f"{stdout_text}\n{stderr_text}".strip()
-    except Exception:
-        text = ""
-    _HELP_TEXT_CACHE[key] = text
-    return text
-
-
-def _legacy_probe_unavailable_reason(exe_path: Path) -> str:
-    repo_root = Path(__file__).resolve().parents[4]
-    bridge_main = repo_root / "app" / "native" / "audio_bridge" / "src" / "main.cpp"
-    try:
-        if bridge_main.exists() and bridge_main.stat().st_mtime > exe_path.stat().st_mtime:
-            return (
-                "bridge executable is older than source and does not expose "
-                "--probe-process-loopback; rebuild/deploy bridge binary"
-            )
-    except Exception:
-        pass
-    return "bridge executable does not expose --probe-process-loopback"
 
 
 def _resolve_cpp_segment_debug_path(config: RuntimeConfig) -> Path | None:

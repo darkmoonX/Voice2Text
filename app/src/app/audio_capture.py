@@ -1,18 +1,24 @@
 """Audio source discovery and capture backends for loopback, microphone, and app-session modes."""
 from __future__ import annotations
 import queue
-import re
 import threading
 import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Callable, Optional
 import numpy as np
+from .capture.mixer_utils import mix_tracks, pcm16_to_mono_float, resample
 try:
     import pyaudiowpatch as pyaudio
 except Exception:
     pyaudio = None
 if TYPE_CHECKING:
     from .config import RuntimeConfig
+from .capture.session_match import (
+    format_session_label,
+    session_match_tokens,
+    session_peak_value,
+    token_matches,
+)
 try:
     from pycaw.pycaw import AudioUtilities, IAudioMeterInformation
 except Exception:
@@ -105,112 +111,11 @@ def _collect_active_session_names() -> list[str]:
     names: set[str] = set()
     sessions = _safe_get_audio_sessions()
     for session in sessions:
-        label = _format_session_label(session)
+        label = format_session_label(session)
         if not label:
             continue
         names.add(label)
     return sorted(names, key=str.lower)
-
-def _format_session_label(session: object) -> str:
-    display_name = str(getattr(session, 'DisplayName', '') or '').strip()
-    proc_name = _extract_process_name(session)
-    if display_name.startswith('@') and 'audiosrv' in display_name.lower():
-        display_name = 'System Sounds'
-    if display_name and proc_name:
-        if display_name.casefold() == proc_name.casefold():
-            return proc_name
-        return f'{display_name} ({proc_name})'
-    if display_name:
-        return display_name
-    if proc_name:
-        return proc_name
-    return 'System Sounds'
-
-def _extract_process_name(session: object) -> str:
-    proc = getattr(session, 'Process', None)
-    if proc is None:
-        return ''
-    try:
-        return str(proc.name() or '').strip()
-    except Exception:
-        return ''
-
-def _session_match_tokens(session: object) -> set[str]:
-    tokens: set[str] = set()
-    label = _format_session_label(session).strip().lower()
-    if label:
-        tokens.add(label)
-    display_name = str(getattr(session, 'DisplayName', '') or '').strip().lower()
-    if display_name:
-        tokens.add(display_name)
-    proc_name = _extract_process_name(session).strip().lower()
-    if proc_name:
-        tokens.add(proc_name)
-        if proc_name.endswith('.exe'):
-            tokens.add(proc_name[:-4])
-    if not proc_name and (not display_name):
-        tokens.add('system sounds')
-    return tokens
-
-def _token_matches(target: str, tokens: set[str]) -> bool:
-    if not target.strip():
-        return False
-    target_variants = _target_match_variants(target)
-    token_variants: set[str] = set()
-    for token in tokens:
-        token_variants.update(_target_match_variants(token))
-    for needle in target_variants:
-        for token in token_variants:
-            if not needle or not token:
-                continue
-            if needle == token:
-                return True
-            if len(needle) >= 3 and needle in token:
-                return True
-            if len(token) >= 3 and token in needle:
-                return True
-    needle_canon = _canonicalize_match_text(target)
-    if not needle_canon:
-        return False
-    for token in token_variants:
-        token_canon = _canonicalize_match_text(token)
-        if not token_canon:
-            continue
-        if needle_canon == token_canon:
-            return True
-        if len(needle_canon) >= 4 and needle_canon in token_canon:
-            return True
-        if len(token_canon) >= 4 and token_canon in needle_canon:
-            return True
-    return False
-
-def _target_match_variants(value: str) -> set[str]:
-    raw = (value or '').strip().lower()
-    if not raw:
-        return set()
-    variants = {raw}
-    if raw.endswith('.exe'):
-        variants.add(raw[:-4])
-    for inner in re.findall('\\(([^)]+)\\)', raw):
-        token = inner.strip().lower()
-        if token:
-            variants.add(token)
-            if token.endswith('.exe'):
-                variants.add(token[:-4])
-    parts = [part.strip() for part in re.split('[|,;/]', raw) if part.strip()]
-    variants.update(parts)
-    canonical = _canonicalize_match_text(raw)
-    if canonical:
-        variants.add(canonical)
-    return {item for item in variants if item}
-
-def _canonicalize_match_text(value: str) -> str:
-    lowered = (value or '').strip().lower()
-    if not lowered:
-        return ''
-    lowered = lowered.replace('.exe', '')
-    lowered = re.sub('[^0-9a-z\\u4e00-\\u9fff]+', '', lowered)
-    return lowered
 
 class _SingleDeviceAudioCapture(AudioCaptureBase):
 
@@ -419,16 +324,16 @@ class AppSessionCapture(LoopbackAudioCapture):
         matched_labels: list[str] = []
         active_labels: list[str] = []
         for session in sessions:
-            tokens = _session_match_tokens(session)
+            tokens = session_match_tokens(session)
             if not tokens:
                 continue
-            label = _format_session_label(session)
+            label = format_session_label(session)
             if label and len(active_labels) < 8:
                 active_labels.append(label)
-            peak = _session_peak_value(session)
+            peak = session_peak_value(session, IAudioMeterInformation)
             if peak <= 0.0001:
                 continue
-            if any((_token_matches(target, tokens) for target in self._app_names)):
+            if any((token_matches(target, tokens) for target in self._app_names)):
                 selected_peak = max(selected_peak, peak)
                 if label and len(matched_labels) < 6 and (label not in matched_labels):
                     matched_labels.append(label)
@@ -472,15 +377,6 @@ class AppSessionCapture(LoopbackAudioCapture):
 
     def get_debug_state(self) -> dict[str, object]:
         return dict(self._debug_state)
-
-def _session_peak_value(session: object) -> float:
-    if IAudioMeterInformation is None:
-        return 0.0
-    try:
-        meter = session._ctl.QueryInterface(IAudioMeterInformation)
-        return float(meter.GetPeakValue())
-    except Exception:
-        return 0.0
 
 class MixedAudioCapture(AudioCaptureBase):
 
@@ -536,10 +432,10 @@ class MixedAudioCapture(AudioCaptureBase):
                 weight = self._weights[idx] if idx < len(self._weights) else 1.0
                 if weight == 0.0:
                     continue
-                audio = _pcm16_to_mono_float(chunk.pcm16, chunk.channels, self._channel_mode)
+                audio = pcm16_to_mono_float(chunk.pcm16, chunk.channels, self._channel_mode)
                 if audio.size == 0:
                     continue
-                resampled = _resample(audio, chunk.sample_rate, self.sample_rate)
+                resampled = resample(audio, chunk.sample_rate, self.sample_rate)
                 if resampled.size == 0:
                     continue
                 active_tracks.append((weight, resampled))
@@ -547,7 +443,7 @@ class MixedAudioCapture(AudioCaptureBase):
                 time.sleep(0.005)
                 continue
             try:
-                mixed = _mix_tracks(active_tracks)
+                mixed = mix_tracks(active_tracks)
                 pcm16 = (mixed * 32767.0).astype(np.int16).tobytes()
                 out_chunk = AudioChunk(pcm16, self.sample_rate, 1)
                 self._queue.put(out_chunk, timeout=0.1)
@@ -628,53 +524,6 @@ def build_capture_from_config(config: RuntimeConfig, on_error: Optional[Callable
     if mode != 'loopback' and on_status is not None:
         on_status(f"Unknown source mode '{mode}', fallback to loopback.")
     return LoopbackAudioCapture(device_index=primary_index, on_error=on_error)
-
-def _pcm16_to_mono_float(pcm16: bytes, channels: int, channel_mode: str='mono') -> np.ndarray:
-    if not pcm16:
-        return np.zeros((0,), dtype=np.float32)
-    audio = np.frombuffer(pcm16, dtype=np.int16)
-    if audio.size == 0:
-        return np.zeros((0,), dtype=np.float32)
-    if channels > 1:
-        usable = audio.size // channels * channels
-        if usable <= 0:
-            return np.zeros((0,), dtype=np.float32)
-        matrix = audio[:usable].reshape(-1, channels).astype(np.float32)
-        mode = channel_mode.lower().strip()
-        if mode == 'left':
-            mixed = matrix[:, 0]
-        elif mode == 'right':
-            mixed = matrix[:, min(1, channels - 1)]
-        else:
-            mixed = matrix.mean(axis=1)
-    else:
-        mixed = audio.astype(np.float32)
-    return (mixed / 32768.0).astype(np.float32)
-
-def _resample(audio: np.ndarray, src_rate: int, dst_rate: int) -> np.ndarray:
-    if src_rate == dst_rate or audio.size == 0:
-        return audio
-    target_size = int(audio.size * dst_rate / max(1, src_rate))
-    if target_size <= 1:
-        return np.zeros((0,), dtype=np.float32)
-    src_idx = np.linspace(0.0, audio.size - 1, num=audio.size, dtype=np.float32)
-    dst_idx = np.linspace(0.0, audio.size - 1, num=target_size, dtype=np.float32)
-    return np.interp(dst_idx, src_idx, audio).astype(np.float32)
-
-def _mix_tracks(tracks: list[tuple[float, np.ndarray]]) -> np.ndarray:
-    max_len = max((track.size for (_, track) in tracks))
-    mix = np.zeros((max_len,), dtype=np.float32)
-    total_weight = 0.0
-    for (weight, track) in tracks:
-        if track.size < max_len:
-            padded = np.pad(track, (0, max_len - track.size), mode='constant')
-        else:
-            padded = track
-        mix += padded * float(weight)
-        total_weight += abs(float(weight))
-    if total_weight <= 0.0:
-        total_weight = float(len(tracks))
-    return np.clip(mix / total_weight, -1.0, 1.0)
 
 def _find_virtual_cable_loopback_device(devices: list[AudioDevice]) -> Optional[AudioDevice]:
     for dev in devices:

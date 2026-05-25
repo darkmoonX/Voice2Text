@@ -1,0 +1,73 @@
+"""Widget builders for settings dialog controls."""
+from __future__ import annotations
+
+from PySide6.QtWidgets import QComboBox
+
+
+def create_mode_combo() -> QComboBox:
+    combo = QComboBox()
+    combo.addItem("Loopback", "loopback")
+    combo.addItem("Microphone", "microphone")
+    combo.addItem("App Session", "app")
+    return combo
+
+
+def create_stt_provider_combo() -> QComboBox:
+    combo = QComboBox()
+    combo.addItem("Whisper (faster-whisper)", "whisper")
+    combo.addItem("WhisperX", "whisperx")
+    return combo
+
+
+def create_stt_variant_combo() -> QComboBox:
+    combo = QComboBox()
+    combo.addItem("Auto", "auto")
+    combo.addItem("CPU", "cpu")
+    combo.addItem("GPU", "gpu")
+    return combo
+
+
+def create_source_language_combo() -> QComboBox:
+    combo = QComboBox()
+    combo.addItem("auto", "auto")
+    combo.addItem("en", "en")
+    combo.addItem("zh-hant", "zh-hant")
+    combo.addItem("zh-hans", "zh-hans")
+    combo.addItem("ja", "ja")
+    combo.addItem("ko", "ko")
+    return combo
+
+
+def create_translation_language_combo() -> QComboBox:
+    combo = QComboBox()
+    combo.addItem("en", "en")
+    combo.addItem("zh", "zh")
+    combo.addItem("ja", "ja")
+    combo.addItem("ko", "ko")
+    return combo
+
+
+def create_whisperx_align_language_combo() -> QComboBox:
+    combo = QComboBox()
+    combo.addItem("auto", "auto")
+    combo.addItem("follow-source", "follow-source")
+    combo.addItem("en", "en")
+    combo.addItem("zh-hant", "zh-hant")
+    combo.addItem("zh-hans", "zh-hans")
+    combo.addItem("ja", "ja")
+    combo.addItem("ko", "ko")
+    combo.addItem("de", "de")
+    combo.addItem("fr", "fr")
+    combo.addItem("es", "es")
+    combo.addItem("it", "it")
+    combo.addItem("pt", "pt")
+    combo.addItem("ru", "ru")
+    return combo
+
+
+def create_whisperx_align_device_combo() -> QComboBox:
+    combo = QComboBox()
+    combo.addItem("auto", "auto")
+    combo.addItem("cpu", "cpu")
+    combo.addItem("cuda", "cuda")
+    return combo

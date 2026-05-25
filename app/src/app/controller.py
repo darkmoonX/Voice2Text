@@ -1,18 +1,18 @@
 """Core orchestration loop: capture audio, preprocess/VAD, call STT, and emit UI-ready text/status signals."""
 from __future__ import annotations
 import logging
-from pathlib import Path
-import subprocess
 import threading
 import time
-import wave
 from PySide6.QtCore import QObject, Signal
 from .capture import AudioChunk, AudioCaptureBase, build_capture_from_config
 from .config import RuntimeConfig
 from .cuda_compat import ensure_cublas12_from_source
+from .pipeline.gpu_telemetry import GpuTelemetryReporter
 from .pipeline.runtime_recovery import RuntimeRecoveryState, WhisperRuntimeRecovery
+from .pipeline.segment_artifacts import SegmentArtifacts
 from .pipeline.subtitle_assembler import SubtitleAssembler
 from .pipeline.text_delta_logger import TextDeltaLogger
+from .pipeline.transcription_loop import TranscriptionLoopDeps, TranscriptionLoopEngine
 from .status_routing import should_surface_overlay_status
 from .stt import STTTranscriber, create_stt_transcriber, normalize_stt_provider
 from .stt.preprocessing import AudioPreprocessingPipeline, create_audio_preprocessing_pipeline
@@ -44,17 +44,10 @@ class TranscriptionController(QObject):
         self._running = threading.Event()
         self._subtitle_assembler = SubtitleAssembler()
         self._text_delta_logger = TextDeltaLogger(lambda prefix, part: self._logger.info('%s: %s', prefix, part), max_entry_chars=180)
-        self._silence_hops = 0
-        self._speech_hops = 0
         self._runtime_recovery_state = RuntimeRecoveryState()
         self._runtime_epoch = 0
-        self._segment_debug_dir = Path(self._config.log_dir).resolve().parent / "segments"
-        self._latest_raw_segment_wav = self._segment_debug_dir / "latest_segment_raw.wav"
-        self._latest_stt_segment_wav = self._segment_debug_dir / "latest_segment_stt.wav"
-        self._last_gpu_telemetry_at = 0.0
-        self._gpu_telemetry_interval_seconds = 10.0
-        self._gpu_index: int | None = None
-        self._gpu_telemetry_unavailable_logged = False
+        self._segment_artifacts = SegmentArtifacts(log_dir=self._config.log_dir)
+        self._gpu_telemetry = GpuTelemetryReporter(interval_seconds=10.0)
         self._bootstrap_ready.connect(self._on_bootstrap_ready)
         self._bootstrap_failed.connect(self._on_bootstrap_failed)
 
@@ -72,8 +65,6 @@ class TranscriptionController(QObject):
         # Keep runtime toggle in "paused" state until full bootstrap/warmup/capture init is done.
         self.runtime_state_changed.emit(False)
         self._runtime_recovery_state = RuntimeRecoveryState()
-        self._silence_hops = 0
-        self._speech_hops = 0
         self._subtitle_assembler.reset()
         self._text_delta_logger.reset()
         self._emit_status('Initializing STT backend...')
@@ -102,8 +93,6 @@ class TranscriptionController(QObject):
         self._translator = None
         self._subtitle_assembler.reset()
         self._text_delta_logger.reset()
-        self._silence_hops = 0
-        self._speech_hops = 0
 
     def restart(self) -> None:
         """Convenience API used by settings updates to rebuild runtime stack."""
@@ -226,162 +215,24 @@ class TranscriptionController(QObject):
             return False
 
     def _run_loop(self) -> None:
-        assert self._capture is not None
-        assert self._transcriber is not None
-        buffer = bytearray()
-        stream_rate = self._capture.sample_rate
-        stream_channels = self._capture.channels
-        segment_seconds = min(max(1.0, float(self._config.segment_seconds)), 12.0)
-        hop_seconds = min(max(0.1, float(self._config.hop_seconds)), max(0.1, segment_seconds - 0.1))
-        self._subtitle_assembler.set_language_context(self._config.source_language)
-        self._subtitle_assembler.set_cjk_no_space_gap_seconds(float(getattr(self._config, 'cjk_no_space_gap_seconds', 0.2) or 0.2))
-
-        def aligned_window_sizes(rate: int, channels: int) -> tuple[int, int, int, int]:
-            bytes_per_second_local = max(1, rate * channels * 2)
-            frame_bytes_local = max(2, channels * 2)
-            segment_bytes_local = max(int(bytes_per_second_local * segment_seconds), bytes_per_second_local // 2)
-            hop_bytes_local = max(1, int(bytes_per_second_local * hop_seconds))
-            hop_bytes_local = min(hop_bytes_local, segment_bytes_local)
-            segment_bytes_local = max(frame_bytes_local, segment_bytes_local // frame_bytes_local * frame_bytes_local)
-            hop_bytes_local = max(frame_bytes_local, hop_bytes_local // frame_bytes_local * frame_bytes_local)
-            hop_bytes_local = min(hop_bytes_local, segment_bytes_local)
-            return (bytes_per_second_local, frame_bytes_local, segment_bytes_local, hop_bytes_local)
-        (bytes_per_second, frame_bytes, segment_bytes, hop_bytes) = aligned_window_sizes(stream_rate, stream_channels)
-        last_chunk_at = time.monotonic()
-        last_recover_at = 0.0
-        window_elapsed_seconds = 0.0
-        while self._running.is_set():
-            try:
-                chunk = self._capture.read_chunk(timeout=0.25)
-            except Exception as exc:
-                self._emit_error(f'Capture read failed: {exc}')
-                chunk = None
-            now = time.monotonic()
-            self._maybe_log_gpu_telemetry(now)
-            if chunk is None:
-                if now - last_chunk_at >= 8.0 and now - last_recover_at >= 8.0:
-                    last_recover_at = now
-                    self._emit_status('No audio chunks for 8s. Restarting capture backend...')
-                    if self._recover_capture_backend():
-                        last_chunk_at = time.monotonic()
-                continue
-            last_chunk_at = now
-            if chunk.sample_rate != stream_rate or chunk.channels != stream_channels or segment_bytes <= 0:
-                stream_rate = chunk.sample_rate
-                stream_channels = chunk.channels
-                (bytes_per_second, frame_bytes, segment_bytes, hop_bytes) = aligned_window_sizes(stream_rate, stream_channels)
-                buffer.clear()
-                self._emit_status(f'Stream format changed: {stream_rate} Hz, {stream_channels} ch')
-            chunk_pcm = chunk.pcm16
-            if len(chunk_pcm) < 2:
-                continue
-            if len(chunk_pcm) % 2 != 0:
-                chunk_pcm = chunk_pcm[:-1]
-            if not chunk_pcm:
-                continue
-            if chunk_pcm is not chunk.pcm16:
-                chunk = AudioChunk(pcm16=chunk_pcm, sample_rate=chunk.sample_rate, channels=chunk.channels)
-            buffer.extend(chunk.pcm16)
-            max_buffer_bytes = max(segment_bytes * 6, bytes_per_second)
-            max_buffer_bytes = max(frame_bytes, max_buffer_bytes // frame_bytes * frame_bytes)
-            if len(buffer) > max_buffer_bytes:
-                del buffer[:len(buffer) - max_buffer_bytes]
-            while len(buffer) >= segment_bytes and self._running.is_set():
-                current_window_elapsed = float(window_elapsed_seconds)
-                window_elapsed_seconds += float(hop_seconds)
-                window = bytes(buffer[:segment_bytes])
-                del buffer[:hop_bytes]
-                window_chunk = AudioChunk(pcm16=window, sample_rate=stream_rate, channels=stream_channels)
-                self._write_latest_segment_wav(window_chunk, self._latest_raw_segment_wav)
-                stt_chunk = self._preprocess_pipeline.process(window_chunk, channel_mode=self._config.source_channel_mode) if self._preprocess_pipeline is not None and self._preprocess_pipeline.stage_names else window_chunk
-                self._write_latest_segment_wav(stt_chunk, self._latest_stt_segment_wav)
-                has_signal = self._vad_pipeline.should_process(stt_chunk, channel_mode=self._config.source_channel_mode) if self._vad_pipeline is not None else self._transcriber.has_enough_signal(stt_chunk, channel_mode=self._config.source_channel_mode)
-                if not has_signal:
-                    self._silence_hops += 1
-                    silence_seconds = self._silence_hops * hop_seconds
-                    if self._speech_hops > 0 and silence_seconds >= max(0.8, min(2.4, segment_seconds)):
-                        self._mark_sentence_break()
-                    continue
-                self._silence_hops = 0
-                try:
-                    source_text = self._transcriber.transcribe(stt_chunk, language=self._config.source_language, channel_mode=self._config.source_channel_mode)
-                except Exception as exc:
-                    if self._recover_from_runtime_transcription_error(str(exc)):
-                        continue
-                    self._emit_error(f'Transcription failed: {exc}')
-                    continue
-                transcription_meta = getattr(self._transcriber, 'get_last_transcription_meta', lambda: {})()
-                if not isinstance(transcription_meta, dict):
-                    transcription_meta = {}
-                transcription_meta = dict(transcription_meta)
-                transcription_meta['elapsed_seconds'] = float(current_window_elapsed)
-                token_rows = transcription_meta.get('token_timestamps')
-                if isinstance(token_rows, list):
-                    enriched_rows: list[dict[str, object]] = []
-                    for row in token_rows:
-                        if not isinstance(row, dict):
-                            continue
-                        item = dict(row)
-                        try:
-                            start_rel = float(item.get('start'))
-                            end_rel = float(item.get('end'))
-                            item['absolute_start'] = float(current_window_elapsed + start_rel)
-                            item['absolute_end'] = float(current_window_elapsed + end_rel)
-                        except Exception:
-                            pass
-                        enriched_rows.append(item)
-                    transcription_meta['token_timestamps'] = enriched_rows
-                source_rolling = self._subtitle_assembler.merge_incremental_text(source_text, overlap_merge_method=self._config.overlap_merge_method, segment_seconds=float(self._config.segment_seconds), hop_seconds=float(self._config.hop_seconds), transcription_meta=transcription_meta)
-                if bool(getattr(self._config, 'debug_mode', False)):
-                    self.debug_event.emit({
-                        'provider': normalize_stt_provider(self._config.stt_provider),
-                        'raw_text': source_text,
-                        'merged_text': source_rolling,
-                        'history_text': self._subtitle_assembler.get_history_text(),
-                        'history_state': self._subtitle_assembler.get_history_state(),
-                        'stable_text': self._subtitle_assembler.get_stable_text(),
-                        'stable_state': self._subtitle_assembler.get_stable_state(),
-                        'partial_state': self._subtitle_assembler.get_partial_state(),
-                        'meta': transcription_meta,
-                    })
-                if not source_rolling:
-                    continue
-                self._speech_hops += 1
-                (source_out, translated_out) = self._build_subtitle_payload(source_rolling)
-                if not source_out and (not translated_out):
-                    continue
-                if source_out:
-                    self._text_delta_logger.log('STT', source_out, translated=False)
-                if translated_out:
-                    self._text_delta_logger.log('TRANSLATE', translated_out, translated=True)
-                self.subtitle_ready.emit(source_out, translated_out)
-                if self._speech_hops * hop_seconds >= max(segment_seconds, hop_seconds * 2.0):
-                    self._mark_sentence_break()
-
-    def _write_latest_segment_wav(self, chunk: AudioChunk, target_path: Path) -> None:
-        try:
-            self._segment_debug_dir.mkdir(parents=True, exist_ok=True)
-            pcm = bytes(chunk.pcm16 or b'')
-            if not pcm:
-                return
-            channels = max(1, int(chunk.channels))
-            sample_rate = max(8000, int(chunk.sample_rate))
-            with wave.open(str(target_path), 'wb') as wf:
-                wf.setnchannels(channels)
-                wf.setsampwidth(2)
-                wf.setframerate(sample_rate)
-                wf.writeframes(pcm)
-        except Exception:
-            # Debug artifact write failure must never break runtime.
-            return
-
-    def _build_subtitle_payload(self, source_text: str) -> tuple[str, str]:
-        if self._translator is None or not self._translator.enabled:
-            return (source_text, '')
-        translated = self._translator.translate(source_text)
-        if not translated:
-            return (source_text, '')
-        return (source_text, translated)
+        deps = TranscriptionLoopDeps(
+            config=self._config,
+            subtitle_assembler=self._subtitle_assembler,
+            text_delta_logger=self._text_delta_logger,
+            segment_artifacts=self._segment_artifacts,
+            gpu_telemetry=self._gpu_telemetry,
+            get_capture=lambda: self._capture,
+            get_transcriber=lambda: self._transcriber,
+            get_preprocess_pipeline=lambda: self._preprocess_pipeline,
+            get_vad_pipeline=lambda: self._vad_pipeline,
+            get_translator=lambda: self._translator,
+            recover_capture_backend=self._recover_capture_backend,
+            recover_from_runtime_transcription_error=self._recover_from_runtime_transcription_error,
+            emit_status=self._emit_status,
+            emit_debug_event=lambda payload: self.debug_event.emit(payload),
+            emit_subtitle_ready=lambda source, translated: self.subtitle_ready.emit(source, translated),
+        )
+        TranscriptionLoopEngine(deps).run(self._running)
 
     def _warmup_transcriber(self) -> None:
         transcriber = self._transcriber
@@ -408,121 +259,6 @@ class TranscriptionController(QObject):
             self._emit_status('WhisperX warmup completed.')
         except Exception as exc:
             self._emit_error(f'WhisperX warmup failed: {exc}')
-
-    def _mark_sentence_break(self) -> None:
-        self._subtitle_assembler.mark_sentence_break()
-        self._silence_hops = 0
-        self._speech_hops = 0
-
-    def _maybe_log_gpu_telemetry(self, now_monotonic: float) -> None:
-        if not bool(getattr(self._config, 'debug_mode', False)):
-            return
-        if 'cuda' not in str(getattr(self._config, 'model_device', '') or '').strip().lower():
-            return
-        if now_monotonic - self._last_gpu_telemetry_at < self._gpu_telemetry_interval_seconds:
-            return
-        self._last_gpu_telemetry_at = now_monotonic
-        message = self._build_gpu_telemetry_message()
-        if not message:
-            if not self._gpu_telemetry_unavailable_logged:
-                self._gpu_telemetry_unavailable_logged = True
-                self._emit_status('GPU telemetry unavailable (no CUDA/nvidia-smi stats).')
-            return
-        self._gpu_telemetry_unavailable_logged = False
-        self._emit_status(message)
-
-    def _build_gpu_telemetry_message(self) -> str:
-        torch_stats = self._collect_torch_cuda_stats()
-        smi_stats = self._collect_nvidia_smi_stats()
-        if not torch_stats and not smi_stats:
-            return ''
-        parts: list[str] = ['[gpu-telemetry]']
-        if torch_stats:
-            parts.append(
-                'torch'
-                f"(dev={int(torch_stats['device_index'])},"
-                f"alloc={torch_stats['alloc_mb']:.0f}MB,"
-                f"reserved={torch_stats['reserved_mb']:.0f}MB,"
-                f"max_alloc={torch_stats['max_alloc_mb']:.0f}MB,"
-                f"total={torch_stats['total_mb']:.0f}MB)"
-            )
-        if smi_stats:
-            parts.append(
-                'nvidia-smi'
-                f"(gpu={int(smi_stats['index'])},"
-                f"util={smi_stats['gpu_util_pct']:.0f}%,"
-                f"mem_util={smi_stats['mem_util_pct']:.0f}%,"
-                f"vram={smi_stats['mem_used_mb']:.0f}/{smi_stats['mem_total_mb']:.0f}MB)"
-            )
-        return ' '.join(parts)
-
-    def _collect_torch_cuda_stats(self) -> dict[str, float] | None:
-        try:
-            import torch  # type: ignore
-        except Exception:
-            return None
-        try:
-            if not torch.cuda.is_available():
-                return None
-            device_index = int(torch.cuda.current_device())
-            if self._gpu_index is None:
-                self._gpu_index = device_index
-            alloc_mb = float(torch.cuda.memory_allocated(device_index)) / (1024.0 * 1024.0)
-            reserved_mb = float(torch.cuda.memory_reserved(device_index)) / (1024.0 * 1024.0)
-            max_alloc_mb = float(torch.cuda.max_memory_allocated(device_index)) / (1024.0 * 1024.0)
-            total_mb = float(torch.cuda.get_device_properties(device_index).total_memory) / (1024.0 * 1024.0)
-            return {
-                'device_index': float(device_index),
-                'alloc_mb': alloc_mb,
-                'reserved_mb': reserved_mb,
-                'max_alloc_mb': max_alloc_mb,
-                'total_mb': total_mb,
-            }
-        except Exception:
-            return None
-
-    def _collect_nvidia_smi_stats(self) -> dict[str, float] | None:
-        try:
-            result = subprocess.run(
-                [
-                    'nvidia-smi',
-                    '--query-gpu=index,utilization.gpu,utilization.memory,memory.used,memory.total',
-                    '--format=csv,noheader,nounits',
-                ],
-                capture_output=True,
-                text=True,
-                timeout=1.5,
-                check=False,
-            )
-        except Exception:
-            return None
-        if result.returncode != 0:
-            return None
-        rows: list[dict[str, float]] = []
-        for raw in (result.stdout or '').splitlines():
-            line = raw.strip()
-            if not line:
-                continue
-            cols = [c.strip() for c in line.split(',')]
-            if len(cols) < 5:
-                continue
-            try:
-                rows.append({
-                    'index': float(cols[0]),
-                    'gpu_util_pct': float(cols[1]),
-                    'mem_util_pct': float(cols[2]),
-                    'mem_used_mb': float(cols[3]),
-                    'mem_total_mb': float(cols[4]),
-                })
-            except Exception:
-                continue
-        if not rows:
-            return None
-        target_index = self._gpu_index if self._gpu_index is not None else 0
-        for row in rows:
-            if int(row.get('index', -1)) == int(target_index):
-                return row
-        return rows[0]
 
     def _build_stt_transcriber(self, *, device_override: str | None=None, compute_type_override: str | None=None) -> STTTranscriber:
         """Construct provider-specific STT transcriber using current RuntimeConfig."""

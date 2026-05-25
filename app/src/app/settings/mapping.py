@@ -19,6 +19,7 @@ class SettingsPayloadInput:
     whisperx_enable_diarization: bool
     whisperx_alignment_model: str
     whisperx_alignment_language: str
+    whisperx_alignment_device: str
     whisperx_diarization_model: str
     whisperx_hf_token: str
     source_language: str
@@ -66,6 +67,10 @@ def build_settings_updates(payload: SettingsPayloadInput, *, lang: str, hop_gt_s
     elif payload.source_mode == 'app':
         source_app_names = list(payload.selected_app_names)
 
+    alignment_device = (payload.whisperx_alignment_device or "auto").strip().lower()
+    if alignment_device not in {"auto", "cpu", "cuda"}:
+        alignment_device = "auto"
+
     return {
         'ui_language': lang,
         'stt_provider': stt_provider,
@@ -79,6 +84,7 @@ def build_settings_updates(payload: SettingsPayloadInput, *, lang: str, hop_gt_s
         'whisperx_enable_diarization': bool(payload.whisperx_enable_diarization),
         'whisperx_alignment_model': payload.whisperx_alignment_model.strip(),
         'whisperx_alignment_language': payload.whisperx_alignment_language.strip() or 'auto',
+        'whisperx_alignment_device': alignment_device,
         'whisperx_diarization_model': payload.whisperx_diarization_model.strip() or 'pyannote/speaker-diarization-3.1',
         'whisperx_hf_token': payload.whisperx_hf_token.strip(),
         'source_mode': payload.source_mode,

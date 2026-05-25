@@ -18,11 +18,8 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QMessageBox,
     QPushButton,
-    QScrollArea,
     QSlider,
     QSpinBox,
-    QStyle,
-    QToolButton,
     QVBoxLayout,
     QWidget,
 )
@@ -31,123 +28,23 @@ from .capture import AudioDevice
 from .config import RuntimeConfig
 from .settings.i18n import SETTINGS_I18N, normalize_ui_language
 from .settings.mapping import SettingsPayloadInput, build_settings_updates
+from .settings.presenter import (
+    alignment_repos_for_language,
+    app_names_from_config,
+    loopback_indices_from_config,
+    normalize_source_language,
+)
 from .settings.schema import allowed_stt_variants, default_stt_model, is_path_like, provider_supports_source_language
-
-
-
-class SourceSelectionDialog(QDialog):
-    def __init__(
-        self,
-        title: str,
-        entries: Sequence[tuple[str, str]],
-        selected_values: Sequence[str],
-        parent: QWidget | None = None,
-        refresh_entries_callback: Callable[[], Sequence[tuple[str, str]]] | None = None,
-        ui_language: str = "zh",
-    ) -> None:
-        super().__init__(parent)
-        self._lang = normalize_ui_language(ui_language)
-        self._entries = list(entries)
-        self._refresh_entries_callback = refresh_entries_callback
-        self._checks: list[QCheckBox] = []
-
-        self.setWindowTitle(title)
-        self.setMinimumSize(460, 420)
-
-        root = QVBoxLayout(self)
-        header = QHBoxLayout()
-        self._select_all = QCheckBox(SETTINGS_I18N[self._lang]["select_all"])
-        self._select_all.stateChanged.connect(self._on_select_all_changed)
-        header.addWidget(self._select_all)
-        header.addStretch(1)
-
-        self._refresh_button = QToolButton()
-        self._refresh_button.setIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_BrowserReload))
-        self._refresh_button.setToolTip(SETTINGS_I18N[self._lang]["refresh"])
-        self._refresh_button.setVisible(self._refresh_entries_callback is not None)
-        self._refresh_button.clicked.connect(self._on_refresh_clicked)
-        header.addWidget(self._refresh_button)
-        root.addLayout(header)
-
-        body = QWidget()
-        self._body_layout = QVBoxLayout(body)
-        self._body_layout.setContentsMargins(0, 0, 0, 0)
-        self._body_layout.setSpacing(4)
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setWidget(body)
-        root.addWidget(scroll, 1)
-
-        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
-        buttons.accepted.connect(self.accept)
-        buttons.rejected.connect(self.reject)
-        root.addWidget(buttons)
-        self._rebuild_entries(selected_values)
-
-    @property
-    def selected_values(self) -> list[str]:
-        values: list[str] = []
-        for cb in self._checks:
-            if cb.isChecked():
-                values.append(str(cb.property("value")))
-        return values
-
-    def _on_select_all_changed(self, state: int) -> None:
-        checked = state == Qt.CheckState.Checked.value
-        for cb in self._checks:
-            cb.blockSignals(True)
-            cb.setChecked(checked)
-            cb.blockSignals(False)
-        self._refresh_select_all_state()
-
-    def _refresh_select_all_state(self) -> None:
-        if not self._checks:
-            self._select_all.setEnabled(False)
-            self._select_all.setChecked(False)
-            return
-        checked_count = sum((1 for cb in self._checks if cb.isChecked()))
-        all_count = len(self._checks)
-        self._select_all.blockSignals(True)
-        if checked_count == 0:
-            self._select_all.setTristate(False)
-            self._select_all.setCheckState(Qt.CheckState.Unchecked)
-        elif checked_count == all_count:
-            self._select_all.setTristate(False)
-            self._select_all.setCheckState(Qt.CheckState.Checked)
-        else:
-            self._select_all.setTristate(True)
-            self._select_all.setCheckState(Qt.CheckState.PartiallyChecked)
-        self._select_all.blockSignals(False)
-
-    def _on_refresh_clicked(self) -> None:
-        if self._refresh_entries_callback is None:
-            return
-        selected = self.selected_values
-        self._entries = list(self._refresh_entries_callback())
-        self._rebuild_entries(selected)
-
-    def _rebuild_entries(self, selected_values: Sequence[str]) -> None:
-        selected = set(selected_values)
-        for cb in self._checks:
-            cb.deleteLater()
-        self._checks.clear()
-        while self._body_layout.count():
-            item = self._body_layout.takeAt(0)
-            widget = item.widget()
-            if widget is not None:
-                widget.deleteLater()
-        if not self._entries:
-            self._body_layout.addWidget(QLabel(SETTINGS_I18N[self._lang]["no_sources"]))
-        else:
-            for value, label in self._entries:
-                cb = QCheckBox(label)
-                cb.setProperty("value", value)
-                cb.setChecked(value in selected)
-                cb.stateChanged.connect(self._refresh_select_all_state)
-                self._checks.append(cb)
-                self._body_layout.addWidget(cb)
-        self._body_layout.addStretch(1)
-        self._refresh_select_all_state()
+from .settings.source_selection_dialog import SourceSelectionDialog
+from .settings.widgets import (
+    create_mode_combo,
+    create_source_language_combo,
+    create_stt_provider_combo,
+    create_stt_variant_combo,
+    create_whisperx_align_device_combo,
+    create_translation_language_combo,
+    create_whisperx_align_language_combo,
+)
 
 
 class SettingsDialog(QDialog):
@@ -177,10 +74,7 @@ class SettingsDialog(QDialog):
         self.setWindowTitle(self._t("settings_title"))
         self.setMinimumWidth(600)
 
-        self._mode_combo = QComboBox()
-        self._mode_combo.addItem("Loopback", "loopback")
-        self._mode_combo.addItem("Microphone", "microphone")
-        self._mode_combo.addItem("App Session", "app")
+        self._mode_combo = create_mode_combo()
         self._mode_combo.currentIndexChanged.connect(self._on_mode_changed)
 
         self._ui_language_combo = QComboBox()
@@ -194,39 +88,20 @@ class SettingsDialog(QDialog):
         self._source_summary = QLabel()
         self._source_summary.setWordWrap(True)
 
-        self._stt_provider_combo = QComboBox()
-        self._stt_provider_combo.addItem("Whisper (faster-whisper)", "whisper")
-        self._stt_provider_combo.addItem("WhisperX", "whisperx")
+        self._stt_provider_combo = create_stt_provider_combo()
         self._stt_provider_combo.currentIndexChanged.connect(self._on_stt_provider_changed)
 
-        self._stt_variant_combo = QComboBox()
-        self._stt_variant_combo.addItem("Auto", "auto")
-        self._stt_variant_combo.addItem("CPU", "cpu")
-        self._stt_variant_combo.addItem("GPU", "gpu")
+        self._stt_variant_combo = create_stt_variant_combo()
 
         self._stt_model_path_edit = QLineEdit()
         self._stt_auto_download_check = QCheckBox(self._t("auto_download"))
-        self._whisperx_phoneme_check = QCheckBox()
-        self._whisperx_align_check = QCheckBox()
         self._whisperx_vad_check = QComboBox()
         self._whisperx_vad_check.addItem("silero-vad", "silero-vad")
         self._whisperx_vad_check.addItem("pyannote", "pyannote")
         self._whisperx_diarization_check = QCheckBox()
         self._whisperx_align_model_edit = QComboBox()
-        self._whisperx_align_language_combo = QComboBox()
-        self._whisperx_align_language_combo.addItem('auto', 'auto')
-        self._whisperx_align_language_combo.addItem('follow-source', 'follow-source')
-        self._whisperx_align_language_combo.addItem('en', 'en')
-        self._whisperx_align_language_combo.addItem('zh-hant', 'zh-hant')
-        self._whisperx_align_language_combo.addItem('zh-hans', 'zh-hans')
-        self._whisperx_align_language_combo.addItem('ja', 'ja')
-        self._whisperx_align_language_combo.addItem('ko', 'ko')
-        self._whisperx_align_language_combo.addItem('de', 'de')
-        self._whisperx_align_language_combo.addItem('fr', 'fr')
-        self._whisperx_align_language_combo.addItem('es', 'es')
-        self._whisperx_align_language_combo.addItem('it', 'it')
-        self._whisperx_align_language_combo.addItem('pt', 'pt')
-        self._whisperx_align_language_combo.addItem('ru', 'ru')
+        self._whisperx_align_language_combo = create_whisperx_align_language_combo()
+        self._whisperx_align_device_combo = create_whisperx_align_device_combo()
         self._whisperx_align_model_edit.setEditable(True)
         self._whisperx_align_model_edit.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
         self._whisperx_align_model_edit.lineEdit().setPlaceholderText("auto (leave empty) or HF repo id")
@@ -249,21 +124,12 @@ class SettingsDialog(QDialog):
         self._merge_method_combo.addItem("stable-tail", "stable-tail")
         self._merge_method_combo.addItem("commit-on-break", "commit-on-break")
 
-        self._preprocess_enabled_check = QCheckBox()
-        self._preprocess_modules_edit = QLineEdit()
-        self._vad_adaptive_check = QCheckBox()
         self._vad_threshold_spin = QDoubleSpinBox()
         self._vad_threshold_spin.setDecimals(4)
         self._vad_threshold_spin.setRange(0.0, 0.2)
         self._vad_threshold_spin.setSingleStep(0.001)
 
-        self._source_language_combo = QComboBox()
-        self._source_language_combo.addItem("auto", "auto")
-        self._source_language_combo.addItem("en", "en")
-        self._source_language_combo.addItem("zh-hant", "zh-hant")
-        self._source_language_combo.addItem("zh-hans", "zh-hans")
-        self._source_language_combo.addItem("ja", "ja")
-        self._source_language_combo.addItem("ko", "ko")
+        self._source_language_combo = create_source_language_combo()
         self._source_language_combo.currentIndexChanged.connect(self._on_source_language_changed)
 
         self._translation_enabled_check = QCheckBox()
@@ -271,11 +137,7 @@ class SettingsDialog(QDialog):
         self._bilingual_combo = QComboBox()
         self._bilingual_combo.addItem("stacked", "stacked")
         self._bilingual_combo.addItem("translation-only", "translation-only")
-        self._translation_language_combo = QComboBox()
-        self._translation_language_combo.addItem("en", "en")
-        self._translation_language_combo.addItem("zh", "zh")
-        self._translation_language_combo.addItem("ja", "ja")
-        self._translation_language_combo.addItem("ko", "ko")
+        self._translation_language_combo = create_translation_language_combo()
 
         self._font_size_spin = QSpinBox()
         self._font_size_spin.setRange(10, 60)
@@ -327,6 +189,7 @@ class SettingsDialog(QDialog):
         form.addRow(self._t("whisperx_vad"), self._whisperx_vad_check)
         form.addRow(self._t("whisperx_diarization"), self._whisperx_diarization_check)
         form.addRow(self._t("whisperx_align_language"), self._whisperx_align_language_combo)
+        form.addRow(self._t("whisperx_align_device"), self._whisperx_align_device_combo)
         form.addRow(self._t("whisperx_align_model"), self._whisperx_align_model_edit)
         form.addRow(self._t("whisperx_diar_model"), self._whisperx_diar_model_edit)
         form.addRow(self._t("whisperx_hf_token"), self._whisperx_hf_token_edit)
@@ -384,17 +247,11 @@ class SettingsDialog(QDialog):
 
     @staticmethod
     def _loopback_indices_from_config(config: RuntimeConfig) -> list[int]:
-        indices = list(config.source_device_indices)
-        if not indices and config.device_index is not None:
-            indices = [config.device_index]
-        return indices
+        return loopback_indices_from_config(config)
 
     @staticmethod
     def _app_names_from_config(config: RuntimeConfig) -> list[str]:
-        names = list(config.source_app_names)
-        if not names and config.source_app_name:
-            names = [config.source_app_name]
-        return names
+        return app_names_from_config(config)
 
     def _init_loopback_indices(self) -> list[int]:
         return self._loopback_indices_from_config(self._config)
@@ -413,6 +270,7 @@ class SettingsDialog(QDialog):
         self._set_combo_data(self._whisperx_vad_check, str(getattr(cfg, "whisperx_vad_method", "silero-vad") or "silero-vad"))
         self._whisperx_diarization_check.setChecked(cfg.whisperx_enable_diarization)
         self._set_combo_data(self._whisperx_align_language_combo, str(getattr(cfg, 'whisperx_alignment_language', 'auto') or 'auto'))
+        self._set_combo_data(self._whisperx_align_device_combo, str(getattr(cfg, 'whisperx_alignment_device', 'auto') or 'auto'))
         self._set_alignment_model_value(cfg.whisperx_alignment_model)
         self._whisperx_diar_model_edit.setText(cfg.whisperx_diarization_model)
         self._whisperx_hf_token_edit.setText(cfg.whisperx_hf_token)
@@ -424,9 +282,7 @@ class SettingsDialog(QDialog):
         style = cfg.bilingual_style if cfg.bilingual_style != "inline" else "stacked"
         self._set_combo_data(self._bilingual_combo, style)
         self._set_combo_data(self._translation_language_combo, cfg.translation_to)
-        source_language = cfg.source_language or "auto"
-        if source_language == "zh":
-            source_language = "zh-hant"
+        source_language = normalize_source_language(cfg.source_language)
         self._set_combo_data(self._source_language_combo, source_language)
         self._font_size_spin.setValue(cfg.font_size)
         self._opacity_slider.setValue(int(cfg.overlay_opacity * 100))
@@ -472,12 +328,14 @@ class SettingsDialog(QDialog):
         self._whisperx_vad_check.setEnabled(is_whisperx)
         self._whisperx_diarization_check.setEnabled(is_whisperx)
         self._whisperx_align_language_combo.setEnabled(is_whisperx)
+        self._whisperx_align_device_combo.setEnabled(is_whisperx)
         self._whisperx_align_model_edit.setEnabled(is_whisperx)
         self._whisperx_diar_model_edit.setEnabled(is_whisperx)
         self._whisperx_hf_token_edit.setEnabled(is_whisperx)
         self._set_form_row_visible(self._whisperx_vad_check, is_whisperx)
         self._set_form_row_visible(self._whisperx_diarization_check, is_whisperx)
         self._set_form_row_visible(self._whisperx_align_language_combo, is_whisperx)
+        self._set_form_row_visible(self._whisperx_align_device_combo, is_whisperx)
         self._set_form_row_visible(self._whisperx_align_model_edit, is_whisperx)
         self._set_form_row_visible(self._whisperx_diar_model_edit, is_whisperx)
         self._set_form_row_visible(self._whisperx_hf_token_edit, is_whisperx)
@@ -513,33 +371,6 @@ class SettingsDialog(QDialog):
         if str(self._stt_provider_combo.currentData() or "whisper") == "whisperx":
             self._refresh_alignment_model_suggestions()
 
-    def _alignment_repos_for_language(self, source_language: str) -> list[str]:
-        token = (source_language or "auto").strip().lower()
-        if token in {"zh", "zh-hant", "zh-hans"}:
-            return [
-                "jonatasgrosman/wav2vec2-large-xlsr-53-chinese-zh-cn",
-                "TencentGameMate/chinese-wav2vec2-base",
-            ]
-        if token == "ja":
-            return [
-                "jonatasgrosman/wav2vec2-large-xlsr-53-japanese",
-                "patrickvonplaten/wav2vec2-large-xlsr-53-japanese",
-            ]
-        if token == "ko":
-            return [
-                "kresnik/wav2vec2-large-xlsr-korean",
-                "jonatasgrosman/wav2vec2-large-xlsr-53-korean",
-            ]
-        if token == "en":
-            return ["WAV2VEC2_ASR_BASE_960H", "WAV2VEC2_ASR_LARGE_960H"]
-        return [
-            "WAV2VEC2_ASR_BASE_960H",
-            "WAV2VEC2_ASR_LARGE_960H",
-            "jonatasgrosman/wav2vec2-large-xlsr-53-chinese-zh-cn",
-            "jonatasgrosman/wav2vec2-large-xlsr-53-japanese",
-            "jonatasgrosman/wav2vec2-large-xlsr-53-korean",
-        ]
-
     def _set_alignment_model_value(self, value: str) -> None:
         raw = (value or "").strip()
         if not raw:
@@ -556,7 +387,7 @@ class SettingsDialog(QDialog):
         lang = str(self._whisperx_align_language_combo.currentData() or 'auto')
         if lang in {'auto','follow-source'}:
             lang = str(self._source_language_combo.currentData() or 'auto')
-        repos = self._alignment_repos_for_language(lang)
+        repos = alignment_repos_for_language(lang)
         self._whisperx_align_model_edit.blockSignals(True)
         self._whisperx_align_model_edit.clear()
         self._whisperx_align_model_edit.addItem("")
@@ -646,6 +477,7 @@ class SettingsDialog(QDialog):
             self._whisperx_vad_check: "WhisperX VAD engine: silero-vad (lighter) or pyannote (heavier).",
             self._whisperx_diarization_check: "Enable diarization (speaker separation, heavier).",
             self._whisperx_align_language_combo: "Alignment language: auto (ASR detected), follow-source (STT source language), or explicit language.",
+            self._whisperx_align_device_combo: "Alignment device: auto (smart choice), cpu (lower VRAM), cuda (faster but higher VRAM).",
             self._whisperx_align_model_edit: "Alignment model. Empty=auto; choose suggestion or type HF repo id.",
             self._whisperx_diar_model_edit: "Diarization model id.",
             self._whisperx_hf_token_edit: "Hugging Face token for restricted/private models.",
@@ -698,6 +530,7 @@ class SettingsDialog(QDialog):
             whisperx_enable_diarization=self._whisperx_diarization_check.isChecked(),
             whisperx_alignment_model=self._whisperx_align_model_edit.currentText(),
             whisperx_alignment_language=str(self._whisperx_align_language_combo.currentData() or 'auto'),
+            whisperx_alignment_device=str(self._whisperx_align_device_combo.currentData() or 'auto'),
             whisperx_diarization_model=self._whisperx_diar_model_edit.text(),
             whisperx_hf_token=self._whisperx_hf_token_edit.text(),
             source_language=str(self._source_language_combo.currentData()),

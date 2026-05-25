@@ -1,8 +1,6 @@
 """Whisper provider implementation with local cache and auto-download support."""
 from __future__ import annotations
-import json
 import os
-from dataclasses import dataclass
 from pathlib import Path
 import shutil
 from typing import Any, Callable, Optional
@@ -25,57 +23,8 @@ except Exception:
     OpenCC = None
 from ..audio_capture import AudioChunk
 from ..model_paths import library_model_dir
-from .model_download import download_hf_snapshot_with_progress, emit_progress
-
-@dataclass(frozen=True)
-class WhisperRuntimeParams:
-    """Decoded optional runtime parameters loaded from whisper_config.json."""
-    max_context: Optional[int] = None
-    entropy_thold: Optional[float] = None
-    logprob_thold: Optional[float] = None
-    no_speech_thold: Optional[float] = None
-    temperature: Optional[float] = None
-    beam_size: Optional[int] = None
-    best_of: Optional[int] = None
-
-def _pick_value(raw: dict[str, Any], keys: list[str]) -> Any:
-    for key in keys:
-        if key in raw:
-            return raw[key]
-    return None
-
-def _parse_optional_int(raw: dict[str, Any], keys: list[str]) -> Optional[int]:
-    value = _pick_value(raw, keys)
-    if value is None:
-        return None
-    try:
-        parsed = int(value)
-    except (TypeError, ValueError):
-        return None
-    return parsed if parsed > 0 else None
-
-def _parse_optional_float(raw: dict[str, Any], keys: list[str]) -> Optional[float]:
-    value = _pick_value(raw, keys)
-    if value is None:
-        return None
-    try:
-        return float(value)
-    except (TypeError, ValueError):
-        return None
-
-def load_whisper_runtime_params(config_path: Path) -> WhisperRuntimeParams:
-    """Load optional whisper decode defaults from JSON file; returns safe defaults on parse errors."""
-    if not config_path.is_file():
-        return WhisperRuntimeParams()
-    try:
-        payload = json.loads(config_path.read_text(encoding='utf-8'))
-    except Exception:
-        return WhisperRuntimeParams()
-    if not isinstance(payload, dict):
-        return WhisperRuntimeParams()
-    section = payload.get('whisper')
-    data = section if isinstance(section, dict) else payload
-    return WhisperRuntimeParams(max_context=_parse_optional_int(data, ['max-context', 'max_context', 'mc', '-mc']), entropy_thold=_parse_optional_float(data, ['entropy-thold', 'entropy_thold']), logprob_thold=_parse_optional_float(data, ['logprob-thold', 'logprob_thold']), no_speech_thold=_parse_optional_float(data, ['no-speech-thold', 'no_speech_thold']), temperature=_parse_optional_float(data, ['temperature']), beam_size=_parse_optional_int(data, ['beam-size', 'beam_size']), best_of=_parse_optional_int(data, ['best-of', 'best_of']))
+from ..whisper_config import WhisperRuntimeParams, load_whisper_runtime_params
+from .model_download import download_hf_files_with_progress, download_hf_snapshot_with_progress, emit_progress
 
 class FasterWhisperTranscriber:
     """Whisper STT provider used by factory when stt_provider=whisper."""
@@ -119,6 +68,7 @@ class FasterWhisperTranscriber:
             self._materialize_named_model_dir(target_dir, legacy_snapshot)
             if self._is_model_dir_ready(target_dir):
                 return str(target_dir)
+        last_error: Exception | None = None
         if auto_download:
             try:
                 emit_progress(progress_callback, f'whisper model download started: {model_ref}')
@@ -133,13 +83,29 @@ class FasterWhisperTranscriber:
                     if self._is_model_dir_ready(target_dir):
                         emit_progress(progress_callback, f'whisper model re-download completed: {target_dir.name}')
                         return str(target_dir)
-            except Exception:
-                pass
+            except Exception as exc:
+                last_error = exc
+        if target_dir.exists() and (not self._is_model_dir_ready(target_dir)):
+            reason = f': {last_error}' if last_error is not None else ''
+            raise RuntimeError(
+                f'Whisper model directory is incomplete and auto-repair did not finish ({target_dir}){reason}'
+            )
         return model_ref
 
     @staticmethod
     def _is_model_dir_ready(path: Path) -> bool:
-        return path.is_dir() and (path / 'model.bin').exists() and (path / 'config.json').exists()
+        if not path.is_dir():
+            return False
+        model_bin = path / 'model.bin'
+        config_json = path / 'config.json'
+        if not model_bin.exists() or not config_json.exists():
+            return False
+        # ctranslate2 Whisper model.bin should never be tiny; guard against truncated downloads.
+        min_expected_bytes = 32 * 1024 * 1024
+        try:
+            return int(model_bin.stat().st_size) >= min_expected_bytes
+        except Exception:
+            return False
 
     def _find_legacy_snapshot_dir(self, model_ref: str) -> Optional[Path]:
         normalized_ref = model_ref.strip().lower().replace('_', '-').replace('/', '-')
@@ -182,8 +148,34 @@ class FasterWhisperTranscriber:
         allow_patterns = ['config.json', 'preprocessor_config.json', 'model.bin', 'tokenizer.json', 'vocabulary.*']
         repo_id = self._resolve_whisper_repo_id(model_ref)
         if repo_id is not None:
-            download_hf_snapshot_with_progress(repo_id=repo_id, output_dir=str(target_dir), allow_patterns=allow_patterns, progress_callback=progress_callback, provider='whisper', model_name=target_dir.name)
-            return
+            try:
+                # Prefer direct streaming downloader for Whisper to avoid snapshot/tqdm stalls
+                # and guarantee byte-based progress callbacks to overlay/log.
+                download_hf_files_with_progress(
+                    repo_id=repo_id,
+                    output_dir=str(target_dir),
+                    allow_patterns=allow_patterns,
+                    progress_callback=progress_callback,
+                    provider='whisper',
+                    model_name=target_dir.name,
+                    timeout_seconds=60,
+                )
+                return
+            except Exception as exc:
+                emit_progress(progress_callback, f'whisper direct download failed: {exc}')
+                use_snapshot = str(os.environ.get('VOICE2TEXT_WHISPER_USE_SNAPSHOT', '')).strip().lower() in {'1', 'true', 'yes'}
+                if not use_snapshot:
+                    raise
+                emit_progress(progress_callback, 'whisper snapshot fallback enabled by VOICE2TEXT_WHISPER_USE_SNAPSHOT=1')
+                download_hf_snapshot_with_progress(
+                    repo_id=repo_id,
+                    output_dir=str(target_dir),
+                    allow_patterns=allow_patterns,
+                    progress_callback=progress_callback,
+                    provider='whisper',
+                    model_name=target_dir.name,
+                )
+                return
         if fw_download_model is not None:
             fw_download_model(model_ref, output_dir=str(target_dir))
             return

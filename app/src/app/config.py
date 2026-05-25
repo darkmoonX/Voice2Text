@@ -19,6 +19,7 @@ class RuntimeConfig:
     whisperx_enable_diarization: bool = False
     whisperx_alignment_model: str = ''
     whisperx_alignment_language: str = 'auto'
+    whisperx_alignment_device: str = 'auto'
     whisperx_diarization_model: str = 'pyannote/speaker-diarization-3.1'
     whisperx_hf_token: str = ''
     cpu_fallback_on_cuda_error: bool = True
