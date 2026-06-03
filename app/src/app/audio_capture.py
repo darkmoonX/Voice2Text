@@ -1,9 +1,14 @@
 """Audio source discovery and capture backends for loopback, microphone, and app-session modes."""
 from __future__ import annotations
 import queue
+import shutil
+import subprocess
 import threading
 import time
+import tempfile
+import wave
 from dataclasses import dataclass
+from pathlib import Path
 from typing import TYPE_CHECKING, Callable, Optional
 import numpy as np
 from .capture.mixer_utils import mix_tracks, pcm16_to_mono_float, resample
@@ -19,6 +24,7 @@ from .capture.session_match import (
     session_peak_value,
     token_matches,
 )
+_token_matches = token_matches
 try:
     from pycaw.pycaw import AudioUtilities, IAudioMeterInformation
 except Exception:
@@ -272,6 +278,160 @@ class MicrophoneAudioCapture(_SingleDeviceAudioCapture):
     def __init__(self, device_index: Optional[int]=None, frames_per_buffer: int=2048, preferred_sample_rate: Optional[int]=None, on_error: Optional[Callable[[str], None]]=None) -> None:
         super().__init__(source_kind='microphone', device_index=device_index, frames_per_buffer=frames_per_buffer, preferred_sample_rate=preferred_sample_rate, on_error=on_error)
 
+class FileReplayAudioCapture(AudioCaptureBase):
+    """Replay a media file as AudioChunk instances for the live pipeline."""
+
+    def __init__(
+        self,
+        file_path: str,
+        *,
+        ffmpeg_dir: str = "",
+        sample_rate: int = 16000,
+        channels: int = 1,
+        chunk_seconds: float = 0.25,
+        replay_speed: float = 0.0,
+        trailing_silence_seconds: float = 0.0,
+        on_status: Optional[Callable[[str], None]] = None,
+    ) -> None:
+        self._file_path = Path(file_path).expanduser()
+        self._ffmpeg_dir = str(ffmpeg_dir or "")
+        self.sample_rate = max(8000, int(sample_rate))
+        self.channels = max(1, int(channels))
+        self._chunk_seconds = max(0.02, float(chunk_seconds))
+        self._replay_speed = max(0.0, float(replay_speed))
+        self._trailing_silence_seconds = max(0.0, float(trailing_silence_seconds))
+        self._on_status = on_status
+        self._pcm16 = b""
+        self._offset = 0
+        self._running = False
+        self._finished = False
+        self._temp_dir: Optional[Path] = None
+        self._last_emit_at = 0.0
+
+    def start(self) -> None:
+        if self._running:
+            return
+        if not self._file_path.exists():
+            raise RuntimeError(f"Source audio file does not exist: {self._file_path}")
+        self._pcm16 = self._decode_to_pcm16()
+        trailing_bytes = int(self._trailing_silence_seconds * self.sample_rate * self.channels * 2)
+        if trailing_bytes > 0:
+            trailing_bytes -= trailing_bytes % max(2, self.channels * 2)
+            self._pcm16 += b"\x00" * trailing_bytes
+        self._offset = 0
+        self._finished = len(self._pcm16) <= 0
+        self._running = True
+        self._last_emit_at = time.monotonic()
+        if self._on_status is not None:
+            duration = len(self._pcm16) / float(max(1, self.sample_rate * self.channels * 2))
+            mode = "fastest" if self._replay_speed <= 0.0 else f"{self._replay_speed:g}x"
+            self._on_status(f"File replay source started: path={self._file_path}; duration={duration:.2f}s; speed={mode}")
+
+    def stop(self) -> None:
+        self._running = False
+        self._finished = True
+        self._pcm16 = b""
+        self._offset = 0
+        if self._temp_dir is not None:
+            try:
+                shutil.rmtree(self._temp_dir, ignore_errors=True)
+            except Exception:
+                pass
+            self._temp_dir = None
+
+    def read_chunk(self, timeout: float=0.2) -> Optional[AudioChunk]:
+        if not self._running or self._finished:
+            return None
+        chunk_bytes = int(self.sample_rate * self.channels * 2 * self._chunk_seconds)
+        frame_bytes = max(2, self.channels * 2)
+        chunk_bytes = max(frame_bytes, chunk_bytes - chunk_bytes % frame_bytes)
+        end = min(len(self._pcm16), self._offset + chunk_bytes)
+        payload = self._pcm16[self._offset:end]
+        self._offset = end
+        if self._offset >= len(self._pcm16):
+            self._finished = True
+        if not payload:
+            self._finished = True
+            return None
+        self._sleep_for_replay_speed(len(payload))
+        return AudioChunk(pcm16=payload, sample_rate=self.sample_rate, channels=self.channels)
+
+    def is_finished(self) -> bool:
+        return bool(self._finished)
+
+    def _sleep_for_replay_speed(self, byte_count: int) -> None:
+        if self._replay_speed <= 0.0:
+            return
+        duration = byte_count / float(max(1, self.sample_rate * self.channels * 2))
+        target_delay = duration / self._replay_speed
+        now = time.monotonic()
+        elapsed = now - self._last_emit_at
+        if target_delay > elapsed:
+            time.sleep(target_delay - elapsed)
+        self._last_emit_at = time.monotonic()
+
+    def _decode_to_pcm16(self) -> bytes:
+        wav_path = self._prepare_wav_path()
+        with wave.open(str(wav_path), "rb") as wf:
+            channels = int(wf.getnchannels())
+            rate = int(wf.getframerate())
+            width = int(wf.getsampwidth())
+            frames = wf.readframes(wf.getnframes())
+        if channels != self.channels or rate != self.sample_rate or width != 2:
+            raise RuntimeError(
+                "Decoded file has an unexpected format: "
+                f"rate={rate}, channels={channels}, sample_width={width}; "
+                f"expected rate={self.sample_rate}, channels={self.channels}, sample_width=2"
+            )
+        if len(frames) % max(2, self.channels * 2) != 0:
+            frames = frames[: len(frames) - (len(frames) % max(2, self.channels * 2))]
+        return frames
+
+    def _prepare_wav_path(self) -> Path:
+        source = self._file_path
+        if source.suffix.lower() == ".wav":
+            try:
+                with wave.open(str(source), "rb") as wf:
+                    if wf.getframerate() == self.sample_rate and wf.getnchannels() == self.channels and wf.getsampwidth() == 2:
+                        return source
+            except Exception:
+                pass
+        ffmpeg = self._resolve_ffmpeg()
+        if not ffmpeg:
+            raise RuntimeError("FFmpeg executable was not found; file replay requires FFmpeg for non-16k mono WAV input.")
+        self._temp_dir = Path(tempfile.mkdtemp(prefix="voice2text_file_replay_"))
+        target = self._temp_dir / "decoded_16k_mono.wav"
+        cmd = [
+            ffmpeg,
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-y",
+            "-i",
+            str(source),
+            "-vn",
+            "-ac",
+            str(self.channels),
+            "-ar",
+            str(self.sample_rate),
+            "-sample_fmt",
+            "s16",
+            str(target),
+        ]
+        result = subprocess.run(cmd, capture_output=True, text=True, check=False)
+        if result.returncode != 0:
+            raise RuntimeError(f"FFmpeg decode failed: {(result.stderr or result.stdout or '').strip()}")
+        return target
+
+    def _resolve_ffmpeg(self) -> str:
+        if self._ffmpeg_dir:
+            for name in ("ffmpeg.exe", "ffmpeg"):
+                candidate = Path(self._ffmpeg_dir) / name
+                if candidate.exists():
+                    return str(candidate)
+        found = shutil.which("ffmpeg")
+        return str(found or "")
+
 class AppSessionCapture(LoopbackAudioCapture):
 
     def __init__(self, app_names: list[str] | None=None, device_index: Optional[int]=None, frames_per_buffer: int=2048, preferred_sample_rate: Optional[int]=None, on_error: Optional[Callable[[str], None]]=None, on_status: Optional[Callable[[str], None]]=None) -> None:
@@ -454,6 +614,18 @@ class MixedAudioCapture(AudioCaptureBase):
 def build_capture_from_config(config: RuntimeConfig, on_error: Optional[Callable[[str], None]]=None, on_status: Optional[Callable[[str], None]]=None) -> AudioCaptureBase:
     """Create capture backend instance from RuntimeConfig source_mode/source selection settings."""
     mode = (config.source_mode or 'loopback').strip().lower()
+    if mode == 'file':
+        source_file = str(getattr(config, 'source_file_path', '') or '').strip()
+        if not source_file:
+            raise RuntimeError('File source mode requires --source-file.')
+        return FileReplayAudioCapture(
+            source_file,
+            ffmpeg_dir=str(getattr(config, 'ffmpeg_dll_dir', '') or ''),
+            chunk_seconds=float(getattr(config, 'source_file_chunk_seconds', 0.25) or 0.25),
+            replay_speed=float(getattr(config, 'source_file_replay_speed', 0.0) or 0.0),
+            trailing_silence_seconds=float(getattr(config, 'segment_seconds', 6.0) or 6.0),
+            on_status=on_status,
+        )
     source_indices = list(config.source_device_indices)
     devices = list_audio_devices()
     by_index = {d.index: d for d in devices}

@@ -9,7 +9,7 @@ from .whisper_config import WhisperRuntimeParams
 
 def build_arg_parser(whisper_defaults: WhisperRuntimeParams) -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Live rolling subtitle overlay from Windows audio sources.")
-    parser.add_argument("--stt-provider", choices=["whisper", "whisperx"], default="whisper", help="STT backend provider.")
+    parser.add_argument("--stt-provider", choices=["whisperx"], default="whisperx", help="STT backend provider. Only WhisperX is supported.")
     parser.add_argument("--stt-variant", choices=["auto", "cpu", "gpu"], default="auto", help="Execution variant hint for providers.")
     parser.add_argument("--stt-auto-download", dest="stt_auto_download", action="store_true", help="Allow provider presets to auto-download missing model files.")
     parser.add_argument("--no-stt-auto-download", dest="stt_auto_download", action="store_false", help="Disable provider preset auto-download behavior.")
@@ -28,6 +28,7 @@ def build_arg_parser(whisper_defaults: WhisperRuntimeParams) -> argparse.Argumen
     parser.add_argument("--whisperx-alignment-model", default="", help="Optional WhisperX alignment model id/path.")
     parser.add_argument("--whisperx-alignment-language", choices=["auto", "follow-source", "en", "zh-hant", "zh-hans", "ja", "ko", "de", "fr", "es", "it", "pt", "ru"], default="auto", help="Alignment language override. auto=from ASR result, follow-source=use STT source language setting.")
     parser.add_argument("--whisperx-alignment-device", choices=["auto", "cpu", "cuda"], default="auto", help="Alignment device override. auto uses runtime heuristic.")
+    parser.add_argument("--whisperx-diarization-device", choices=["auto", "cpu", "cuda"], default="auto", help="Diarization device override. auto follows ASR device by default.")
     parser.add_argument("--whisperx-diarization-model", default="pyannote/speaker-diarization-3.1", help="WhisperX diarization model id.")
     parser.add_argument("--whisperx-hf-token", default="", help="Hugging Face token for WhisperX diarization model download/access.")
     parser.add_argument("--stt-health-check", action="store_true", help="Run STT provider health checks and exit.")
@@ -38,26 +39,21 @@ def build_arg_parser(whisper_defaults: WhisperRuntimeParams) -> argparse.Argumen
     parser.add_argument("--segment-seconds", type=float, default=6.0, help="Audio window length sent to STT.")
     parser.add_argument("--hop-seconds", type=float, default=1.5, help="Sliding hop interval for low-latency incremental updates.")
     parser.add_argument("--overlap-merge-method", choices=["stable-tail", "commit-on-break", "replace-window", "suffix-overlap", "fuzzy-overlap", "append-only"], default="stable-tail", help="Merge strategy for overlapped STT windows.")
-    parser.add_argument("--no-preprocess", dest="preprocess_enabled", action="store_false", help="Disable audio preprocessing before VAD/STT.")
+    parser.add_argument("--no-preprocess", dest="preprocess_enabled", action="store_false", help="Disable audio preprocessing before WhisperX STT.")
     parser.add_argument("--preprocess-modules", default="auto", help="Comma-separated preprocessing modules: auto, none, webrtc-ns, webrtc-agc, webrtc-aec, rnnoise, spectral-gate, adaptive-gain.")
-    parser.add_argument("--no-vad", dest="vad_enabled", action="store_false", help="Disable pre-transcription VAD pipeline.")
-    parser.add_argument("--vad-backend", choices=["silero", "adaptive-rms", "rms"], default="silero", help="General VAD backend used before STT.")
-    parser.add_argument("--vad-rms-threshold", type=float, default=0.008, help="RMS threshold for modular VAD gate.")
-    parser.add_argument("--no-adaptive-vad", dest="vad_adaptive_enabled", action="store_false", help="Use fixed RMS VAD threshold instead of adaptive environment-noise tracking.")
-    parser.add_argument("--vad-adaptive-min-threshold", type=float, default=0.004, help="Lower bound for adaptive RMS VAD threshold.")
-    parser.add_argument("--vad-adaptive-max-threshold", type=float, default=0.08, help="Upper bound for adaptive RMS VAD threshold.")
-    parser.add_argument("--vad-adaptive-noise-multiplier", type=float, default=2.6, help="Noise-floor multiplier used by adaptive RMS VAD.")
-    parser.add_argument("--vad-adaptive-margin", type=float, default=0.002, help="Extra RMS margin added above adaptive noise floor.")
     parser.add_argument("--source-language", choices=["auto", "en", "zh-hant", "zh-hans", "ja", "ko"], default="auto", help="STT language hint. auto uses multilingual detection.")
     parser.add_argument("--cjk-no-space-gap-seconds", type=float, default=0.2, help="When source language is Chinese, adjacent tokens within this gap are concatenated without spaces in stable/history text.")
-    parser.add_argument("--max-context", "-mc", type=int, default=whisper_defaults.max_context, help="Whisper decode max context tokens (Python maps to faster-whisper max_new_tokens).")
+    parser.add_argument("--max-context", "-mc", type=int, default=whisper_defaults.max_context, help="WhisperX decode max context tokens.")
     parser.add_argument("--entropy-thold", type=float, default=whisper_defaults.entropy_thold, help="Whisper entropy threshold (Python maps to compression_ratio_threshold).")
     parser.add_argument("--logprob-thold", type=float, default=whisper_defaults.logprob_thold, help="Whisper log probability threshold.")
     parser.add_argument("--no-speech-thold", type=float, default=whisper_defaults.no_speech_thold, help="Whisper no-speech threshold.")
     parser.add_argument("--temperature", type=float, default=whisper_defaults.temperature if whisper_defaults.temperature is not None else 0.0, help="Whisper decode temperature.")
     parser.add_argument("--beam-size", type=int, default=whisper_defaults.beam_size if whisper_defaults.beam_size is not None else 1, help="Whisper beam size.")
     parser.add_argument("--best-of", type=int, default=whisper_defaults.best_of if whisper_defaults.best_of is not None else 1, help="Whisper best-of samples.")
-    parser.add_argument("--source-mode", choices=["loopback", "microphone", "app"], default="loopback", help="Audio source mode. app prefers C++ Application Loopback Capture for selected process names.")
+    parser.add_argument("--source-mode", choices=["loopback", "microphone", "app", "file"], default="loopback", help="Audio source mode. file replays an audio file through the live transcription pipeline.")
+    parser.add_argument("--source-file", default="", help="Audio file path used when --source-mode=file.")
+    parser.add_argument("--source-file-replay-speed", type=float, default=0.0, help="Replay speed for --source-mode=file. 0 means fastest possible; 1.0 means realtime.")
+    parser.add_argument("--source-file-chunk-seconds", type=float, default=0.25, help="Chunk size emitted by --source-mode=file before live windowing.")
     parser.add_argument("--ui-language", choices=["zh", "en"], default="zh", help="UI language for tray menu and settings dialog.")
     parser.add_argument("--source-devices", default="", help="Comma-separated source device indices, e.g. 12,35")
     parser.add_argument("--app-names", default="", help="Comma-separated app names for app source mode, e.g. chrome.exe,discord.exe")
@@ -82,16 +78,23 @@ def build_arg_parser(whisper_defaults: WhisperRuntimeParams) -> argparse.Argumen
     parser.add_argument("--log-dir", default="", help="Directory for runtime log files.")
     parser.add_argument("--debug-mode", dest="debug_mode", action="store_true", help="Enable STT debug window with per-step trace.")
     parser.add_argument("--no-debug-mode", dest="debug_mode", action="store_false", help="Disable STT debug window.")
+    parser.add_argument("--transcript-export", dest="transcript_export_enabled", action="store_true", help="Enable transcript export on session stop (txt/srt/json).")
+    parser.add_argument("--no-transcript-export", dest="transcript_export_enabled", action="store_false", help="Disable transcript export.")
+    parser.add_argument("--transcript-export-formats", default="txt,srt,json", help="Comma-separated export formats: txt,srt,json.")
+    parser.add_argument("--transcript-export-no-timestamps", dest="transcript_export_include_timestamps", action="store_false", help="Export transcript without timestamps.")
+    parser.add_argument("--transcript-export-no-speaker", dest="transcript_export_include_speaker", action="store_false", help="Export transcript without speaker labels.")
+    parser.add_argument("--transcript-export-dir", default="", help="Transcript export output directory.")
     parser.set_defaults(
         stt_auto_download=True,
         preprocess_enabled=True,
-        vad_enabled=True,
-        vad_adaptive_enabled=True,
         whisperx_phoneme_asr=True,
         whisperx_forced_alignment=True,
         whisperx_vad=False,
         whisperx_diarization=False,
         debug_mode=False,
+        transcript_export_enabled=False,
+        transcript_export_include_timestamps=True,
+        transcript_export_include_speaker=True,
     )
     return parser
 

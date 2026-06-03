@@ -6,7 +6,7 @@ Windows live subtitle overlay runtime (Python main process + C++ capture bridge)
 
 - UI: `PySide6`
 - Capture: Python capture adapters + C++ bridge (`WASAPI loopback`, `Application Loopback Capture`)
-- STT providers: `whisper`, `whisperx`, optional `vosk` / `sherpa-onnx` / `riva` / `funasr`
+- STT provider: `whisperx` only. Legacy persisted names such as `whisper` / `faster-whisper` are normalized to `whisperx` for compatibility.
 - Optional translation: `Argos Translate`
 
 ## Runtime Structure
@@ -18,7 +18,7 @@ app/
       capture/      # capture factory + cpp bridge adapter
       pipeline/     # subtitle assembler, delta logger, runtime recovery
       settings/     # i18n + mapping + schema
-      stt/          # provider registry/factory/health-check/providers
+      stt/          # WhisperX registry/factory/health-check, downloads, diarization, speaker identity
     runtime_bin/    # bridge executable output
   native/
     audio_bridge/   # C++ bridge source + build script
@@ -52,7 +52,7 @@ python -m venv .venv
 pip install -r requirements.txt
 ```
 
-Optional provider dependencies:
+Optional WhisperX diarization / speaker-identity dependencies:
 
 ```powershell
 pip install -r requirements-stt-extra.txt
@@ -67,6 +67,10 @@ cd app\native\audio_bridge
 
 Output executable:
 - `app/src/runtime_bin/voice2text_capture_bridge.exe`
+
+Notes:
+- In debug mode, `app/src/segments/latest_segment_cpp_bridge.wav` is a rolling-tail artifact from the C++ bridge.
+- Its window length now follows `segment_seconds` (same setting used by Python STT windows).
 
 Advanced build parameters and MSVC/MinGW presets:
 - [app/native/audio_bridge/README.md](/D:/Voice2Text/app/native/audio_bridge/README.md)
@@ -83,6 +87,16 @@ python main.py
 - Runtime settings changed from tray `Settings` are saved to `app/src/runtime_settings.json`.
 - On next launch, the app restores these settings before capture/STT startup.
 - The settings dialog now includes a bottom-left `Reset defaults` button that resets all visible options back to built-in defaults (apply with `OK`).
+- `Audio preprocess` is now a direct on/off switch in Settings and persists across restart.
+- Pre-STT VAD Gate has been removed. WhisperX internal VAD (`silero-vad` / `pyannote`) is the only speech gate.
+- Speaker-profile embedding backend is now selectable in Settings (`pyannote` / `speechbrain-ecapa` / `nemo-titanet`).
+- Advanced speaker-profile options remain config-driven: `whisperx_speaker_profile_enabled`, `whisperx_speaker_profile_model`, `whisperx_speaker_speechbrain_model`, `whisperx_speaker_nemo_model`, `whisperx_speaker_profile_match_threshold`, `whisperx_speaker_profile_min_seconds`, `whisperx_speaker_profile_store_path`.
+- Transcript export is available in Settings:
+  - enable/disable export
+  - formats (`txt,srt,json`)
+  - include timestamps
+  - include speaker labels
+  - exports are written on runtime stop.
 
 ### Common Commands
 
@@ -91,10 +105,10 @@ python main.py --list-devices
 python main.py --list-app-sessions
 python main.py --source-mode app --app-names msedge.exe
 
-python main.py --stt-provider whisper --model small --stt-variant gpu
+python main.py --model small --stt-variant gpu
 python main.py --stt-provider whisperx --model large-v2 --no-whisperx-vad
-python main.py --stt-provider whisperx --model large-v2 --segment-seconds 6.0 --hop-seconds 1.5
-python main.py --stt-provider whisperx --model large-v2 --whisperx-alignment-device cpu
+python main.py --model large-v2 --segment-seconds 6.0 --hop-seconds 1.5
+python main.py --model large-v2 --whisperx-alignment-device cpu
 
 python main.py --source-language zh-hant --cjk-no-space-gap-seconds 0.2
 python main.py --debug-mode
@@ -108,11 +122,14 @@ python main.py --cublas-source-dll D:\CUDA\bin\x64\cublas64_13.dll
 python main.py --ui-language en
 ```
 
-### Whisper Model Download Behavior
+### WhisperX Model Download Behavior
 
-- Whisper model auto-download now uses direct HTTP streaming (byte-based progress) by default.
+- WhisperX model auto-download now uses direct HTTP streaming (byte-based progress) by default.
 - Progress is emitted as `[download] ...` status lines and is visible in overlay + `app/src/logs/voice2text.log`.
 - Download progress now preflights remote file sizes (when available) and reports `current/total MB` with `%` bar.
+- If total size is unknown (external/internal downloader path), progress should show bytes only and must not show fake `100%` intermediate lines.
+- Alignment downloads triggered through torch-hub/torchaudio now bridge into app logs with the same rule; when remote headers expose total size, app log shows `x/y MB` totals instead of unbounded growth lines.
+- When torch-hub file-level progress is active for a transfer, generic fallback progress for that same transfer is fully suppressed (including completion) to avoid duplicate trailing lines after `100%`.
 - If direct download fails, startup reports explicit failure instead of silently hanging.
 - Downloaded files are now size-validated against HF manifest; mismatched files are deleted and retried once with a clean download.
 - If local cache is still incomplete (for example truncated `model.bin`), startup now fails fast with an explicit `auto-repair did not finish` reason.
@@ -153,6 +170,68 @@ $env:VOICE2TEXT_TRACE_WHISPERX='1'
 .\.venv\Scripts\python.exe .\scripts\diagnostics\whisperx_alignment_stability_test.py --duration-seconds 65 --source-wav .\src\segments\latest_segment_stt.wav --alignment-device cuda --model medium --language en
 ```
 
+WhisperX diarization readiness check (foreground):
+
+```powershell
+cd app
+.\.venv\Scripts\python.exe .\scripts\diagnostics\whisperx_diarization_readiness_check.py
+```
+
+WhisperX diarization foreground probe (with proxy cleared only for this run):
+
+```powershell
+cd app
+.\.venv\Scripts\python.exe .\scripts\diagnostics\whisperx_diarization_stability_test.py --duration-seconds 70 --clear-proxy --source-wav .\src\segments\latest_segment_stt.wav --model medium --language en
+```
+
+Compare pack accuracy test (incremental project flow vs direct WhisperX full-file):
+
+```powershell
+cd app
+.\.venv\Scripts\python.exe .\scripts\diagnostics\compare_test_data_whisperx.py `
+  --input ".\src\tests\compare_whisperx_test\input\YTDown_YouTube_Media_aXqBRYQSGp0_008_128k.m4a" `
+  --device cuda `
+  --profile fast `
+  --segment-seconds 12 `
+  --hop-seconds 2.4 `
+  --direct-group-seconds 30 `
+  --realtime-compare-one-line `
+  --export-formats txt,srt,json
+```
+
+Chinese alignment comparison example:
+
+```powershell
+cd app
+.\.venv\Scripts\python.exe .\scripts\diagnostics\compare_test_data_whisperx.py `
+  --input ".\src\tests\compare_whisperx_test\input\your_zh_audio.m4a" `
+  --model medium `
+  --language zh `
+  --align-language follow-source `
+  --align-model WAV2VEC2_ASR_LARGE_LV60K_960H `
+  --align-device cpu `
+  --force-alignment on `
+  --profile accurate `
+  --device cuda
+```
+
+Notes:
+
+- Script prints progress/ETA for incremental windows and heartbeat for direct path so long runs are observable.
+- `--device cuda` defaults to strict GPU requirement (if fallback to CPU occurs, the case fails early).
+- Use `--allow-cpu-fallback` only when you explicitly want CPU comparison.
+- In this environment, `torch` is CPU-only, but ASR can still run on CUDA through CTranslate2 in `--profile fast` (ASR-only mode).
+- In `--profile fast`, if token timestamps are sparse/absent, `realtime_project` export now uses realtime event-stream reconstruction to avoid only keeping the final short line.
+- Compare text now defaults to exported full subtitle text (`realtime_project.txt` / `direct_whisperx.txt`) before normalization, so metrics no longer depend on the incremental in-memory tail text.
+- `direct_whisperx.txt` line breaks are generated by transcript-export cue grouping from token timestamps. CJK/mixed text now uses longer cue windows and joins ASCII fragments, so Chinese lines no longer split purely at 4 seconds and outputs like `1 1 6` / `l o c a l` become `116` / `local`.
+- Compare mode options:
+  - `--direct-group-seconds 30`: regroup direct transcript into 30-second bins for compare text.
+  - `--realtime-compare-one-line`: flatten realtime transcript to one line for compare text.
+- Default compare pack location:
+  - inputs: `app/src/tests/compare_whisperx_test/input`
+  - outputs: `app/src/tests/compare_whisperx_test/output/<timestamp>`
+- Full workflow and output structure are documented in `app/src/tests/compare_whisperx_test/WORKFLOW.md` (docs mirror: `docs/test-data-whisperx-compare.md`).
+
 CUDA/GPU telemetry in debug mode:
 
 - When `--debug-mode` and CUDA device are active, runtime emits periodic `[gpu-telemetry]` lines into `app/src/logs/voice2text.log`.
@@ -164,17 +243,25 @@ Debug window log visibility:
 
 - Main overlay now only shows curated important statuses (startup/capture/runtime-critical/downloading), while noisy diagnostics stay in logs.
 - In debug mode, debug window loads recent runtime log history from `app/src/logs/voice2text.log*` and keeps streaming all new logger lines in real time.
+- Third-party library warnings (for example `whisperx.vads.pyannote: No active speech found in audio`) are captured to `voice2text.log` and the debug window, and startup removes pre-existing console stream handlers so these expected warnings do not reach PowerShell.
 - Debug window still writes structured event traces to `debug_trace_YYYYMMDD.jsonl`.
+
+Settings window behavior:
+
+- The Settings dialog is opened as an independent dialog instead of an owned child of the translucent overlay window, preventing a transient blank overlay-owned window/tab from flashing while Settings initializes.
+- Settings initialization also guards source-row visibility updates until widgets are attached to the dialog layout, preventing unparented Qt widgets from briefly becoming top-level blank windows.
 
 ## WhisperX Warmup Behavior
 
-- When `--stt-provider whisperx` and forced alignment are enabled, startup warmup now preloads the resolved alignment model (for example Chinese alignment for `zh-hant`) before first live speech.
+- When forced alignment is enabled, startup warmup preloads the resolved WhisperX alignment model (for example Chinese alignment for `zh-hant`) before first live speech.
+- When WhisperX diarization is enabled, startup warmup now also preloads diarization pipeline/resources before first live speech.
 - This avoids first-utterance stalls caused by deferred `alignment model loading`.
 
 ## WhisperX Crash Diagnostics
 
 - Runtime now enables Python `faulthandler`; native crash traces are written to `app/src/logs/python_crash_trace.log`.
 - In debug mode, WhisperX emits per-segment stage markers (`[whisperx-trace] start/asr-done/align-done/text-done`) into `app/src/logs/voice2text.log`.
+- In debug mode, WhisperX now also emits alignment micro-benchmark lines (`[align-bench]`) with per-segment elapsed ms, running average, running max, and sample count.
 - Alignment device can now be configured in `Settings -> WhisperX Alignment device` and is applied immediately (runtime restart is automatic).
 - CLI override is also available: `--whisperx-alignment-device {auto|cpu|cuda}`.
 - Windows safety guard: when alignment resolves to `cuda`, runtime now downgrades to `cpu` by default on Windows to avoid known `torchaudio/wav2vec2` access-violation crashes. Override only for diagnostics:
@@ -188,11 +275,39 @@ Debug window log visibility:
   - Audio passed into alignment is normalized to contiguous `float32` and cropped to active segment span.
   - CUDA alignment path now runs with explicit sync/inference-mode boundaries to reduce Windows native crash risk.
   - In debug mode, each `latest_segment_stt.wav` write now emits `[segment-artifact] ...` status lines (path/bytes/sample-rate/channels/duration) for pre-crash localization.
+  - `alignment_language=follow-source` now falls back to ASR detected language when source language is `auto`/empty, so alignment word timestamps still populate `meta.token_timestamps` and subtitle partial/stable states.
+
+## WhisperX Diarization Behavior
+
+- When `WhisperX Diarization` is enabled, runtime now emits overlay-visible `[download] whisperx-diarization ...` lines for:
+  - preparing manifest
+  - cache hit
+  - ready
+  - failure reason
+- Diarization predownload now prefers byte-based direct file download progress before snapshot fallback.
+- WhisperX direct HF downloader now includes bearer auth headers for gated artifact streaming and size probes, so file-level gated assets can be fetched when token access is granted.
+- Diarization bootstrap now pins HF cache to `app/src/models/whisperx/hf-home` (project-local writable path) instead of relying on user profile cache defaults.
+- Diarization dependency repos are stored under `app/src/models/whisperx/diarization_deps/` (`_deps` means dependency models referenced by diarization pipeline config).
+- On startup, optional diarization/dependency predownload now performs a local readiness check and emits `cache hit` when complete, instead of re-running manifest/download progress every launch.
+- Before diarization bootstrap, runtime now auto-cleans stale partial HF cache entries (`*.incomplete`, `*.lock`, `tmp_*`) under the project-local cache to reduce Windows permission/lock collisions.
+- If proxy env is set to known dead local placeholders (for example `127.0.0.1:9`), diarization bootstrap now clears those proxy keys in-process and continues without requiring manual `--clear-proxy`.
+- If Hugging Face access/token/network is unavailable, runtime emits explicit `[download] ... failed/skipped` reasons and safely falls back to no-diarization text flow.
+- If diarization initialization fails once (for example gated repo/token issue), runtime disables diarization re-initialization for the current session to avoid repeated heavy retries/noisy logs.
+- When diarization speaker labels are available, transcript output inserts `>>` markers at speaker-turn boundaries so subtitle lines visibly mark speaker changes.
+- Speaker-turn markers force a new line on speaker change (instead of continuing on the same line).
+- Speaker-turn switching now uses anti-jitter hysteresis (2 consecutive confirmations + minimum 0.18s hold) for both raw diarized text and token-merged subtitles.
+- Merge output now prefers `history + raw` overlap composition (while still maintaining token-level state internally), reducing duplicated tail text in rolling subtitles.
+- Speaker labels are propagated into `meta.token_timestamps` and rolling subtitle merge re-applies speaker markers on change, preventing marker loss when incremental token-based merge is active.
+- Diarization local labels are now mapped through persistent speaker profiles (`SPK_xxx`, embedding centroid matching) so speaker identity remains more stable across rolling STT windows.
+- Runtime logs now emit `[speaker-turn] diarization summary` (segment-turn count / marker count / token count / speaker set / pending-switch state) for speaker-turn diagnostics.
+- Runtime now skips diarization forward calls for empty/ultra-short/near-silent windows to reduce non-actionable NumPy empty-slice warnings and avoid needless compute.
+- Runtime performs one-time CUDA context warmup before first diarization forward call to reduce first-call `cublasLt` fallback warning noise.
+- Validation (2026-05-26): foreground 70s probe successfully initialized diarization and observed speaker-turn marker output after access grant + cache/auth fixes.
 
 ## Startup Import Behavior
 
 - CLI/bootstrap argument parsing does not import heavy STT runtimes (`torch`, `ctranslate2`) anymore.
-- Heavy provider imports are deferred until actual transcriber creation, reducing startup interruptions before capture begins.
+- Heavy WhisperX runtime imports are deferred until actual transcriber creation, reducing startup interruptions before capture begins.
 - CUDA compatibility alias preparation is now also deferred to STT bootstrap (async) instead of blocking in pre-Qt startup, so first launch reaches UI more reliably.
 - Terminal interrupt (`Ctrl+C`) now exits cleanly with code `130` without printing a full Python traceback.
 

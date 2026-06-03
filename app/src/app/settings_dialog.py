@@ -1,6 +1,7 @@
 """Settings dialog UI for capture/STT/runtime options and live config updates."""
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Callable, Sequence
 
 from PySide6.QtCore import Qt
@@ -12,6 +13,7 @@ from PySide6.QtWidgets import (
     QDialog,
     QDialogButtonBox,
     QDoubleSpinBox,
+    QFileDialog,
     QFormLayout,
     QHBoxLayout,
     QLabel,
@@ -34,7 +36,7 @@ from .settings.presenter import (
     loopback_indices_from_config,
     normalize_source_language,
 )
-from .settings.schema import allowed_stt_variants, default_stt_model, is_path_like, provider_supports_source_language
+from .settings.schema import allowed_stt_variants, default_stt_model, is_path_like
 from .settings.source_selection_dialog import SourceSelectionDialog
 from .settings.widgets import (
     create_mode_combo,
@@ -42,9 +44,79 @@ from .settings.widgets import (
     create_stt_provider_combo,
     create_stt_variant_combo,
     create_whisperx_align_device_combo,
+    create_whisperx_diarization_device_combo,
+    create_whisperx_speaker_backend_combo,
     create_translation_language_combo,
     create_whisperx_align_language_combo,
 )
+
+
+class TranscriptExportDialog(QDialog):
+    _FORMAT_ITEMS: tuple[tuple[str, str], ...] = (
+        ("txt", "Text (*.txt)"),
+        ("srt", "SubRip (*.srt)"),
+        ("json", "JSON (*.json)"),
+    )
+
+    def __init__(
+        self,
+        *,
+        auto_export_enabled: bool,
+        include_timestamps: bool,
+        include_speaker: bool,
+        default_format: str,
+        lang: str = "en",
+        parent: QWidget | None = None,
+    ) -> None:
+        super().__init__(parent)
+        zh = str(lang or "").strip().lower() == "zh"
+        self.setWindowTitle("匯出字幕" if zh else "Export Subtitle")
+        self.setMinimumWidth(420)
+
+        root = QVBoxLayout(self)
+        form = QFormLayout()
+
+        self._auto_export_check = QCheckBox("停止時自動匯出" if zh else "Enable auto export on stop")
+        self._auto_export_check.setChecked(bool(auto_export_enabled))
+        form.addRow("自動匯出" if zh else "Auto export", self._auto_export_check)
+
+        self._format_combo = QComboBox()
+        for (fmt, label) in self._FORMAT_ITEMS:
+            self._format_combo.addItem(label, fmt)
+        idx = self._format_combo.findData(default_format)
+        self._format_combo.setCurrentIndex(max(0, idx))
+        form.addRow("格式" if zh else "Format", self._format_combo)
+
+        self._timestamps_check = QCheckBox("包含時間戳" if zh else "Include timestamps")
+        self._timestamps_check.setChecked(bool(include_timestamps))
+        form.addRow("", self._timestamps_check)
+
+        self._speaker_check = QCheckBox("包含說話者標記" if zh else "Include speaker labels")
+        self._speaker_check.setChecked(bool(include_speaker))
+        form.addRow("", self._speaker_check)
+
+        root.addLayout(form)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        root.addWidget(buttons)
+
+    @property
+    def auto_export_enabled(self) -> bool:
+        return self._auto_export_check.isChecked()
+
+    @property
+    def include_timestamps(self) -> bool:
+        return self._timestamps_check.isChecked()
+
+    @property
+    def include_speaker(self) -> bool:
+        return self._speaker_check.isChecked()
+
+    @property
+    def export_format(self) -> str:
+        return str(self._format_combo.currentData() or "txt")
 
 
 class SettingsDialog(QDialog):
@@ -55,6 +127,8 @@ class SettingsDialog(QDialog):
         app_sessions: Sequence[str],
         device_provider: Callable[[], Sequence[AudioDevice]] | None = None,
         app_session_provider: Callable[[], Sequence[str]] | None = None,
+        export_transcript_callback: Callable[[str, str, bool, bool], str] | None = None,
+        import_audio_callback: Callable[[str], str] | None = None,
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
@@ -64,9 +138,12 @@ class SettingsDialog(QDialog):
         self._app_sessions = list(app_sessions)
         self._device_provider = device_provider
         self._app_session_provider = app_session_provider
+        self._export_transcript_callback = export_transcript_callback
+        self._import_audio_callback = import_audio_callback
         self._updates: dict[str, object] = {}
-        self._form_layout: QFormLayout | None = None
-        self._last_stt_provider = str(config.stt_provider or "whisper").strip() or "whisper"
+        self._form_layouts: list[QFormLayout] = []
+        self._last_stt_provider = "whisperx"
+        self._ui_built = False
         self._selected_loopback_indices = self._init_loopback_indices()
         self._selected_app_names = self._init_app_names()
         self._lang = normalize_ui_language(config.ui_language)
@@ -102,12 +179,14 @@ class SettingsDialog(QDialog):
         self._whisperx_align_model_edit = QComboBox()
         self._whisperx_align_language_combo = create_whisperx_align_language_combo()
         self._whisperx_align_device_combo = create_whisperx_align_device_combo()
+        self._whisperx_diar_device_combo = create_whisperx_diarization_device_combo()
         self._whisperx_align_model_edit.setEditable(True)
         self._whisperx_align_model_edit.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
         self._whisperx_align_model_edit.lineEdit().setPlaceholderText("auto (leave empty) or HF repo id")
         self._whisperx_diar_model_edit = QLineEdit()
         self._whisperx_hf_token_edit = QLineEdit()
         self._whisperx_hf_token_edit.setEchoMode(QLineEdit.EchoMode.Password)
+        self._whisperx_speaker_backend_combo = create_whisperx_speaker_backend_combo()
         self._stt_hint = QLabel()
         self._stt_hint.setWordWrap(True)
 
@@ -124,10 +203,7 @@ class SettingsDialog(QDialog):
         self._merge_method_combo.addItem("stable-tail", "stable-tail")
         self._merge_method_combo.addItem("commit-on-break", "commit-on-break")
 
-        self._vad_threshold_spin = QDoubleSpinBox()
-        self._vad_threshold_spin.setDecimals(4)
-        self._vad_threshold_spin.setRange(0.0, 0.2)
-        self._vad_threshold_spin.setSingleStep(0.001)
+        self._preprocess_enabled_check = QCheckBox()
 
         self._source_language_combo = create_source_language_combo()
         self._source_language_combo.currentIndexChanged.connect(self._on_source_language_changed)
@@ -149,6 +225,21 @@ class SettingsDialog(QDialog):
         self._translated_color_btn = QPushButton()
         self._bg_color_btn = QPushButton()
         self._debug_mode_check = QCheckBox()
+        self._transcript_export_enabled = bool(getattr(config, "transcript_export_enabled", False))
+        self._transcript_export_formats = str(
+            getattr(config, "transcript_export_formats", "txt,srt,json") or "txt,srt,json"
+        )
+        self._transcript_export_include_timestamps = bool(
+            getattr(config, "transcript_export_include_timestamps", True)
+        )
+        self._transcript_export_include_speaker = bool(
+            getattr(config, "transcript_export_include_speaker", True)
+        )
+        self._transcript_export_default_format = self._resolve_default_export_format(self._transcript_export_formats)
+        self._transcript_export_now_btn = QPushButton("匯出字幕..." if self._lang == "zh" else "Export Subtitle...")
+        self._transcript_export_now_btn.clicked.connect(self._on_export_transcript_now)
+        self._import_audio_btn = QPushButton("匯入音檔..." if self._lang == "zh" else "Import Audio...")
+        self._import_audio_btn.clicked.connect(self._on_import_audio)
 
         self._sync_from_config()
         self._build_ui()
@@ -170,35 +261,38 @@ class SettingsDialog(QDialog):
 
     def _build_ui(self) -> None:
         root = QVBoxLayout(self)
-        form = QFormLayout()
-        self._form_layout = form
+        form_left = QFormLayout()
+        form_right = QFormLayout()
+        self._form_layouts = [form_left, form_right]
 
-        form.addRow(self._t("ui_language"), self._ui_language_combo)
-        form.addRow("", self._ui_language_note)
-        form.addRow(self._t("source_mode"), self._mode_combo)
+        form_left.addRow(self._t("ui_language"), self._ui_language_combo)
+        form_left.addRow("", self._ui_language_note)
+        form_left.addRow(self._t("source_mode"), self._mode_combo)
 
         source_row = QHBoxLayout()
         source_row.addWidget(self._select_source_btn)
         source_row.addWidget(self._source_summary, 1)
-        form.addRow(self._t("source"), source_row)
+        form_left.addRow(self._t("source"), source_row)
 
-        form.addRow(self._t("stt_provider"), self._stt_provider_combo)
-        form.addRow(self._t("stt_variant"), self._stt_variant_combo)
-        form.addRow(self._t("model_path"), self._stt_model_path_edit)
-        form.addRow(self._t("auto_download"), self._stt_auto_download_check)
-        form.addRow(self._t("whisperx_vad"), self._whisperx_vad_check)
-        form.addRow(self._t("whisperx_diarization"), self._whisperx_diarization_check)
-        form.addRow(self._t("whisperx_align_language"), self._whisperx_align_language_combo)
-        form.addRow(self._t("whisperx_align_device"), self._whisperx_align_device_combo)
-        form.addRow(self._t("whisperx_align_model"), self._whisperx_align_model_edit)
-        form.addRow(self._t("whisperx_diar_model"), self._whisperx_diar_model_edit)
-        form.addRow(self._t("whisperx_hf_token"), self._whisperx_hf_token_edit)
-        form.addRow(self._t("vad_rms"), self._vad_threshold_spin)
-        form.addRow(self._t("stt_notes"), self._stt_hint)
-        form.addRow(self._t("segment_seconds"), self._segment_spin)
-        form.addRow(self._t("hop_seconds"), self._hop_spin)
-        form.addRow(self._t("merge_method"), self._merge_method_combo)
-        form.addRow(self._t("source_language"), self._source_language_combo)
+        form_left.addRow(self._t("stt_variant"), self._stt_variant_combo)
+        form_left.addRow(self._t("model_path"), self._stt_model_path_edit)
+        form_left.addRow(self._t("auto_download"), self._stt_auto_download_check)
+        form_left.addRow(self._t("whisperx_vad"), self._whisperx_vad_check)
+        form_left.addRow(self._t("whisperx_diarization"), self._whisperx_diarization_check)
+        form_left.addRow(self._t("whisperx_align_language"), self._whisperx_align_language_combo)
+        form_left.addRow(self._t("whisperx_align_device"), self._whisperx_align_device_combo)
+        form_left.addRow("WhisperX Diarization device", self._whisperx_diar_device_combo)
+        form_left.addRow(self._t("whisperx_align_model"), self._whisperx_align_model_edit)
+        form_left.addRow(self._t("whisperx_diar_model"), self._whisperx_diar_model_edit)
+        form_left.addRow(self._t("whisperx_hf_token"), self._whisperx_hf_token_edit)
+        form_left.addRow(self._t("whisperx_speaker_backend"), self._whisperx_speaker_backend_combo)
+        form_left.addRow(self._t("stt_notes"), self._stt_hint)
+
+        form_right.addRow(self._t("segment_seconds"), self._segment_spin)
+        form_right.addRow(self._t("hop_seconds"), self._hop_spin)
+        form_right.addRow(self._t("merge_method"), self._merge_method_combo)
+        form_right.addRow(self._t("preprocess"), self._preprocess_enabled_check)
+        form_right.addRow(self._t("source_language"), self._source_language_combo)
 
         translation_label = QWidget()
         translation_label_layout = QHBoxLayout(translation_label)
@@ -207,31 +301,36 @@ class SettingsDialog(QDialog):
         translation_label_layout.addWidget(QLabel(self._t("translation")))
         translation_label_layout.addWidget(self._translation_enabled_check)
         translation_label_layout.addStretch(1)
-        form.addRow(translation_label, self._bilingual_combo)
-        form.addRow(self._t("translation_target"), self._translation_language_combo)
+        form_right.addRow(translation_label, self._bilingual_combo)
+        form_right.addRow(self._t("translation_target"), self._translation_language_combo)
 
-        form.addRow(self._t("font_size"), self._font_size_spin)
+        form_right.addRow(self._t("font_size"), self._font_size_spin)
         opacity_row = QHBoxLayout()
         opacity_row.addWidget(self._opacity_slider, 1)
         opacity_row.addWidget(self._opacity_label)
-        form.addRow(self._t("opacity"), opacity_row)
+        form_right.addRow(self._t("opacity"), opacity_row)
 
         self._source_color_btn.clicked.connect(lambda: self._pick_color(self._source_color_btn))
         self._translated_color_btn.clicked.connect(lambda: self._pick_color(self._translated_color_btn))
         self._bg_color_btn.clicked.connect(lambda: self._pick_color(self._bg_color_btn))
-        form.addRow(self._t("source_color"), self._source_color_btn)
-        form.addRow(self._t("translated_color"), self._translated_color_btn)
-        form.addRow(self._t("background_color"), self._bg_color_btn)
-        form.addRow(self._t("debug_mode"), self._debug_mode_check)
+        form_right.addRow(self._t("source_color"), self._source_color_btn)
+        form_right.addRow(self._t("translated_color"), self._translated_color_btn)
+        form_right.addRow(self._t("background_color"), self._bg_color_btn)
+        form_right.addRow(self._t("debug_mode"), self._debug_mode_check)
 
         self._opacity_slider.valueChanged.connect(self._update_opacity_label)
         self._update_opacity_label(self._opacity_slider.value())
-        root.addLayout(form)
+        columns = QHBoxLayout()
+        columns.addLayout(form_left, 1)
+        columns.addLayout(form_right, 1)
+        root.addLayout(columns)
 
         footer = QHBoxLayout()
         self._reset_defaults_btn = QPushButton(self._t("reset_defaults"))
         self._reset_defaults_btn.clicked.connect(self._reset_to_defaults)
         footer.addWidget(self._reset_defaults_btn)
+        footer.addWidget(self._transcript_export_now_btn)
+        footer.addWidget(self._import_audio_btn)
         footer.addStretch(1)
 
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
@@ -240,6 +339,7 @@ class SettingsDialog(QDialog):
         footer.addWidget(buttons)
         root.addLayout(footer)
 
+        self._ui_built = True
         self._on_mode_changed()
         self._on_stt_provider_changed()
         self._on_translation_toggle()
@@ -263,7 +363,7 @@ class SettingsDialog(QDialog):
         cfg = config or self._config
         self._set_combo_data(self._ui_language_combo, cfg.ui_language)
         self._set_combo_data(self._mode_combo, cfg.source_mode)
-        self._set_combo_data(self._stt_provider_combo, cfg.stt_provider)
+        self._set_combo_data(self._stt_provider_combo, "whisperx")
         self._set_combo_data(self._stt_variant_combo, cfg.stt_variant)
         self._stt_model_path_edit.setText(cfg.stt_model_path)
         self._stt_auto_download_check.setChecked(cfg.stt_auto_download)
@@ -271,13 +371,18 @@ class SettingsDialog(QDialog):
         self._whisperx_diarization_check.setChecked(cfg.whisperx_enable_diarization)
         self._set_combo_data(self._whisperx_align_language_combo, str(getattr(cfg, 'whisperx_alignment_language', 'auto') or 'auto'))
         self._set_combo_data(self._whisperx_align_device_combo, str(getattr(cfg, 'whisperx_alignment_device', 'auto') or 'auto'))
+        self._set_combo_data(self._whisperx_diar_device_combo, str(getattr(cfg, 'whisperx_diarization_device', 'auto') or 'auto'))
         self._set_alignment_model_value(cfg.whisperx_alignment_model)
         self._whisperx_diar_model_edit.setText(cfg.whisperx_diarization_model)
         self._whisperx_hf_token_edit.setText(cfg.whisperx_hf_token)
+        self._set_combo_data(
+            self._whisperx_speaker_backend_combo,
+            str(getattr(cfg, "whisperx_speaker_profile_backend", "pyannote") or "pyannote"),
+        )
         self._segment_spin.setValue(cfg.segment_seconds)
         self._hop_spin.setValue(cfg.hop_seconds)
         self._set_combo_data(self._merge_method_combo, cfg.overlap_merge_method)
-        self._vad_threshold_spin.setValue(cfg.vad_rms_threshold)
+        self._preprocess_enabled_check.setChecked(bool(getattr(cfg, "preprocess_enabled", True)))
         self._translation_enabled_check.setChecked(cfg.translation_enabled)
         style = cfg.bilingual_style if cfg.bilingual_style != "inline" else "stacked"
         self._set_combo_data(self._bilingual_combo, style)
@@ -291,12 +396,24 @@ class SettingsDialog(QDialog):
         self._set_color_button(self._translated_color_btn, cfg.translated_text_color)
         self._set_color_button(self._bg_color_btn, cfg.background_color)
         self._debug_mode_check.setChecked(bool(getattr(cfg, "debug_mode", False)))
+        self._transcript_export_enabled = bool(getattr(cfg, "transcript_export_enabled", False))
+        self._transcript_export_formats = str(
+            getattr(cfg, "transcript_export_formats", "txt,srt,json") or "txt,srt,json"
+        )
+        self._transcript_export_include_timestamps = bool(
+            getattr(cfg, "transcript_export_include_timestamps", True)
+        )
+        self._transcript_export_include_speaker = bool(
+            getattr(cfg, "transcript_export_include_speaker", True)
+        )
+        self._transcript_export_default_format = self._resolve_default_export_format(self._transcript_export_formats)
 
     def _on_mode_changed(self) -> None:
         mode = self._mode_combo.currentData()
         selectable = mode in {"loopback", "app"}
-        self._select_source_btn.setVisible(selectable)
-        self._source_summary.setVisible(selectable)
+        if self._ui_built:
+            self._select_source_btn.setVisible(selectable)
+            self._source_summary.setVisible(selectable)
         if mode == "microphone":
             self._source_summary.setText(self._t("mic_default"))
             return
@@ -313,39 +430,20 @@ class SettingsDialog(QDialog):
             self._source_summary.setText(f'{self._t("apps_selected")} {", ".join(self._selected_app_names)}')
 
     def _on_stt_provider_changed(self) -> None:
-        """Sync provider-dependent fields (variant, model default, language lock, provider-specific options)."""
-        provider = str(self._stt_provider_combo.currentData() or "whisper")
+        """Sync fixed WhisperX fields."""
+        provider = "whisperx"
         previous_provider = self._last_stt_provider
         self._last_stt_provider = provider
-        is_whisperx = provider == "whisperx"
         self._configure_stt_variant(provider)
         self._apply_stt_model_default(provider, previous_provider=previous_provider)
-        self._configure_source_language_field(provider)
+        self._source_language_combo.setEnabled(True)
 
         self._stt_model_path_edit.setEnabled(True)
         self._stt_auto_download_check.setEnabled(True)
 
-        self._whisperx_vad_check.setEnabled(is_whisperx)
-        self._whisperx_diarization_check.setEnabled(is_whisperx)
-        self._whisperx_align_language_combo.setEnabled(is_whisperx)
-        self._whisperx_align_device_combo.setEnabled(is_whisperx)
-        self._whisperx_align_model_edit.setEnabled(is_whisperx)
-        self._whisperx_diar_model_edit.setEnabled(is_whisperx)
-        self._whisperx_hf_token_edit.setEnabled(is_whisperx)
-        self._set_form_row_visible(self._whisperx_vad_check, is_whisperx)
-        self._set_form_row_visible(self._whisperx_diarization_check, is_whisperx)
-        self._set_form_row_visible(self._whisperx_align_language_combo, is_whisperx)
-        self._set_form_row_visible(self._whisperx_align_device_combo, is_whisperx)
-        self._set_form_row_visible(self._whisperx_align_model_edit, is_whisperx)
-        self._set_form_row_visible(self._whisperx_diar_model_edit, is_whisperx)
-        self._set_form_row_visible(self._whisperx_hf_token_edit, is_whisperx)
-
-        if provider == "whisperx":
-            self._refresh_alignment_model_suggestions()
-            self._whisperx_align_model_edit.setToolTip("留空=自動依語言選擇；選清單或填 HF repo id=固定使用指定模型")
-            self._stt_hint.setText(self._t("provider_hint_whisperx"))
-        else:
-            self._stt_hint.setText(self._t("provider_hint_whisper"))
+        self._refresh_alignment_model_suggestions()
+        self._whisperx_align_model_edit.setToolTip("留空=自動依語言選擇；選清單或填 HF repo id=固定使用指定模型")
+        self._stt_hint.setText(self._t("provider_hint_whisperx"))
 
     def _configure_stt_variant(self, provider: str) -> None:
         current = str(self._stt_variant_combo.currentData() or "auto")
@@ -360,16 +458,104 @@ class SettingsDialog(QDialog):
         self._stt_variant_combo.setEnabled(len(allowed) > 1)
         self._stt_variant_combo.blockSignals(False)
 
-    def _configure_source_language_field(self, provider: str) -> None:
-        supported = provider_supports_source_language(provider)
-        self._source_language_combo.setEnabled(supported)
-        if not supported:
-            self._set_combo_data(self._source_language_combo, "auto")
+    def _on_export_transcript_now(self) -> None:
+        callback = self._export_transcript_callback
+        if callback is None:
+            QMessageBox.warning(self, self._t("invalid_settings"), "Export callback is unavailable in current runtime.")
+            return
+        export_settings = TranscriptExportDialog(
+            auto_export_enabled=self._transcript_export_enabled,
+            include_timestamps=self._transcript_export_include_timestamps,
+            include_speaker=self._transcript_export_include_speaker,
+            default_format=self._transcript_export_default_format,
+            lang=self._lang,
+            parent=self,
+        )
+        if export_settings.exec() != QDialog.DialogCode.Accepted:
+            return
+        self._transcript_export_enabled = export_settings.auto_export_enabled
+        self._transcript_export_include_timestamps = export_settings.include_timestamps
+        self._transcript_export_include_speaker = export_settings.include_speaker
+        self._transcript_export_default_format = export_settings.export_format
+        self._transcript_export_formats = self._compose_export_formats(
+            self._transcript_export_formats,
+            self._transcript_export_default_format,
+        )
+        default_dir = str(getattr(self._config, "transcript_export_dir", "") or "").strip()
+        if not default_dir:
+            default_dir = str((Path(self._config.log_dir).resolve().parent / "exports"))
+        filters = "Text (*.txt);;SubRip (*.srt);;JSON (*.json)"
+        default_filter_map = {
+            "txt": "Text (*.txt)",
+            "srt": "SubRip (*.srt)",
+            "json": "JSON (*.json)",
+        }
+        default_name = f"transcript.{self._transcript_export_default_format}"
+        path, selected_filter = QFileDialog.getSaveFileName(
+            self,
+            "Export Transcript",
+            str(Path(default_dir) / default_name),
+            filters,
+            default_filter_map.get(self._transcript_export_default_format, "Text (*.txt)"),
+        )
+        if not path:
+            return
+        selected = selected_filter.lower()
+        if "srt" in selected:
+            fmt = "srt"
+        elif "json" in selected:
+            fmt = "json"
+        else:
+            fmt = "txt"
+        suffix = Path(path).suffix.lower()
+        if suffix not in {".txt", ".srt", ".json"}:
+            path = str(Path(path).with_suffix(f".{fmt}"))
+        try:
+            written = callback(
+                path,
+                fmt,
+                self._transcript_export_include_timestamps,
+                self._transcript_export_include_speaker,
+            )
+            QMessageBox.information(self, "Export", f"Transcript exported:\n{written}")
+        except Exception as exc:
+            QMessageBox.warning(self, "Export", f"Transcript export failed:\n{exc}")
 
+    def _on_import_audio(self) -> None:
+        callback = self._import_audio_callback
+        if callback is None:
+            QMessageBox.warning(self, self._t("invalid_settings"), "Import callback is unavailable in current runtime.")
+            return
+        default_dir = str(getattr(self._config, "source_file_path", "") or "").strip()
+        if default_dir:
+            default_dir = str(Path(default_dir).resolve().parent)
+        else:
+            default_dir = str(Path(self._config.log_dir).resolve().parent)
+        filters = "Audio/Video (*.wav *.mp3 *.m4a *.aac *.flac *.ogg *.opus *.mp4 *.mkv *.webm);;All files (*.*)"
+        path, _selected_filter = QFileDialog.getOpenFileName(
+            self,
+            "Import Audio" if self._lang != "zh" else "匯入音檔",
+            default_dir,
+            filters,
+        )
+        if not path:
+            return
+        try:
+            imported = callback(path)
+            QMessageBox.information(
+                self,
+                "Import" if self._lang != "zh" else "匯入",
+                ("Imported audio replay started:\n" if self._lang != "zh" else "已開始匯入音檔重播：\n") + imported,
+            )
+        except Exception as exc:
+            QMessageBox.warning(
+                self,
+                "Import" if self._lang != "zh" else "匯入",
+                ("Audio import failed:\n" if self._lang != "zh" else "匯入音檔失敗：\n") + str(exc),
+            )
 
     def _on_source_language_changed(self) -> None:
-        if str(self._stt_provider_combo.currentData() or "whisper") == "whisperx":
-            self._refresh_alignment_model_suggestions()
+        self._refresh_alignment_model_suggestions()
 
     def _set_alignment_model_value(self, value: str) -> None:
         raw = (value or "").strip()
@@ -470,7 +656,7 @@ class SettingsDialog(QDialog):
         tips = {
             self._mode_combo: "Choose audio source mode: loopback, microphone, or selected app sessions.",
             self._select_source_btn: "Open source picker to choose capture devices or app sessions.",
-            self._stt_provider_combo: "Select speech-to-text engine (Whisper / WhisperX).",
+            self._stt_provider_combo: "WhisperX is the only supported speech-to-text engine.",
             self._stt_variant_combo: "Execution preference (Auto/CPU/GPU).",
             self._stt_model_path_edit: "Model alias or local path; defaults are used when empty.",
             self._stt_auto_download_check: "Auto-download missing models.",
@@ -478,13 +664,15 @@ class SettingsDialog(QDialog):
             self._whisperx_diarization_check: "Enable diarization (speaker separation, heavier).",
             self._whisperx_align_language_combo: "Alignment language: auto (ASR detected), follow-source (STT source language), or explicit language.",
             self._whisperx_align_device_combo: "Alignment device: auto (smart choice), cpu (lower VRAM), cuda (faster but higher VRAM).",
+            self._whisperx_diar_device_combo: "Diarization device: auto follows ASR device, cpu lowers VRAM pressure, cuda improves throughput.",
             self._whisperx_align_model_edit: "Alignment model. Empty=auto; choose suggestion or type HF repo id.",
             self._whisperx_diar_model_edit: "Diarization model id.",
             self._whisperx_hf_token_edit: "Hugging Face token for restricted/private models.",
+            self._whisperx_speaker_backend_combo: "Speaker identity backend for profile embeddings.",
             self._segment_spin: "Segment window length sent to STT (seconds).",
             self._hop_spin: "Sliding hop size in seconds; smaller is lower latency but higher load.",
             self._merge_method_combo: "Merge strategy for overlapped subtitle segments.",
-            self._vad_threshold_spin: "Fixed RMS threshold used when adaptive VAD is off.",
+            self._preprocess_enabled_check: "Enable or disable pre-STT audio preprocessing pipeline.",
             self._source_language_combo: "Source language hint for STT input.",
             self._translation_enabled_check: "Enable live translation.",
             self._bilingual_combo: "Subtitle style: stacked bilingual or translation-only.",
@@ -495,6 +683,8 @@ class SettingsDialog(QDialog):
             self._translated_color_btn: "Translated text color.",
             self._bg_color_btn: "Overlay background color.",
             self._debug_mode_check: "Enable or disable Debug trace window and debug log output.",
+            self._transcript_export_now_btn: "Open export subtitle settings and then choose file path.",
+            self._import_audio_btn: "Import an audio/video file and replay it through the realtime subtitle pipeline.",
             self._reset_defaults_btn: "Reset all settings in this dialog back to default values.",
         }
         for (widget, tip) in tips.items():
@@ -508,7 +698,7 @@ class SettingsDialog(QDialog):
         self._selected_loopback_indices = self._loopback_indices_from_config(defaults)
         self._selected_app_names = self._app_names_from_config(defaults)
         self._sync_from_config(defaults)
-        self._last_stt_provider = str(self._stt_provider_combo.currentData() or "whisper").strip() or "whisper"
+        self._last_stt_provider = str(self._stt_provider_combo.currentData() or "whisperx").strip() or "whisperx"
         self._on_mode_changed()
         self._on_stt_provider_changed()
         self._on_translation_toggle()
@@ -519,7 +709,7 @@ class SettingsDialog(QDialog):
         payload = SettingsPayloadInput(
             ui_language=str(self._ui_language_combo.currentData() or self._lang),
             source_mode=str(self._mode_combo.currentData()),
-            stt_provider=str(self._stt_provider_combo.currentData() or "whisper"),
+            stt_provider="whisperx",
             stt_variant=str(self._stt_variant_combo.currentData() or "auto"),
             stt_model_path=self._stt_model_path_edit.text(),
             stt_auto_download=self._stt_auto_download_check.isChecked(),
@@ -531,8 +721,10 @@ class SettingsDialog(QDialog):
             whisperx_alignment_model=self._whisperx_align_model_edit.currentText(),
             whisperx_alignment_language=str(self._whisperx_align_language_combo.currentData() or 'auto'),
             whisperx_alignment_device=str(self._whisperx_align_device_combo.currentData() or 'auto'),
+            whisperx_diarization_device=str(self._whisperx_diar_device_combo.currentData() or 'auto'),
             whisperx_diarization_model=self._whisperx_diar_model_edit.text(),
             whisperx_hf_token=self._whisperx_hf_token_edit.text(),
+            whisperx_speaker_profile_backend=str(self._whisperx_speaker_backend_combo.currentData() or "pyannote"),
             source_language=str(self._source_language_combo.currentData()),
             translation_to=str(self._translation_language_combo.currentData()),
             segment_seconds=float(self._segment_spin.value()),
@@ -540,10 +732,8 @@ class SettingsDialog(QDialog):
             selected_loopback_indices=list(self._selected_loopback_indices),
             selected_app_names=list(self._selected_app_names),
             overlap_merge_method=str(self._merge_method_combo.currentData()),
-            preprocess_enabled=True,
+            preprocess_enabled=self._preprocess_enabled_check.isChecked(),
             preprocess_modules="auto",
-            vad_adaptive_enabled=bool(getattr(self._config, "vad_adaptive_enabled", True)),
-            vad_rms_threshold=float(self._vad_threshold_spin.value()),
             translation_enabled=self._translation_enabled_check.isChecked(),
             bilingual_style=str(self._bilingual_combo.currentData()),
             font_size=int(self._font_size_spin.value()),
@@ -552,12 +742,39 @@ class SettingsDialog(QDialog):
             translated_text_color=self._translated_color_btn.text(),
             background_color=self._bg_color_btn.text(),
             debug_mode=self._debug_mode_check.isChecked(),
+            transcript_export_enabled=bool(self._transcript_export_enabled),
+            transcript_export_formats=self._transcript_export_formats,
+            transcript_export_include_timestamps=bool(self._transcript_export_include_timestamps),
+            transcript_export_include_speaker=bool(self._transcript_export_include_speaker),
         )
         return build_settings_updates(
             payload,
             lang=str(self._ui_language_combo.currentData() or self._lang),
             hop_gt_segment_message=self._t("hop_gt_segment"),
         )
+
+    @staticmethod
+    def _resolve_default_export_format(raw_formats: str) -> str:
+        items: list[str] = []
+        for token in str(raw_formats or "").split(","):
+            fmt = token.strip().lower()
+            if fmt in {"txt", "srt", "json"} and fmt not in items:
+                items.append(fmt)
+        return items[0] if items else "txt"
+
+    @staticmethod
+    def _compose_export_formats(raw_formats: str, preferred: str) -> str:
+        items: list[str] = []
+        pref = preferred.strip().lower()
+        if pref in {"txt", "srt", "json"}:
+            items.append(pref)
+        for token in str(raw_formats or "").split(","):
+            fmt = token.strip().lower()
+            if fmt in {"txt", "srt", "json"} and fmt not in items:
+                items.append(fmt)
+        if not items:
+            items = ["txt", "srt", "json"]
+        return ",".join(items)
 
     def _pick_color(self, button: QPushButton) -> None:
         initial = QColor(button.text())
@@ -574,11 +791,10 @@ class SettingsDialog(QDialog):
         self._opacity_label.setText(f"{value}%")
 
     def _set_form_row_visible(self, field: QWidget, visible: bool) -> None:
-        if self._form_layout is None:
-            return
-        label = self._form_layout.labelForField(field)
-        if label is not None:
-            label.setVisible(visible)
+        for form_layout in self._form_layouts:
+            label = form_layout.labelForField(field)
+            if label is not None:
+                label.setVisible(visible)
         field.setVisible(visible)
 
     @staticmethod

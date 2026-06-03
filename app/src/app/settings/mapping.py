@@ -20,8 +20,10 @@ class SettingsPayloadInput:
     whisperx_alignment_model: str
     whisperx_alignment_language: str
     whisperx_alignment_device: str
+    whisperx_diarization_device: str
     whisperx_diarization_model: str
     whisperx_hf_token: str
+    whisperx_speaker_profile_backend: str
     source_language: str
     translation_to: str
     segment_seconds: float
@@ -31,8 +33,6 @@ class SettingsPayloadInput:
     overlap_merge_method: str
     preprocess_enabled: bool
     preprocess_modules: str
-    vad_adaptive_enabled: bool
-    vad_rms_threshold: float
     translation_enabled: bool
     bilingual_style: str
     font_size: int
@@ -41,10 +41,14 @@ class SettingsPayloadInput:
     translated_text_color: str
     background_color: str
     debug_mode: bool
+    transcript_export_enabled: bool
+    transcript_export_formats: str
+    transcript_export_include_timestamps: bool
+    transcript_export_include_speaker: bool
 
 
 def build_settings_updates(payload: SettingsPayloadInput, *, lang: str, hop_gt_segment_message: str) -> dict[str, object]:
-    stt_provider = payload.stt_provider.strip() or 'whisper'
+    stt_provider = 'whisperx'
     stt_model_path = payload.stt_model_path.strip()
 
     source_lang_data = payload.source_language
@@ -70,6 +74,19 @@ def build_settings_updates(payload: SettingsPayloadInput, *, lang: str, hop_gt_s
     alignment_device = (payload.whisperx_alignment_device or "auto").strip().lower()
     if alignment_device not in {"auto", "cpu", "cuda"}:
         alignment_device = "auto"
+    diarization_device = (payload.whisperx_diarization_device or "auto").strip().lower()
+    if diarization_device not in {"auto", "cpu", "cuda"}:
+        diarization_device = "auto"
+    speaker_profile_backend = (payload.whisperx_speaker_profile_backend or "pyannote").strip().lower()
+    if speaker_profile_backend not in {"pyannote", "speechbrain_ecapa", "nemo_titanet"}:
+        speaker_profile_backend = "pyannote"
+    export_formats: list[str] = []
+    for token in str(payload.transcript_export_formats or "").split(","):
+        item = token.strip().lower()
+        if item in {"txt", "srt", "json"} and item not in export_formats:
+            export_formats.append(item)
+    if not export_formats:
+        export_formats = ["txt", "srt", "json"]
 
     return {
         'ui_language': lang,
@@ -85,8 +102,10 @@ def build_settings_updates(payload: SettingsPayloadInput, *, lang: str, hop_gt_s
         'whisperx_alignment_model': payload.whisperx_alignment_model.strip(),
         'whisperx_alignment_language': payload.whisperx_alignment_language.strip() or 'auto',
         'whisperx_alignment_device': alignment_device,
+        'whisperx_diarization_device': diarization_device,
         'whisperx_diarization_model': payload.whisperx_diarization_model.strip() or 'pyannote/speaker-diarization-3.1',
         'whisperx_hf_token': payload.whisperx_hf_token.strip(),
+        'whisperx_speaker_profile_backend': speaker_profile_backend,
         'source_mode': payload.source_mode,
         'source_device_indices': source_device_indices,
         'source_app_name': source_app_names[0] if source_app_names else '',
@@ -97,8 +116,6 @@ def build_settings_updates(payload: SettingsPayloadInput, *, lang: str, hop_gt_s
         'overlap_merge_method': payload.overlap_merge_method,
         'preprocess_enabled': bool(payload.preprocess_enabled),
         'preprocess_modules': payload.preprocess_modules.strip() or 'auto',
-        'vad_adaptive_enabled': bool(payload.vad_adaptive_enabled),
-        'vad_rms_threshold': float(payload.vad_rms_threshold),
         'translation_enabled': bool(payload.translation_enabled),
         'translation_from': translation_from,
         'translation_to': payload.translation_to,
@@ -110,5 +127,9 @@ def build_settings_updates(payload: SettingsPayloadInput, *, lang: str, hop_gt_s
         'translated_text_color': payload.translated_text_color.strip(),
         'background_color': payload.background_color.strip(),
         'debug_mode': bool(payload.debug_mode),
+        'transcript_export_enabled': bool(payload.transcript_export_enabled),
+        'transcript_export_formats': ",".join(export_formats),
+        'transcript_export_include_timestamps': bool(payload.transcript_export_include_timestamps),
+        'transcript_export_include_speaker': bool(payload.transcript_export_include_speaker),
     }
 

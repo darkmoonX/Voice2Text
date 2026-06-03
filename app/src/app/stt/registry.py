@@ -1,4 +1,4 @@
-﻿"""STT provider registry and alias normalization seam."""
+"""STT provider registry and alias normalization seam."""
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -15,8 +15,12 @@ class STTProviderSpec:
 
 
 STT_PROVIDER_SPECS: tuple[STTProviderSpec, ...] = (
-    STTProviderSpec(provider='whisper', aliases=('whisper', 'faster-whisper', 'faster_whisper'), supports_gpu_variant=True, supports_source_language_hint=True),
-    STTProviderSpec(provider='whisperx', aliases=('whisperx', 'whisper-x', 'whisper_x'), supports_gpu_variant=True, supports_source_language_hint=True),
+    STTProviderSpec(
+        provider='whisperx',
+        aliases=('whisperx', 'whisper-x', 'whisper_x', 'whisper', 'faster-whisper', 'faster_whisper'),
+        supports_gpu_variant=True,
+        supports_source_language_hint=True,
+    ),
 )
 
 

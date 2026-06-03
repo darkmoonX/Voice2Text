@@ -1,4 +1,4 @@
-"""STT provider factory: resolves runtime variant/device and constructs provider transcribers."""
+"""WhisperX provider factory: resolves runtime variant/device and constructs transcribers."""
 from __future__ import annotations
 from typing import Callable, Optional
 from ..config import RuntimeConfig
@@ -35,26 +35,27 @@ def _has_torch_cuda() -> bool:
     except Exception:
         return False
 
+
+def _whisperx_needs_torch_cuda(config: RuntimeConfig) -> bool:
+    return any(
+        (
+            bool(getattr(config, 'whisperx_enable_forced_alignment', True)),
+            bool(getattr(config, 'whisperx_enable_vad', True)),
+            bool(getattr(config, 'whisperx_enable_diarization', False)),
+            bool(getattr(config, 'whisperx_speaker_profile_enabled', True)),
+        )
+    )
+
 def _emit_progress(progress_callback: Callable[[str], None] | None, message: str) -> None:
     if progress_callback:
         progress_callback(message)
 
 def create_stt_transcriber(config: RuntimeConfig, *, device_override: Optional[str]=None, compute_type_override: Optional[str]=None, progress_callback: Callable[[str], None] | None=None) -> STTTranscriber:
-    """Provider router called by controller to build the active STT engine instance."""
+    """Build the WhisperX STT engine instance used by the controller."""
     provider = normalize_stt_provider(config.stt_provider)
-    builder = _PROVIDER_BUILDERS.get(provider)
-    if builder is None:
+    if provider != 'whisperx':
         raise ValueError(f'Unsupported STT provider: {provider}')
-    return builder(config, device_override=device_override, compute_type_override=compute_type_override, progress_callback=progress_callback)
-
-
-def _build_whisper(config: RuntimeConfig, *, device_override: Optional[str], compute_type_override: Optional[str], progress_callback: Callable[[str], None] | None) -> STTTranscriber:
-    from .whisper_provider import FasterWhisperTranscriber
-
-    auto_download = bool(config.stt_auto_download)
-    model_ref = config.stt_model_path.strip() or config.model_size
-    (device, compute_type) = _resolve_whisper_runtime(config, device_override=device_override, compute_type_override=compute_type_override, progress_callback=progress_callback)
-    return FasterWhisperTranscriber(model_size=model_ref, device=device, compute_type=compute_type, auto_download=auto_download, progress_callback=progress_callback, max_context=config.whisper_max_context, entropy_thold=config.whisper_entropy_thold, logprob_thold=config.whisper_logprob_thold, no_speech_thold=config.whisper_no_speech_thold, temperature=config.whisper_temperature, beam_size=config.whisper_beam_size, best_of=config.whisper_best_of)
+    return _build_whisperx(config, device_override=device_override, compute_type_override=compute_type_override, progress_callback=progress_callback)
 
 
 def _build_whisperx(config: RuntimeConfig, *, device_override: Optional[str], compute_type_override: Optional[str], progress_callback: Callable[[str], None] | None) -> STTTranscriber:
@@ -63,9 +64,12 @@ def _build_whisperx(config: RuntimeConfig, *, device_override: Optional[str], co
     model_ref = config.stt_model_path.strip() or config.model_size
     (device, compute_type) = _resolve_whisper_runtime(config, device_override=device_override, compute_type_override=compute_type_override, progress_callback=progress_callback)
     if str(device).lower().startswith('cuda') and (not _has_torch_cuda()):
-        _emit_progress(progress_callback, 'WhisperX CUDA unavailable in current torch build. Falling back to CPU int8.')
-        device = 'cpu'
-        compute_type = 'int8'
+        if _whisperx_needs_torch_cuda(config):
+            _emit_progress(progress_callback, 'WhisperX CUDA unavailable in current torch build. Falling back to CPU int8.')
+            device = 'cpu'
+            compute_type = 'int8'
+        else:
+            _emit_progress(progress_callback, 'Torch CUDA unavailable, but WhisperX is running ASR-only mode. Keep device=cuda for CTranslate2 ASR.')
     return WhisperXTranscriber(
         model_ref=model_ref,
         device=device,
@@ -79,17 +83,20 @@ def _build_whisperx(config: RuntimeConfig, *, device_override: Optional[str], co
         alignment_model=str(getattr(config, 'whisperx_alignment_model', '') or ''),
         alignment_language=str(getattr(config, 'whisperx_alignment_language', 'auto') or 'auto'),
         alignment_device=str(getattr(config, 'whisperx_alignment_device', 'auto') or 'auto'),
+        diarization_device=str(getattr(config, 'whisperx_diarization_device', 'auto') or 'auto'),
         source_language_hint=str(getattr(config, 'source_language', '') or ''),
         diarization_model=str(getattr(config, 'whisperx_diarization_model', 'pyannote/speaker-diarization-3.1') or 'pyannote/speaker-diarization-3.1'),
         hf_token=str(getattr(config, 'whisperx_hf_token', '') or ''),
+        speaker_profile_enabled=bool(getattr(config, 'whisperx_speaker_profile_enabled', True)),
+        speaker_profile_backend=str(getattr(config, 'whisperx_speaker_profile_backend', 'pyannote') or 'pyannote'),
+        speaker_profile_model=str(getattr(config, 'whisperx_speaker_profile_model', 'pyannote/embedding') or 'pyannote/embedding'),
+        speaker_speechbrain_model=str(getattr(config, 'whisperx_speaker_speechbrain_model', 'speechbrain/spkrec-ecapa-voxceleb') or 'speechbrain/spkrec-ecapa-voxceleb'),
+        speaker_nemo_model=str(getattr(config, 'whisperx_speaker_nemo_model', 'nvidia/speakerverification_en_titanet_large') or 'nvidia/speakerverification_en_titanet_large'),
+        speaker_profile_match_threshold=float(getattr(config, 'whisperx_speaker_profile_match_threshold', 0.72) or 0.72),
+        speaker_profile_min_seconds=float(getattr(config, 'whisperx_speaker_profile_min_seconds', 0.8) or 0.8),
+        speaker_profile_store_path=str(getattr(config, 'whisperx_speaker_profile_store_path', '') or ''),
         auto_download=bool(config.stt_auto_download),
         progress_callback=progress_callback,
     )
-
-
-_PROVIDER_BUILDERS: dict[STTProvider, Callable[..., STTTranscriber]] = {
-    'whisper': _build_whisper,
-    'whisperx': _build_whisperx,
-}
 
 

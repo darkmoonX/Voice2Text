@@ -33,6 +33,7 @@ class CppBridgeCapture(AudioCaptureBase):
         app_names: list[str] | None = None,
         source_device_id: str = "",
         debug_segment_path: Path | None = None,
+        debug_segment_window_seconds: float = 6.0,
         on_error: Optional[Callable[[str], None]] = None,
         on_status: Optional[Callable[[str], None]] = None,
     ) -> None:
@@ -47,7 +48,7 @@ class CppBridgeCapture(AudioCaptureBase):
         self._stdout_thread: threading.Thread | None = None
         self._stderr_thread: threading.Thread | None = None
         self._debug_segment_path = debug_segment_path
-        self._debug_segment_window_seconds = 6.0
+        self._debug_segment_window_seconds = max(1.0, float(debug_segment_window_seconds))
         self._debug_segment_last_write = 0.0
         self._debug_segment_buffer = bytearray()
         self.sample_rate = 16000
@@ -85,6 +86,10 @@ class CppBridgeCapture(AudioCaptureBase):
         self._stdout_thread.start()
         self._stderr_thread.start()
         self._emit_status(f"C++ capture bridge started: {' '.join(cmd)}")
+        if self._debug_segment_path is not None:
+            self._emit_status(
+                f"[capture-status] C++ bridge debug segment window (rolling tail): {self._debug_segment_window_seconds:.2f}s"
+            )
 
     def stop(self) -> None:
         self._running.clear()
@@ -205,6 +210,7 @@ def build_cpp_capture_from_config(
     on_status: Optional[Callable[[str], None]] = None,
 ) -> AudioCaptureBase | None:
     mode = (config.source_mode or "loopback").strip().lower()
+    debug_segment_window_seconds = max(1.0, float(getattr(config, "segment_seconds", 6.0) or 6.0))
     if mode not in {"loopback", "app"}:
         return None
     bridge_exe = resolve_capture_bridge_executable()
@@ -249,6 +255,7 @@ def build_cpp_capture_from_config(
             app_names=normalized,
             source_device_id="",
             debug_segment_path=_resolve_cpp_segment_debug_path(config),
+            debug_segment_window_seconds=debug_segment_window_seconds,
             on_error=on_error,
             on_status=on_status,
         )
@@ -257,6 +264,7 @@ def build_cpp_capture_from_config(
         app_names=[],
         source_device_id="",
         debug_segment_path=_resolve_cpp_segment_debug_path(config),
+        debug_segment_window_seconds=debug_segment_window_seconds,
         on_error=on_error,
         on_status=on_status,
     )

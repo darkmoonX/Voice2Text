@@ -19,6 +19,7 @@ class _WordState:
     score: float
     count: int
     last_seen: float
+    speaker: str = ''
 
 
 class SubtitleAssembler:
@@ -34,8 +35,12 @@ class SubtitleAssembler:
         self._partial_words: list[_WordState] = []
         self._latest_partial_text = ''
         self._last_emitted_source_text = ''
+        self._speaker_display_map: dict[str, str] = {}
+        self._speaker_display_next_index = 0
         self._required_agreement_count = 3
         self._score_threshold = 0.60
+        self._speaker_switch_confirm_tokens = 2
+        self._speaker_switch_min_duration_seconds = 0.18
 
     def set_language_context(self, source_language: str | None) -> None:
         token = (source_language or '').strip().lower()
@@ -55,7 +60,7 @@ class SubtitleAssembler:
 
     def merge_incremental_text(self, text: str, *, overlap_merge_method: str, segment_seconds: float, hop_seconds: float, transcription_meta: dict[str, object] | None = None) -> str:
         _ = (overlap_merge_method, segment_seconds, hop_seconds)
-        cleaned = re.sub(r'\s+', ' ', text).strip()
+        cleaned = self._normalize_output_text(text)
         self._latest_partial_text = cleaned
         if not cleaned:
             return ''
@@ -81,15 +86,12 @@ class SubtitleAssembler:
         else:
             self._latest_partial_text = cleaned
 
-        if incoming:
-            # When timestamped words exist, build output from word states so
-            # CJK spacing policy (cjk_no_space_gap_seconds) remains authoritative.
-            all_words = [*self._history_words, *self._stable_words, *self._partial_words]
-            merged = self._words_to_text(all_words)
-        else:
-            # Fallback path for providers/chunks without timestamp metadata.
-            history_text = self._words_to_text(self._history_words)
-            merged = self._merge_by_exact_overlap(history_text, cleaned)
+        # Output policy:
+        # - keep token-level state updates (history/stable/partial) for stability bookkeeping
+        # - but compose visible text as history + current raw overlap-merge to avoid
+        #   duplicated tails from stable/partial rendering overlap.
+        history_text = self._words_to_text(self._history_words)
+        merged = self._merge_by_exact_overlap(history_text, cleaned)
         merged = self._normalize_output_text(merged)[-1800:]
         if merged == self._last_emitted_source_text:
             return ''
@@ -116,7 +118,17 @@ class SubtitleAssembler:
                 continue
             start_abs = elapsed + start_rel
             end_abs = elapsed + end_rel
-            out.append(_WordState(word=word, start=start_abs, end=end_abs, score=score, count=1, last_seen=end_abs))
+            out.append(
+                _WordState(
+                    word=word,
+                    start=start_abs,
+                    end=end_abs,
+                    score=score,
+                    count=1,
+                    last_seen=end_abs,
+                    speaker=str(raw.get('speaker') or '').strip(),
+                )
+            )
         out.sort(key=lambda w: (w.start, w.end))
         return out
 
@@ -235,19 +247,37 @@ class SubtitleAssembler:
         target.score = ((target.score * target_weight) + (incoming.score * incoming_weight)) / float(total_weight)
         target.count = target_weight + incoming_weight
         target.last_seen = max(target.last_seen, incoming.last_seen)
+        if (not target.speaker) and incoming.speaker:
+            target.speaker = incoming.speaker
+        elif incoming.speaker and target.speaker and (incoming.speaker != target.speaker):
+            if float(incoming.score) >= float(target.score):
+                target.speaker = incoming.speaker
 
     def _words_to_text(self, words: list[_WordState]) -> str:
         if not words:
             return ''
         ordered = sorted(words, key=lambda w: (w.start, w.end))
-        if not self._is_cjk_source:
-            return re.sub(r'\s+', ' ', ' '.join((w.word for w in ordered if w.word))).strip()
-
+        speaker_labels = self._stabilize_speakers(ordered)
         out: list[str] = []
         prev: _WordState | None = None
-        for w in ordered:
-            token = self._normalize_cjk_token(str(w.word or ''))
+        last_speaker_label = ''
+        for (w, speaker) in zip(ordered, speaker_labels):
+            raw_token = str(w.word or '')
+            token = self._normalize_cjk_token(raw_token) if self._is_cjk_source else raw_token.strip()
             if not token:
+                continue
+            marker = self._speaker_label_to_marker(speaker)
+            if marker and speaker and (speaker != last_speaker_label):
+                if self._is_cjk_source:
+                    out.append(f'\n{marker} ' if marker == '>>' else f'\n{marker}: ')
+                else:
+                    if marker == '>>':
+                        out.append(f'\n{marker}' if out else f'{marker}')
+                    else:
+                        out.append(f'\n{marker}:' if out else f'{marker}:')
+                last_speaker_label = speaker
+            if not self._is_cjk_source:
+                out.append(token)
                 continue
             if prev is None:
                 out.append(token)
@@ -261,7 +291,69 @@ class SubtitleAssembler:
                 out.append(' ')
             out.append(token)
             prev = w
-        return re.sub(r'\s+', ' ', ''.join(out)).strip()
+        if not self._is_cjk_source:
+            text = ' '.join(out)
+            lines = []
+            for line in text.splitlines():
+                cleaned = re.sub(r'[ \t]+', ' ', line).strip()
+                if cleaned:
+                    lines.append(cleaned)
+            return '\n'.join(lines).strip()
+        text = ''.join(out)
+        lines = []
+        for line in text.splitlines():
+            cleaned = re.sub(r'[ \t]+', ' ', line).strip()
+            if cleaned:
+                lines.append(cleaned)
+        return '\n'.join(lines).strip()
+
+    def _stabilize_speakers(self, words: list[_WordState]) -> list[str]:
+        if not words:
+            return []
+        stable_speaker = ''
+        pending_speaker = ''
+        pending_count = 0
+        pending_start = 0.0
+        out: list[str] = []
+        for w in words:
+            incoming = str(w.speaker or '').strip()
+            if not incoming:
+                out.append(stable_speaker)
+                continue
+            if not stable_speaker:
+                stable_speaker = incoming
+                pending_speaker = ''
+                pending_count = 0
+                out.append(stable_speaker)
+                continue
+            if incoming == stable_speaker:
+                pending_speaker = ''
+                pending_count = 0
+                out.append(stable_speaker)
+                continue
+            if incoming == pending_speaker:
+                pending_count += 1
+            else:
+                pending_speaker = incoming
+                pending_count = 1
+                pending_start = float(w.start)
+            pending_duration = max(0.0, float(w.end) - float(pending_start))
+            if (
+                pending_count >= int(self._speaker_switch_confirm_tokens)
+                and pending_duration >= float(self._speaker_switch_min_duration_seconds)
+            ):
+                stable_speaker = pending_speaker
+                pending_speaker = ''
+                pending_count = 0
+            out.append(stable_speaker)
+        return out
+
+    def _speaker_label_to_marker(self, speaker: str) -> str:
+        label = str(speaker or '').strip()
+        if not label:
+            return ''
+        # Product requirement: speaker turn lines should start with '>>'.
+        return '>>'
 
 
     @staticmethod
@@ -293,6 +385,7 @@ class SubtitleAssembler:
                 'score': float(w.score),
                 'count': int(w.count),
                 'last_seen': float(w.last_seen),
+                'speaker': str(w.speaker or ''),
             })
         return out
 
@@ -310,14 +403,19 @@ class SubtitleAssembler:
         return deduped
 
     def _normalize_output_text(self, text: str) -> str:
-        cleaned = re.sub(r'\s+', ' ', text).strip()
-        if not cleaned:
+        if not text:
             return ''
-        return cleaned
+        text = self._normalize_speaker_marker_boundaries(text)
+        lines = []
+        for line in text.splitlines():
+            cleaned = re.sub(r'[ \t]+', ' ', line).strip()
+            if cleaned:
+                lines.append(cleaned)
+        return '\n'.join(lines).strip()
 
     def _merge_by_exact_overlap(self, base: str, incoming: str) -> str:
-        base = re.sub(r'\s+', ' ', base).strip()
-        incoming = re.sub(r'\s+', ' ', incoming).strip()
+        base = self._normalize_output_text(base)
+        incoming = self._normalize_output_text(incoming)
         if not base:
             return incoming
         if not incoming:
@@ -326,11 +424,46 @@ class SubtitleAssembler:
         if overlap >= len(incoming):
             return base
         if overlap > 0:
-            return f'{base}{incoming[overlap:]}'.strip()
+            return self._normalize_output_text(f'{base}{incoming[overlap:]}')
         if incoming in base[-max(16, len(incoming) * 2):]:
             return base
-        sep = '' if base.endswith(('?', '!', ',', '.', ' ')) else ' '
-        return f'{base}{sep}{incoming}'.strip()
+        if self._starts_with_speaker_marker(incoming) and not base.endswith('\n'):
+            sep = '\n'
+        elif self._should_join_without_space(base, incoming):
+            sep = ''
+        else:
+            sep = '' if base.endswith(('?', '!', ',', '.', ' ', '\n')) else ' '
+        return self._normalize_output_text(f'{base}{sep}{incoming}')
+
+    @staticmethod
+    def _should_join_without_space(base: str, incoming: str) -> bool:
+        left = str(base or '').rstrip()
+        right = str(incoming or '').lstrip()
+        if not left or not right:
+            return False
+        if SubtitleAssembler._is_punct(right[0]):
+            return True
+        return bool(
+            re.search(r'[\u3400-\u4DBF\u4E00-\u9FFF]$', left)
+            or re.search(r'^[\u3400-\u4DBF\u4E00-\u9FFF]', right)
+        )
+
+    @staticmethod
+    def _starts_with_speaker_marker(text: str) -> bool:
+        if not text:
+            return False
+        return bool(re.match(r'^\s*(?:>>|S\d+:)\s*', text))
+
+    @staticmethod
+    def _normalize_speaker_marker_boundaries(text: str) -> str:
+        if not text:
+            return ''
+        # Force speaker markers to start on a new line to avoid inline jitter.
+        # jitter when overlap-merge glues history + raw chunks.
+        normalized = re.sub(r'([^\n])\s*(>>|S\d+:)\s*', r'\1\n\2 ', text)
+        normalized = re.sub(r'^\s*(>>|S\d+:)\s*', r'\1 ', normalized)
+        normalized = re.sub(r'\n\s*(>>|S\d+:)\s*', r'\n\1 ', normalized)
+        return normalized
 
     @staticmethod
     def _max_prefix_suffix_overlap(base: str, incoming: str) -> int:

@@ -2,11 +2,14 @@
 from __future__ import annotations
 
 import ctypes
+from datetime import datetime
 import faulthandler
 import logging
 import os
 from pathlib import Path
 import sys
+import threading
+import traceback
 
 from PySide6.QtCore import QTimer
 from PySide6.QtWidgets import QApplication
@@ -14,12 +17,104 @@ from PySide6.QtWidgets import QApplication
 from .config import RuntimeConfig
 from .controller import TranscriptionController
 from .debug_window import DebugWindowLogHandler, STTDebugWindow
-from .logging_utils import configure_app_logger
+from .logging_utils import configure_app_logger, suppress_third_party_console_logging
 from .overlay_window import SubtitleOverlayWindow
 from .settings_persistence import apply_updates_to_config, load_persisted_updates, save_runtime_settings
 from .tray_controller import Voice2TextTrayController
 
 _FAULTHANDLER_FILE = None
+_CRASH_TRACE_LOCK = threading.Lock()
+_PREVIOUS_EXCEPTHOOK = None
+_PREVIOUS_THREADING_EXCEPTHOOK = None
+_PREVIOUS_UNRAISABLEHOOK = None
+
+
+def _crash_timestamp() -> str:
+    return datetime.now().astimezone().isoformat(timespec="seconds")
+
+
+def _write_crash_trace_line(message: str) -> None:
+    handle = _FAULTHANDLER_FILE
+    if handle is None:
+        return
+    with _CRASH_TRACE_LOCK:
+        try:
+            handle.write(message.rstrip() + "\n")
+            handle.flush()
+        except Exception:
+            return
+
+
+def _write_crash_trace_exception(title: str, exc_type, exc_value, exc_tb) -> None:
+    handle = _FAULTHANDLER_FILE
+    if handle is None:
+        return
+    with _CRASH_TRACE_LOCK:
+        try:
+            handle.write(f"\n=== {title} at {_crash_timestamp()} ===\n")
+            traceback.print_exception(exc_type, exc_value, exc_tb, file=handle)
+            handle.flush()
+        except Exception:
+            return
+
+
+def _install_python_exception_hooks(logger: logging.Logger) -> None:
+    global _PREVIOUS_EXCEPTHOOK, _PREVIOUS_THREADING_EXCEPTHOOK, _PREVIOUS_UNRAISABLEHOOK
+    if _PREVIOUS_EXCEPTHOOK is None:
+        _PREVIOUS_EXCEPTHOOK = sys.excepthook
+    if _PREVIOUS_UNRAISABLEHOOK is None:
+        _PREVIOUS_UNRAISABLEHOOK = sys.unraisablehook
+    if _PREVIOUS_THREADING_EXCEPTHOOK is None:
+        _PREVIOUS_THREADING_EXCEPTHOOK = threading.excepthook
+
+    def excepthook(exc_type, exc_value, exc_tb) -> None:
+        _write_crash_trace_exception("Uncaught Python exception", exc_type, exc_value, exc_tb)
+        logger.error("Uncaught Python exception", exc_info=(exc_type, exc_value, exc_tb))
+        if _PREVIOUS_EXCEPTHOOK is not None and _PREVIOUS_EXCEPTHOOK is not excepthook:
+            _PREVIOUS_EXCEPTHOOK(exc_type, exc_value, exc_tb)
+
+    def threading_excepthook(args: threading.ExceptHookArgs) -> None:
+        _write_crash_trace_exception(
+            f"Uncaught thread exception ({getattr(args.thread, 'name', 'unknown')})",
+            args.exc_type,
+            args.exc_value,
+            args.exc_traceback,
+        )
+        logger.error(
+            "Uncaught thread exception (%s)",
+            getattr(args.thread, "name", "unknown"),
+            exc_info=(args.exc_type, args.exc_value, args.exc_traceback),
+        )
+        if _PREVIOUS_THREADING_EXCEPTHOOK is not None and _PREVIOUS_THREADING_EXCEPTHOOK is not threading_excepthook:
+            _PREVIOUS_THREADING_EXCEPTHOOK(args)
+
+    def unraisablehook(unraisable) -> None:
+        _write_crash_trace_exception(
+            f"Unraisable Python exception ({getattr(unraisable, 'err_msg', '') or 'no message'})",
+            unraisable.exc_type,
+            unraisable.exc_value,
+            unraisable.exc_traceback,
+        )
+        logger.error(
+            "Unraisable Python exception: %s",
+            getattr(unraisable, "err_msg", "") or "no message",
+            exc_info=(unraisable.exc_type, unraisable.exc_value, unraisable.exc_traceback),
+        )
+        if _PREVIOUS_UNRAISABLEHOOK is not None and _PREVIOUS_UNRAISABLEHOOK is not unraisablehook:
+            _PREVIOUS_UNRAISABLEHOOK(unraisable)
+
+    sys.excepthook = excepthook
+    threading.excepthook = threading_excepthook
+    sys.unraisablehook = unraisablehook
+
+
+def _start_crash_trace_heartbeat(stop_event: threading.Event, interval_seconds: float = 10.0) -> None:
+    def run() -> None:
+        while not stop_event.wait(interval_seconds):
+            _write_crash_trace_line(f"[crash-heartbeat] last_alive={_crash_timestamp()}")
+
+    thread = threading.Thread(target=run, name="crash-trace-heartbeat", daemon=True)
+    thread.start()
 
 
 def effective_model_label(cfg: RuntimeConfig) -> str:
@@ -71,8 +166,17 @@ def build_restart_keys() -> set[str]:
         "whisperx_alignment_model",
         "whisperx_alignment_language",
         "whisperx_alignment_device",
+        "whisperx_diarization_device",
         "whisperx_diarization_model",
         "whisperx_hf_token",
+        "whisperx_speaker_profile_enabled",
+        "whisperx_speaker_profile_backend",
+        "whisperx_speaker_profile_model",
+        "whisperx_speaker_speechbrain_model",
+        "whisperx_speaker_nemo_model",
+        "whisperx_speaker_profile_match_threshold",
+        "whisperx_speaker_profile_min_seconds",
+        "whisperx_speaker_profile_store_path",
         "ffmpeg_dll_dir",
         "source_mode",
         "source_device_indices",
@@ -84,18 +188,16 @@ def build_restart_keys() -> set[str]:
         "overlap_merge_method",
         "preprocess_enabled",
         "preprocess_modules",
-        "vad_enabled",
-        "vad_rms_threshold",
-        "vad_adaptive_enabled",
-        "vad_adaptive_min_threshold",
-        "vad_adaptive_max_threshold",
-        "vad_adaptive_noise_multiplier",
-        "vad_adaptive_margin",
         "translation_enabled",
         "bilingual_style",
         "translation_from",
         "translation_to",
         "debug_mode",
+        "transcript_export_enabled",
+        "transcript_export_formats",
+        "transcript_export_include_timestamps",
+        "transcript_export_include_speaker",
+        "transcript_export_dir",
     }
 
 
@@ -103,11 +205,15 @@ def run_qt_app(cfg: RuntimeConfig) -> int:
     global _FAULTHANDLER_FILE
     logger = configure_app_logger(cfg.log_dir)
     logger.info("Voice2Text startup")
+    crash_heartbeat_stop = threading.Event()
     try:
         crash_path = Path(cfg.log_dir).resolve().parent / "logs" / "python_crash_trace.log"
         crash_path.parent.mkdir(parents=True, exist_ok=True)
-        _FAULTHANDLER_FILE = open(crash_path, "a", encoding="utf-8")
+        _FAULTHANDLER_FILE = open(crash_path, "a", encoding="utf-8", buffering=1)
+        _write_crash_trace_line(f"\n=== Voice2Text crash trace session started at {_crash_timestamp()} ===")
         faulthandler.enable(file=_FAULTHANDLER_FILE, all_threads=True)
+        _install_python_exception_hooks(logger)
+        _start_crash_trace_heartbeat(crash_heartbeat_stop)
         logger.info("Python faulthandler enabled: %s", crash_path)
     except Exception as exc:
         logger.warning("Failed to enable Python faulthandler: %s", exc)
@@ -135,12 +241,15 @@ def run_qt_app(cfg: RuntimeConfig) -> int:
     runtime_log_dir = str(Path(cfg.log_dir).resolve())
     debug_window_holder: dict[str, STTDebugWindow | None] = {"window": None}
     debug_handler_holder: dict[str, DebugWindowLogHandler | None] = {"handler": None}
+    root_debug_handler_holder: dict[str, DebugWindowLogHandler | None] = {"handler": None}
 
     def ensure_debug_window_state() -> None:
         enabled = bool(getattr(cfg, "debug_mode", False))
         window = debug_window_holder.get("window")
         handler = debug_handler_holder.get("handler")
+        root_handler = root_debug_handler_holder.get("handler")
         if enabled:
+            suppress_third_party_console_logging()
             if window is None:
                 window = STTDebugWindow(debug_log_dir=debug_log_dir)
                 controller.debug_event.connect(window.append_event)
@@ -156,17 +265,34 @@ def run_qt_app(cfg: RuntimeConfig) -> int:
                 )
                 logger.addHandler(handler)
                 debug_handler_holder["handler"] = handler
+            if root_handler is None:
+                root_handler = DebugWindowLogHandler(window.append_log_line)
+                root_handler.setFormatter(
+                    logging.Formatter(
+                        fmt="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
+                        datefmt="%Y-%m-%d %H:%M:%S",
+                    )
+                )
+                logging.getLogger().addHandler(root_handler)
+                root_debug_handler_holder["handler"] = root_handler
             if not window.isVisible():
                 window.show()
                 window.raise_()
                 window.activateWindow()
         else:
+            suppress_third_party_console_logging()
             if handler is not None:
                 try:
                     logger.removeHandler(handler)
                 except Exception:
                     pass
                 debug_handler_holder["handler"] = None
+            if root_handler is not None:
+                try:
+                    logging.getLogger().removeHandler(root_handler)
+                except Exception:
+                    pass
+                root_debug_handler_holder["handler"] = None
             if window is not None and window.isVisible():
                 window.hide()
 
@@ -188,7 +314,32 @@ def run_qt_app(cfg: RuntimeConfig) -> int:
     restart_keys = build_restart_keys()
     tray_holder: dict[str, Voice2TextTrayController] = {}
 
+    def export_transcript_now(output_path: str, export_format: str, include_timestamps: bool, include_speaker: bool) -> str:
+        old_ts = bool(getattr(cfg, "transcript_export_include_timestamps", True))
+        old_speaker = bool(getattr(cfg, "transcript_export_include_speaker", True))
+        cfg.transcript_export_include_timestamps = bool(include_timestamps)
+        cfg.transcript_export_include_speaker = bool(include_speaker)
+        try:
+            return controller.export_transcript_now(output_path=output_path, export_format=export_format)
+        finally:
+            cfg.transcript_export_include_timestamps = old_ts
+            cfg.transcript_export_include_speaker = old_speaker
+
+    def import_audio_file(file_path: str) -> str:
+        imported = controller.import_audio_file(file_path)
+        overlay.push_status(f"Imported audio replay started: {imported}")
+        return imported
+
     def apply_settings(updates: dict[str, object]) -> None:
+        deferred_restart_updates: dict[str, object] = {}
+        if controller.is_temporary_file_replay_active():
+            deferred_restart_updates = {key: value for (key, value) in updates.items() if key in restart_keys}
+            if deferred_restart_updates:
+                updates = {key: value for (key, value) in updates.items() if key not in restart_keys}
+                logger.info(
+                    "Settings requiring runtime restart deferred during imported-audio replay: %s",
+                    sorted(deferred_restart_updates),
+                )
         changed_keys = apply_updates_to_config(cfg, updates)
         requires_restart = any((key in restart_keys for key in changed_keys))
         overlay.apply_runtime_config(cfg)
@@ -196,12 +347,23 @@ def run_qt_app(cfg: RuntimeConfig) -> int:
         if tray is not None and "ui_language" in updates:
             tray.refresh_locale()
         try:
-            settings_path = save_runtime_settings(cfg)
+            persist_cfg = cfg
+            restore_source = controller.temporary_source_restore_values()
+            if restore_source is not None:
+                persist_cfg = RuntimeConfig(**cfg.__dict__)
+                persist_cfg.source_mode = str(restore_source.get("source_mode") or "loopback")
+                persist_cfg.source_file_path = str(restore_source.get("source_file_path") or "")
+                persist_cfg.source_file_replay_speed = float(restore_source.get("source_file_replay_speed") or 0.0)
+                persist_cfg.source_file_chunk_seconds = float(restore_source.get("source_file_chunk_seconds") or 0.25)
+            settings_path = save_runtime_settings(persist_cfg)
             logger.info("Persisted settings saved: %s", settings_path)
         except Exception:
             logger.exception("Failed to save persisted settings")
         logger.info("Settings updated: %s", updates)
         ensure_debug_window_state()
+        if deferred_restart_updates:
+            overlay.push_status("Imported audio replay is still running. Runtime-restart settings were deferred until replay stops.")
+            return
         if requires_restart:
 
             def restart_capture() -> None:
@@ -216,13 +378,28 @@ def run_qt_app(cfg: RuntimeConfig) -> int:
         else:
             overlay.push_status(f"UI settings applied. model={effective_model_label(cfg)}")
 
-    tray_holder["tray"] = Voice2TextTrayController(app=app, overlay=overlay, config=cfg, on_settings_applied=apply_settings)
+    tray_holder["tray"] = Voice2TextTrayController(
+        app=app,
+        overlay=overlay,
+        config=cfg,
+        on_settings_applied=apply_settings,
+        on_export_transcript=export_transcript_now,
+        on_import_audio=import_audio_file,
+    )
     def _cleanup_on_quit() -> None:
+        crash_heartbeat_stop.set()
+        _write_crash_trace_line(f"=== Voice2Text crash trace session ended at {_crash_timestamp()} ===")
         controller.stop()
         handler = debug_handler_holder.get("handler")
         if handler is not None:
             try:
                 logger.removeHandler(handler)
+            except Exception:
+                pass
+        root_handler = root_debug_handler_holder.get("handler")
+        if root_handler is not None:
+            try:
+                logging.getLogger().removeHandler(root_handler)
             except Exception:
                 pass
             debug_handler_holder["handler"] = None

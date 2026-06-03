@@ -1,4 +1,4 @@
-﻿"""Low-level download and progress-format utilities shared by STT model acquisition flows."""
+"""Low-level download and progress-format utilities shared by STT model acquisition flows."""
 from __future__ import annotations
 from fnmatch import fnmatch
 from pathlib import Path
@@ -29,10 +29,16 @@ def format_download_progress(provider: str, model_name: str, downloaded: int, to
     return f'[download] {provider} downloading: {model_name} [{bar}] ({downloaded_mb:.1f} MB)'
 
 
-def _probe_remote_file_size(url: str, timeout_seconds: int) -> int | None:
+def _probe_remote_file_size(
+    url: str,
+    timeout_seconds: int,
+    headers: dict[str, str] | None = None,
+) -> int | None:
     """Best-effort remote file size probe using range/content headers."""
-    headers = {'User-Agent': 'Voice2Text/1.0', 'Range': 'bytes=0-0'}
-    request = urllib.request.Request(url, headers=headers)
+    request_headers = {'User-Agent': 'Voice2Text/1.0', 'Range': 'bytes=0-0'}
+    if headers:
+        request_headers.update({k: v for (k, v) in headers.items() if k and v})
+    request = urllib.request.Request(url, headers=request_headers)
     try:
         with urllib.request.urlopen(request, timeout=timeout_seconds) as response:
             content_range = response.headers.get('Content-Range')
@@ -55,7 +61,14 @@ def _probe_remote_file_size(url: str, timeout_seconds: int) -> int | None:
         return None
     return None
 
-def download_to_file(url: str, target_file: Path, timeout_seconds: int, progress_callback: Callable[[int, int | None], None] | None=None, resume: bool=True) -> None:
+def download_to_file(
+    url: str,
+    target_file: Path,
+    timeout_seconds: int,
+    progress_callback: Callable[[int, int | None], None] | None = None,
+    resume: bool = True,
+    headers: dict[str, str] | None = None,
+) -> None:
     target_file.parent.mkdir(parents=True, exist_ok=True)
     resume_offset = 0
     if resume and target_file.exists():
@@ -64,6 +77,8 @@ def download_to_file(url: str, target_file: Path, timeout_seconds: int, progress
         except Exception:
             resume_offset = 0
     request_headers = {'User-Agent': 'Voice2Text/1.0'}
+    if headers:
+        request_headers.update({k: v for (k, v) in headers.items() if k and v})
     if resume_offset > 0:
         request_headers['Range'] = f'bytes={resume_offset}-'
     request = urllib.request.Request(url, headers=request_headers)
@@ -252,6 +267,10 @@ def download_hf_files_with_progress(
     emit_progress(progress_callback, f"[download] {provider} preparing manifest: {model_name}")
     api = HfApi()
     info = api.model_info(repo_id=repo_id, revision=revision, token=token)
+    auth_headers: dict[str, str] = {}
+    token_value = str(token or "").strip() if isinstance(token, str) else ""
+    if token_value:
+        auth_headers["Authorization"] = f"Bearer {token_value}"
     siblings = list(getattr(info, "siblings", []) or [])
     candidates: list[tuple[str, int | None]] = []
     for item in siblings:
@@ -276,7 +295,11 @@ def download_hf_files_with_progress(
             continue
         try:
             url = hf_hub_url(repo_id=repo_id, filename=filename, revision=revision)
-            probed_size = _probe_remote_file_size(url=url, timeout_seconds=timeout_seconds)
+            probed_size = _probe_remote_file_size(
+                url=url,
+                timeout_seconds=timeout_seconds,
+                headers=auth_headers,
+            )
         except Exception:
             probed_size = None
         resolved_candidates.append((filename, probed_size))
@@ -356,6 +379,7 @@ def download_hf_files_with_progress(
                 timeout_seconds=timeout_seconds,
                 progress_callback=_file_progress,
                 resume=resume,
+                headers=auth_headers,
             )
             try:
                 return int(local_path.stat().st_size)

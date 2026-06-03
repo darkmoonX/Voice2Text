@@ -13,6 +13,9 @@ This folder contains operational and historical documentation for the active `ap
 3. [Build and Run Runbook](/D:/Voice2Text/docs/build-and-run.md)
 - End-to-end operator workflow (build native bridge + run Python app).
 
+4. [Test-Data WhisperX Compare Workflow](/D:/Voice2Text/app/src/tests/compare_whisperx_test/WORKFLOW.md)
+- GPU-aware offline comparison flow (direct WhisperX vs incremental realtime), export artifacts, and report interpretation.
+
 ## Architecture and Context
 
 1. [Context Map](/D:/Voice2Text/CONTEXT-MAP.md)
@@ -44,3 +47,4 @@ This folder contains operational and historical documentation for the active `ap
 2. [Issue Tracker Mapping](/D:/Voice2Text/docs/agents/issue-tracker.md)
 3. [Triage Labels](/D:/Voice2Text/docs/agents/triage-labels.md)
 4. [Domain Doc Policy](/D:/Voice2Text/docs/agents/domain.md)
+5. [Git Workflow for Agents](/D:/Voice2Text/docs/agents/git-workflow.md)

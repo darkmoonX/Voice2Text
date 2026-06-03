@@ -1,4 +1,4 @@
-﻿"""System tray controller that bridges user actions to overlay/controller runtime updates."""
+"""System tray controller that bridges user actions to overlay/controller runtime updates."""
 from __future__ import annotations
 
 from PySide6.QtCore import QObject
@@ -28,12 +28,23 @@ _I18N = {
 
 
 class Voice2TextTrayController(QObject):
-    def __init__(self, app: QApplication, overlay, config: RuntimeConfig, on_settings_applied, parent: QObject | None = None) -> None:
+    def __init__(
+        self,
+        app: QApplication,
+        overlay,
+        config: RuntimeConfig,
+        on_settings_applied,
+        on_export_transcript=None,
+        on_import_audio=None,
+        parent: QObject | None = None,
+    ) -> None:
         super().__init__(parent)
         self._app = app
         self._overlay = overlay
         self._config = config
         self._on_settings_applied = on_settings_applied
+        self._on_export_transcript = on_export_transcript
+        self._on_import_audio = on_import_audio
 
         self._tray = QSystemTrayIcon(self)
         self._icon = self._build_icon()
@@ -89,7 +100,9 @@ class Voice2TextTrayController(QObject):
             app_sessions=list_active_app_sessions(),
             device_provider=list_audio_devices,
             app_session_provider=list_active_app_sessions,
-            parent=self._overlay,
+            export_transcript_callback=self._on_export_transcript,
+            import_audio_callback=self._on_import_audio,
+            parent=None,
         )
         if dialog.exec() != SettingsDialog.DialogCode.Accepted:
             return

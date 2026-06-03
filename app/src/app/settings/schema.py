@@ -1,4 +1,4 @@
-﻿"""Provider-related settings schema rules."""
+"""Provider-related settings schema rules."""
 from __future__ import annotations
 from ..stt.registry import normalize_stt_provider, provider_supports_gpu_variant, provider_supports_source_language_hint
 
@@ -10,12 +10,8 @@ def allowed_stt_variants(provider: str) -> list[str]:
 
 
 def default_stt_model(provider: str) -> str:
-    normalized = normalize_stt_provider(provider)
-    mapping = {
-        'whisper': 'small',
-        'whisperx': 'small',
-    }
-    return mapping.get(normalized, 'small')
+    normalize_stt_provider(provider)
+    return 'small'
 
 
 def is_path_like(value: str) -> bool:

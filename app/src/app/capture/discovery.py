@@ -1,4 +1,4 @@
-﻿"""Audio device and session discovery adapters.
+"""Audio device and session discovery adapters.
 
 This module intentionally re-exports implementations from `audio_capture`
 so callers can depend on a stable seam while internals are refactored.

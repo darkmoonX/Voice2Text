@@ -1,4 +1,4 @@
-"""Runtime configuration model shared by capture, STT, VAD, translation, and overlay modules."""
+"""Runtime configuration model shared by capture, WhisperX STT, translation, and overlay modules."""
 from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Optional
@@ -8,7 +8,7 @@ class RuntimeConfig:
     model_size: str = 'small'
     model_device: str = 'cuda'
     compute_type: str = 'float16'
-    stt_provider: str = 'whisper'
+    stt_provider: str = 'whisperx'
     stt_variant: str = 'auto'
     stt_auto_download: bool = True
     stt_model_path: str = ''
@@ -20,8 +20,17 @@ class RuntimeConfig:
     whisperx_alignment_model: str = ''
     whisperx_alignment_language: str = 'auto'
     whisperx_alignment_device: str = 'auto'
+    whisperx_diarization_device: str = 'auto'
     whisperx_diarization_model: str = 'pyannote/speaker-diarization-3.1'
     whisperx_hf_token: str = ''
+    whisperx_speaker_profile_enabled: bool = True
+    whisperx_speaker_profile_backend: str = 'pyannote'
+    whisperx_speaker_profile_model: str = 'pyannote/embedding'
+    whisperx_speaker_speechbrain_model: str = 'speechbrain/spkrec-ecapa-voxceleb'
+    whisperx_speaker_nemo_model: str = 'nvidia/speakerverification_en_titanet_large'
+    whisperx_speaker_profile_match_threshold: float = 0.72
+    whisperx_speaker_profile_min_seconds: float = 0.8
+    whisperx_speaker_profile_store_path: str = ''
     cpu_fallback_on_cuda_error: bool = True
     cuda_compat_source_dll: str = 'D:\\CUDA\\bin\\x64\\cublas64_13.dll'
     ffmpeg_dll_dir: str = 'D:\\FFmpeg\\ffmpeg-7.1.1-full_build-shared\\bin'
@@ -30,6 +39,9 @@ class RuntimeConfig:
     source_language: Optional[str] = None
     cjk_no_space_gap_seconds: float = 0.2
     source_mode: str = 'loopback'
+    source_file_path: str = ''
+    source_file_replay_speed: float = 0.0
+    source_file_chunk_seconds: float = 0.25
     ui_language: str = 'zh'
     source_device_indices: list[int] = field(default_factory=list)
     source_mix_weights: list[float] = field(default_factory=list)
@@ -39,14 +51,6 @@ class RuntimeConfig:
     overlap_merge_method: str = 'stable-tail'
     preprocess_enabled: bool = True
     preprocess_modules: str = 'auto'
-    vad_enabled: bool = True
-    vad_backend: str = 'silero'
-    vad_rms_threshold: float = 0.008
-    vad_adaptive_enabled: bool = True
-    vad_adaptive_min_threshold: float = 0.004
-    vad_adaptive_max_threshold: float = 0.08
-    vad_adaptive_noise_multiplier: float = 2.6
-    vad_adaptive_margin: float = 0.002
     whisper_max_context: Optional[int] = None
     whisper_entropy_thold: Optional[float] = None
     whisper_logprob_thold: Optional[float] = None
@@ -74,4 +78,9 @@ class RuntimeConfig:
     device_index: Optional[int] = None
     log_dir: str = 'logs'
     debug_mode: bool = False
+    transcript_export_enabled: bool = False
+    transcript_export_formats: str = 'txt,srt,json'
+    transcript_export_include_timestamps: bool = True
+    transcript_export_include_speaker: bool = True
+    transcript_export_dir: str = ''
 

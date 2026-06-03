@@ -1,7 +1,8 @@
-﻿"""Transparent overlay window for subtitles, status messages, and error notifications."""
+"""Transparent overlay window for subtitles, status messages, and error notifications."""
 from __future__ import annotations
 
 from collections import deque
+import re
 from typing import Deque
 
 from PySide6.QtCore import QPoint, QRect, QSize, Qt, QTimer, Signal
@@ -146,7 +147,14 @@ class SubtitleOverlayWindow(QWidget):
 
     @staticmethod
     def _normalize_inline_text(text: str) -> str:
-        return " ".join(text.split()).strip()
+        if not text:
+            return ""
+        lines: list[str] = []
+        for raw_line in str(text).splitlines():
+            cleaned = re.sub(r"[ \t]+", " ", raw_line).strip()
+            if cleaned:
+                lines.append(cleaned)
+        return "\n".join(lines).strip()
 
     def _append_entries(self, entries: list[tuple[str, str]]) -> None:
         if not entries:

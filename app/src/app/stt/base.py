@@ -2,8 +2,8 @@
 from __future__ import annotations
 from typing import Literal, Optional, Protocol
 from ..audio_capture import AudioChunk
-STTProvider = Literal['whisper', 'whisperx']
-SUPPORTED_STT_PROVIDERS: tuple[STTProvider, ...] = ('whisper', 'whisperx')
+STTProvider = Literal['whisperx']
+SUPPORTED_STT_PROVIDERS: tuple[STTProvider, ...] = ('whisperx',)
 
 class STTTranscriber(Protocol):
 

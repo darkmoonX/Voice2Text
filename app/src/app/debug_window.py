@@ -55,6 +55,12 @@ class STTDebugWindow(QWidget):
 
     def append_event(self, payload: dict[str, object]) -> None:
         ts = datetime.now().strftime("%H:%M:%S.%f")[:-3]
+        meta = payload.get("meta", {})
+        speaker_profile_stats = {}
+        if isinstance(meta, dict):
+            raw_stats = meta.get("speaker_profile_stats")
+            if isinstance(raw_stats, dict):
+                speaker_profile_stats = raw_stats
         lines = [
             f"[{ts}] provider={payload.get('provider', '')}",
             f"raw={payload.get('raw_text', '')}",
@@ -62,7 +68,8 @@ class STTDebugWindow(QWidget):
             f"history={payload.get('history_text', '')}",
             f"stable={payload.get('stable_text', '')}",
             f"partial_state={payload.get('partial_state', [])}",
-            f"meta={payload.get('meta', {})}",
+            f"speaker_profile_stats={speaker_profile_stats}",
+            f"meta={meta}",
         ]
         self._enqueue_line("\n".join(lines) + "\n" + ("-" * 72))
 
@@ -76,7 +83,8 @@ class STTDebugWindow(QWidget):
             "stable_text": payload.get("stable_text", ""),
             "stable_state": payload.get("stable_state", []),
             "partial_state": payload.get("partial_state", []),
-            "meta": payload.get("meta", {}),
+            "speaker_profile_stats": speaker_profile_stats,
+            "meta": meta,
         }
         try:
             with self._debug_log_file.open("a", encoding="utf-8") as fp:

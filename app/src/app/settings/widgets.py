@@ -14,7 +14,6 @@ def create_mode_combo() -> QComboBox:
 
 def create_stt_provider_combo() -> QComboBox:
     combo = QComboBox()
-    combo.addItem("Whisper (faster-whisper)", "whisper")
     combo.addItem("WhisperX", "whisperx")
     return combo
 
@@ -70,4 +69,20 @@ def create_whisperx_align_device_combo() -> QComboBox:
     combo.addItem("auto", "auto")
     combo.addItem("cpu", "cpu")
     combo.addItem("cuda", "cuda")
+    return combo
+
+
+def create_whisperx_diarization_device_combo() -> QComboBox:
+    combo = QComboBox()
+    combo.addItem("auto", "auto")
+    combo.addItem("cpu", "cpu")
+    combo.addItem("cuda", "cuda")
+    return combo
+
+
+def create_whisperx_speaker_backend_combo() -> QComboBox:
+    combo = QComboBox()
+    combo.addItem("pyannote", "pyannote")
+    combo.addItem("speechbrain-ecapa", "speechbrain_ecapa")
+    combo.addItem("nemo-titanet", "nemo_titanet")
     return combo

@@ -24,7 +24,9 @@ class ArgosTranslator:
         self._source_code = (source_code or 'auto').strip().lower()
         self._target_code = (target_code or 'zh').strip().lower()
         self._auto_install = auto_install
+        self._argos_translate = None
         self._translation = None
+        self._runtime_translation_cache: dict[str, object] = {}
         self._state = TranslationState(False, 'Translation disabled.')
         self._initialize()
 
@@ -36,17 +38,50 @@ class ArgosTranslator:
     def enabled(self) -> bool:
         return self._enabled
 
-    def translate(self, text: str) -> Optional[str]:
+    def translate(self, text: str, source_code: str | None = None) -> Optional[str]:
         if not self._enabled or self._translation is None:
             return None
         if not text.strip():
             return None
+        translation = self._translation
+        requested_source = (source_code or '').strip().lower()
+        if self._source_code == 'auto' and requested_source and requested_source != self._target_code:
+            candidate = self._runtime_translation_for_source(requested_source)
+            if candidate is not None:
+                translation = candidate
         try:
-            translated = self._translation.translate(text)
+            translated = translation.translate(text)
         except Exception:
             return None
         translated = translated.strip()
         return translated or None
+
+    def _runtime_translation_for_source(self, source_code: str):
+        token = (source_code or '').strip().lower()
+        if (not token) or token == self._target_code:
+            return None
+        cached = self._runtime_translation_cache.get(token)
+        if cached is not None:
+            return cached
+        argos_translate = self._argos_translate
+        if argos_translate is None:
+            return None
+        try:
+            langs = list(argos_translate.get_installed_languages() or [])
+        except Exception:
+            return None
+        source = next((lang for lang in langs if lang.code == token), None)
+        target = next((lang for lang in langs if lang.code == self._target_code), None)
+        if source is None or target is None:
+            return None
+        try:
+            resolved = source.get_translation(target)
+        except Exception:
+            return None
+        if resolved is None:
+            return None
+        self._runtime_translation_cache[token] = resolved
+        return resolved
 
     def _initialize(self) -> None:
         if not self._enabled:
@@ -56,6 +91,7 @@ class ArgosTranslator:
         if argos_translate is None:
             self._state = TranslationState(False, 'argostranslate package is unavailable in this environment.')
             return
+        self._argos_translate = argos_translate
         if self._source_code == self._target_code:
             self._state = TranslationState(False, 'Translation source and target are identical.')
             return
