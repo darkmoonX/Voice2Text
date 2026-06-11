@@ -2,11 +2,48 @@
 from __future__ import annotations
 import logging
 from logging.handlers import TimedRotatingFileHandler
+import os
 from pathlib import Path
+import sys
+import time
 
 
 _ROOT_FILE_HANDLER_MARKER = "_voice2text_root_file_handler"
 _SUPPRESSED_CONSOLE_HANDLER_MARKER = "_voice2text_suppressed_console_handler"
+
+
+class WindowsSafeTimedRotatingFileHandler(TimedRotatingFileHandler):
+    """Timed rotating handler that survives Windows file-lock rollover failures."""
+
+    def handleError(self, record: logging.LogRecord) -> None:
+        exc_type, exc, _tb = sys.exc_info()
+        if isinstance(exc, PermissionError) or (
+            isinstance(exc, OSError) and getattr(exc, "winerror", None) == 32
+        ):
+            if self._switch_to_fallback_file():
+                try:
+                    logging.FileHandler.emit(self, record)
+                except Exception:
+                    pass
+            return
+        super().handleError(record)
+
+    def _switch_to_fallback_file(self) -> bool:
+        original = Path(self.baseFilename)
+        fallback = original.with_name(
+            f"{original.stem}.{time.strftime('%Y-%m-%d')}.pid{os.getpid()}{original.suffix}"
+        )
+        try:
+            if self.stream:
+                self.stream.close()
+                self.stream = None
+            self.baseFilename = str(fallback)
+            self.stream = self._open()
+            current_time = int(time.time())
+            self.rolloverAt = self.computeRollover(current_time)
+            return True
+        except Exception:
+            return False
 
 
 def configure_app_logger(log_dir: str) -> logging.Logger:
@@ -23,7 +60,7 @@ def configure_app_logger(log_dir: str) -> logging.Logger:
             configure_third_party_file_logging(log_dir)
             return logger
     formatter = logging.Formatter(fmt='%(asctime)s | %(levelname)s | %(message)s', datefmt='%Y-%m-%d %H:%M:%S')
-    file_handler = TimedRotatingFileHandler(filename=target_path, when='midnight', backupCount=7, encoding='utf-8')
+    file_handler = WindowsSafeTimedRotatingFileHandler(filename=target_path, when='midnight', backupCount=7, encoding='utf-8')
     file_handler.setFormatter(formatter)
     file_handler.setLevel(logging.INFO)
     logger.addHandler(file_handler)
@@ -47,7 +84,7 @@ def configure_third_party_file_logging(log_dir: str) -> None:
         fmt="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S",
     )
-    file_handler = TimedRotatingFileHandler(
+    file_handler = WindowsSafeTimedRotatingFileHandler(
         filename=target_path,
         when="midnight",
         backupCount=7,

@@ -97,7 +97,6 @@ class TranscriptionController(QObject):
         self._subtitle_assembler.reset()
         self._text_delta_logger.reset()
         self._finalize_transcript_export()
-        self._transcript_exporter = None
         self._restore_temporary_source_if_needed()
         self._release_runtime_memory("controller.stop")
 

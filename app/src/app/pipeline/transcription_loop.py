@@ -44,6 +44,7 @@ class TranscriptionLoopEngine:
         self._silence_hops = 0
         self._speech_hops = 0
         self._window_elapsed_seconds = 0.0
+        self._window_index = 0
         self._last_segment_artifact_log_at = 0.0
         self._auto_lang_locked = ""
         self._auto_lang_candidate = ""
@@ -65,6 +66,9 @@ class TranscriptionLoopEngine:
         self._deps.subtitle_assembler.set_language_context(self._deps.config.source_language)
         self._deps.subtitle_assembler.set_cjk_no_space_gap_seconds(
             float(getattr(self._deps.config, "cjk_no_space_gap_seconds", 0.2) or 0.2)
+        )
+        self._deps.subtitle_assembler.set_speaker_marker_style(
+            str(getattr(self._deps.config, "speaker_marker_style", "spk") or "spk")
         )
 
         (bytes_per_second, frame_bytes, segment_bytes, hop_bytes) = aligned_window_sizes(
@@ -157,38 +161,58 @@ class TranscriptionLoopEngine:
                 del buffer[: len(buffer) - max_buffer_bytes]
 
             while len(buffer) >= segment_bytes and running.is_set():
+                window_started_at = time.monotonic()
+                timing: dict[str, float] = {}
+                self._window_index += 1
+                current_window_index = int(self._window_index)
                 current_window_elapsed = float(self._window_elapsed_seconds)
                 self._window_elapsed_seconds += float(hop_seconds)
                 window = bytes(buffer[:segment_bytes])
                 del buffer[:hop_bytes]
                 window_chunk = AudioChunk(pcm16=window, sample_rate=stream_rate, channels=stream_channels)
+                stage_started_at = time.monotonic()
                 self._deps.segment_artifacts.write_chunk(window_chunk, self._deps.segment_artifacts.latest_raw_segment_wav)
+                timing["raw_artifact_seconds"] = time.monotonic() - stage_started_at
 
                 preprocess_pipeline = self._deps.get_preprocess_pipeline()
+                stage_started_at = time.monotonic()
                 if preprocess_pipeline is not None and preprocess_pipeline.stage_names:
                     stt_chunk = preprocess_pipeline.process(window_chunk, channel_mode=self._deps.config.source_channel_mode)
                 else:
                     stt_chunk = window_chunk
+                timing["preprocess_seconds"] = time.monotonic() - stage_started_at
+                stage_started_at = time.monotonic()
                 self._deps.segment_artifacts.write_chunk(stt_chunk, self._deps.segment_artifacts.latest_stt_segment_wav)
                 self._emit_segment_artifact_log(stt_chunk)
+                timing["stt_artifact_seconds"] = time.monotonic() - stage_started_at
 
                 transcriber = self._deps.get_transcriber()
                 if transcriber is None:
                     break
                 source_language_hint = self._runtime_source_language_hint()
                 try:
+                    stage_started_at = time.monotonic()
                     source_text = transcriber.transcribe(
                         stt_chunk,
                         language=source_language_hint,
                         channel_mode=self._deps.config.source_channel_mode,
                     )
+                    timing["transcribe_seconds"] = time.monotonic() - stage_started_at
                 except Exception as exc:
+                    timing["transcribe_seconds"] = time.monotonic() - stage_started_at
                     if self._deps.recover_from_runtime_transcription_error(str(exc)):
                         continue
                     self._deps.emit_status(f"Transcription failed: {exc}")
                     continue
 
                 if not source_text.strip():
+                    timing["window_total_seconds"] = time.monotonic() - window_started_at
+                    self._emit_window_timing(
+                        window_index=current_window_index,
+                        elapsed_seconds=current_window_elapsed,
+                        timing=timing,
+                        has_text=False,
+                    )
                     self._silence_hops += 1
                     silence_seconds = self._silence_hops * hop_seconds
                     if self._speech_hops > 0 and silence_seconds >= max(0.8, min(2.4, segment_seconds)):
@@ -200,11 +224,20 @@ class TranscriptionLoopEngine:
                 if not isinstance(transcription_meta, dict):
                     transcription_meta = {}
                 transcription_meta = dict(transcription_meta)
+                self._emit_provider_timing(
+                    window_index=current_window_index,
+                    elapsed_seconds=current_window_elapsed,
+                    transcription_meta=transcription_meta,
+                )
+                transcription_meta["runtime_window_index"] = int(current_window_index)
                 transcription_meta["elapsed_seconds"] = float(current_window_elapsed)
                 transcription_meta["runtime_source_language_hint"] = str(source_language_hint or "")
+                stage_started_at = time.monotonic()
                 self._update_auto_source_language_hint(transcription_meta)
-                transcription_meta["runtime_auto_source_language"] = str(self._auto_lang_locked or "")
+                transcription_meta["runtime_auto_source_language"] = self._runtime_display_language_hint()
+                timing["language_route_seconds"] = time.monotonic() - stage_started_at
 
+                stage_started_at = time.monotonic()
                 token_rows = transcription_meta.get("token_timestamps")
                 if isinstance(token_rows, list):
                     enriched_rows: list[dict[str, object]] = []
@@ -221,7 +254,9 @@ class TranscriptionLoopEngine:
                             pass
                         enriched_rows.append(item)
                     transcription_meta["token_timestamps"] = enriched_rows
+                timing["timestamp_enrich_seconds"] = time.monotonic() - stage_started_at
 
+                stage_started_at = time.monotonic()
                 source_rolling = self._deps.subtitle_assembler.merge_incremental_text(
                     source_text,
                     overlap_merge_method=self._deps.config.overlap_merge_method,
@@ -229,6 +264,18 @@ class TranscriptionLoopEngine:
                     hop_seconds=float(self._deps.config.hop_seconds),
                     transcription_meta=transcription_meta,
                 )
+                timing["merge_seconds"] = time.monotonic() - stage_started_at
+                merge_diagnostics = self._deps.subtitle_assembler.get_last_merge_diagnostics()
+                transcription_meta["merge_diagnostics"] = merge_diagnostics
+                self._emit_merge_timing(
+                    window_index=current_window_index,
+                    elapsed_seconds=current_window_elapsed,
+                    merge_diagnostics=merge_diagnostics,
+                )
+                timing["window_total_seconds"] = time.monotonic() - window_started_at
+                transcription_meta["runtime_timing"] = {
+                    key: round(float(value), 4) for (key, value) in timing.items()
+                }
                 if bool(getattr(self._deps.config, "debug_mode", False)):
                     self._deps.emit_debug_event(
                         {
@@ -239,20 +286,37 @@ class TranscriptionLoopEngine:
                             "raw_text": source_text,
                             "merged_text": source_rolling,
                             "history_text": self._deps.subtitle_assembler.get_history_text(),
-                            "history_state": self._deps.subtitle_assembler.get_history_state(),
                             "stable_text": self._deps.subtitle_assembler.get_stable_text(),
-                            "stable_state": self._deps.subtitle_assembler.get_stable_state(),
-                            "partial_state": self._deps.subtitle_assembler.get_partial_state(),
+                            "partial_text": self._deps.subtitle_assembler.get_partial_text(),
+                            "assembler_summary": self._deps.subtitle_assembler.get_debug_summary(),
                             "meta": transcription_meta,
                         }
                     )
                 if not source_rolling:
+                    self._emit_window_timing(
+                        window_index=current_window_index,
+                        elapsed_seconds=current_window_elapsed,
+                        timing=timing,
+                        has_text=True,
+                    )
                     continue
 
                 self._speech_hops += 1
+                stage_started_at = time.monotonic()
                 (source_out, translated_out) = self._build_subtitle_payload(
                     source_rolling,
                     runtime_source_language_hint=str(transcription_meta.get("runtime_auto_source_language") or ""),
+                )
+                timing["subtitle_payload_seconds"] = time.monotonic() - stage_started_at
+                timing["window_total_seconds"] = time.monotonic() - window_started_at
+                transcription_meta["runtime_timing"] = {
+                    key: round(float(value), 4) for (key, value) in timing.items()
+                }
+                self._emit_window_timing(
+                    window_index=current_window_index,
+                    elapsed_seconds=current_window_elapsed,
+                    timing=timing,
+                    has_text=True,
                 )
                 if not source_out and (not translated_out):
                     continue
@@ -282,14 +346,121 @@ class TranscriptionLoopEngine:
             return (source_text, "")
         return (source_text, translated)
 
+    def _emit_window_timing(
+        self,
+        *,
+        window_index: int,
+        elapsed_seconds: float,
+        timing: dict[str, float],
+        has_text: bool,
+    ) -> None:
+        if not bool(getattr(self._deps.config, "debug_mode", False)):
+            return
+        self._deps.emit_status(
+            "[window-timing] "
+            f"window={int(window_index)}; "
+            f"audio={float(elapsed_seconds):.3f}s; "
+            f"text={str(bool(has_text)).lower()}; "
+            f"raw={float(timing.get('raw_artifact_seconds', 0.0) or 0.0):.4f}s; "
+            f"preprocess={float(timing.get('preprocess_seconds', 0.0) or 0.0):.4f}s; "
+            f"stt_artifact={float(timing.get('stt_artifact_seconds', 0.0) or 0.0):.4f}s; "
+            f"transcribe={float(timing.get('transcribe_seconds', 0.0) or 0.0):.4f}s; "
+            f"language={float(timing.get('language_route_seconds', 0.0) or 0.0):.4f}s; "
+            f"timestamp={float(timing.get('timestamp_enrich_seconds', 0.0) or 0.0):.4f}s; "
+            f"merge={float(timing.get('merge_seconds', 0.0) or 0.0):.4f}s; "
+            f"payload={float(timing.get('subtitle_payload_seconds', 0.0) or 0.0):.4f}s; "
+            f"total={float(timing.get('window_total_seconds', 0.0) or 0.0):.4f}s"
+        )
+
+    def _emit_provider_timing(
+        self,
+        *,
+        window_index: int,
+        elapsed_seconds: float,
+        transcription_meta: dict[str, object],
+    ) -> None:
+        if not bool(getattr(self._deps.config, "debug_mode", False)):
+            return
+        raw = transcription_meta.get("provider_timing")
+        if not isinstance(raw, dict):
+            return
+        align_detail = raw.get("align_detail") if isinstance(raw.get("align_detail"), dict) else {}
+        diar_detail = raw.get("diarization_detail") if isinstance(raw.get("diarization_detail"), dict) else {}
+        self._deps.emit_status(
+            "[whisperx-timing] "
+            f"window={int(window_index)}; "
+            f"audio={float(elapsed_seconds):.3f}s; "
+            f"trace={int(raw.get('trace_id', 0) or 0)}; "
+            f"pcm={float(raw.get('pcm_convert_seconds', 0.0) or 0.0):.4f}s; "
+            f"resample={float(raw.get('resample_seconds', 0.0) or 0.0):.4f}s; "
+            f"prepare={float(raw.get('prepare_seconds', 0.0) or 0.0):.4f}s; "
+            f"asr={float(raw.get('asr_seconds', 0.0) or 0.0):.4f}s; "
+            f"align={float(raw.get('align_seconds', 0.0) or 0.0):.4f}s; "
+            f"align_model={float(align_detail.get('model_load_seconds', 0.0) or 0.0):.4f}s; "
+            f"align_run={float(align_detail.get('run_seconds', 0.0) or 0.0):.4f}s; "
+            f"diar={float(raw.get('diarization_seconds', 0.0) or 0.0):.4f}s; "
+            f"diar_load={float(diar_detail.get('pipeline_load_seconds', 0.0) or 0.0):.4f}s; "
+            f"diar_run={float(diar_detail.get('pipeline_run_seconds', 0.0) or 0.0):.4f}s; "
+            f"diar_assign={float(diar_detail.get('assign_seconds', 0.0) or 0.0):.4f}s; "
+            f"profile={float(raw.get('speaker_profile_seconds', 0.0) or 0.0):.4f}s; "
+            f"meta={float(raw.get('meta_build_seconds', 0.0) or 0.0):.4f}s; "
+            f"total={float(raw.get('total_seconds', 0.0) or 0.0):.4f}s; "
+            f"tokens={int(raw.get('token_count', 0) or 0)}; "
+            f"segments={int(raw.get('final_segment_count', 0) or 0)}; "
+            f"align_status={str(align_detail.get('status') or '')}; "
+            f"diar_status={str(diar_detail.get('status') or '')}"
+        )
+
+    def _emit_merge_timing(
+        self,
+        *,
+        window_index: int,
+        elapsed_seconds: float,
+        merge_diagnostics: dict[str, object],
+    ) -> None:
+        if not bool(getattr(self._deps.config, "debug_mode", False)):
+            return
+        if not isinstance(merge_diagnostics, dict) or not merge_diagnostics:
+            return
+        self._deps.emit_status(
+            "[merge-timing] "
+            f"window={int(window_index)}; "
+            f"audio={float(elapsed_seconds):.3f}s; "
+            f"total={float(merge_diagnostics.get('total_seconds', 0.0) or 0.0):.4f}s; "
+            f"normalize={float(merge_diagnostics.get('normalize_seconds', 0.0) or 0.0):.4f}s; "
+            f"extract={float(merge_diagnostics.get('extract_seconds', 0.0) or 0.0):.4f}s; "
+            f"state={float(merge_diagnostics.get('state_update_seconds', 0.0) or 0.0):.4f}s; "
+            f"partial_render={float(merge_diagnostics.get('partial_render_seconds', 0.0) or 0.0):.4f}s; "
+            f"history_render={float(merge_diagnostics.get('history_render_seconds', 0.0) or 0.0):.4f}s; "
+            f"spacing={float(merge_diagnostics.get('spacing_seconds', 0.0) or 0.0):.4f}s; "
+            f"overlap={float(merge_diagnostics.get('overlap_seconds', 0.0) or 0.0):.4f}s; "
+            f"final_norm={float(merge_diagnostics.get('final_normalize_seconds', 0.0) or 0.0):.4f}s; "
+            f"incoming={int(merge_diagnostics.get('incoming_count', 0) or 0)}; "
+            f"history_before={int(merge_diagnostics.get('history_count_before', 0) or 0)}; "
+            f"history_after={int(merge_diagnostics.get('history_count_after', 0) or 0)}; "
+            f"stable_after={int(merge_diagnostics.get('stable_count_after', 0) or 0)}; "
+            f"partial_after={int(merge_diagnostics.get('partial_count_after', 0) or 0)}; "
+            f"history_chars={int(merge_diagnostics.get('history_chars', 0) or 0)}; "
+            f"merged_chars={int(merge_diagnostics.get('merged_chars', 0) or 0)}; "
+            f"empty={str(bool(merge_diagnostics.get('returned_empty', False))).lower()}"
+        )
+
     def _runtime_source_language_hint(self) -> str | None:
         raw = self._deps.config.source_language
         token = self._normalize_language_token(raw)
         if token:
             return token
-        if self._auto_lang_locked:
-            return self._auto_lang_locked
+        # Keep ASR in auto mode so WhisperX can continue detecting durable
+        # language switches inside long sessions. The rolling lock is only a
+        # downstream display/translation hint.
         return None
+
+    def _runtime_display_language_hint(self) -> str:
+        raw = self._deps.config.source_language
+        token = self._normalize_language_token(raw)
+        if token:
+            return token
+        return str(self._auto_lang_locked or "")
 
     @staticmethod
     def _normalize_language_token(value: object) -> str:

@@ -359,6 +359,9 @@ class FileReplayAudioCapture(AudioCaptureBase):
     def is_finished(self) -> bool:
         return bool(self._finished)
 
+    def duration_seconds(self) -> float:
+        return float(len(self._pcm16)) / float(max(1, self.sample_rate * self.channels * 2))
+
     def _sleep_for_replay_speed(self, byte_count: int) -> None:
         if self._replay_speed <= 0.0:
             return

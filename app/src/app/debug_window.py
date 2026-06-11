@@ -56,20 +56,25 @@ class STTDebugWindow(QWidget):
     def append_event(self, payload: dict[str, object]) -> None:
         ts = datetime.now().strftime("%H:%M:%S.%f")[:-3]
         meta = payload.get("meta", {})
+        compact_meta = self._compact_meta(meta)
         speaker_profile_stats = {}
         if isinstance(meta, dict):
             raw_stats = meta.get("speaker_profile_stats")
             if isinstance(raw_stats, dict):
                 speaker_profile_stats = raw_stats
+        assembler_summary = payload.get("assembler_summary", {})
+        if not isinstance(assembler_summary, dict):
+            assembler_summary = {}
         lines = [
             f"[{ts}] provider={payload.get('provider', '')}",
             f"raw={payload.get('raw_text', '')}",
             f"merged={payload.get('merged_text', '')}",
             f"history={payload.get('history_text', '')}",
             f"stable={payload.get('stable_text', '')}",
-            f"partial_state={payload.get('partial_state', [])}",
+            f"partial={payload.get('partial_text', '')}",
+            f"assembler_summary={assembler_summary}",
             f"speaker_profile_stats={speaker_profile_stats}",
-            f"meta={meta}",
+            f"meta={compact_meta}",
         ]
         self._enqueue_line("\n".join(lines) + "\n" + ("-" * 72))
 
@@ -79,18 +84,48 @@ class STTDebugWindow(QWidget):
             "raw_text": payload.get("raw_text", ""),
             "merged_text": payload.get("merged_text", ""),
             "history_text": payload.get("history_text", ""),
-            "history_state": payload.get("history_state", []),
             "stable_text": payload.get("stable_text", ""),
-            "stable_state": payload.get("stable_state", []),
-            "partial_state": payload.get("partial_state", []),
+            "partial_text": payload.get("partial_text", ""),
+            "assembler_summary": assembler_summary,
             "speaker_profile_stats": speaker_profile_stats,
-            "meta": meta,
+            "meta": compact_meta,
         }
         try:
             with self._debug_log_file.open("a", encoding="utf-8") as fp:
                 fp.write(json.dumps(record, ensure_ascii=False) + "\n")
         except Exception:
             pass
+
+    @staticmethod
+    def _compact_meta(meta: object) -> dict[str, object]:
+        if not isinstance(meta, dict):
+            return {}
+        out: dict[str, object] = {}
+        token_rows = meta.get("token_timestamps")
+        token_count = len(token_rows) if isinstance(token_rows, list) else 0
+        for (key, value) in meta.items():
+            if key == "token_timestamps":
+                continue
+            if key == "speaker_profile_stats":
+                continue
+            out[key] = value
+        out["token_timestamp_count"] = int(token_count)
+        if isinstance(token_rows, list) and token_rows:
+            samples: list[dict[str, object]] = []
+            for row in token_rows[:8]:
+                if not isinstance(row, dict):
+                    continue
+                samples.append(
+                    {
+                        "word": row.get("word", ""),
+                        "start": row.get("start", None),
+                        "end": row.get("end", None),
+                        "score": row.get("score", None),
+                        "speaker": row.get("speaker", ""),
+                    }
+                )
+            out["token_timestamp_sample"] = samples
+        return out
 
     def append_log_line(self, line: str) -> None:
         self._enqueue_line(str(line or ""))

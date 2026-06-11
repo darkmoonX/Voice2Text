@@ -28,6 +28,7 @@ class TranscriptExporterSession:
         self._last_source = ""
         self._last_translated = ""
         self._session_started_at = datetime.now()
+        self._finalized_paths: list[Path] | None = None
         self._lock = threading.Lock()
 
     def record(
@@ -51,6 +52,11 @@ class TranscriptExporterSession:
                     "raw_text": str(raw_text or ""),
                     "source_text": str(source_text or ""),
                     "translated_text": str(translated_text or ""),
+                    "snapshot_final": bool(safe_meta.get("snapshot_final", False)),
+                    "snapshot_total_duration_seconds": self._to_float(
+                        safe_meta.get("snapshot_total_duration_seconds"),
+                        0.0,
+                    ),
                     "token_count": int(len(safe_meta.get("token_timestamps") or []))
                     if isinstance(safe_meta.get("token_timestamps"), list)
                     else 0,
@@ -59,11 +65,14 @@ class TranscriptExporterSession:
             self._last_source = str(source_text or self._last_source)
             self._last_translated = str(translated_text or self._last_translated)
             self._ingest_tokens(safe_meta)
+            self._finalized_paths = None
 
     def finalize(self) -> list[Path]:
         if not self._options.enabled:
             return []
         with self._lock:
+            if self._finalized_paths is not None:
+                return list(self._finalized_paths)
             cues = self._build_cues()
             events_snapshot = list(self._events)
             last_source = str(self._last_source)
@@ -110,6 +119,8 @@ class TranscriptExporterSession:
                 written.append(path)
         if written:
             self._emit("Transcript exported: " + ", ".join((str(path) for path in written)))
+        with self._lock:
+            self._finalized_paths = list(written)
         return written
 
     def export_single_file(
@@ -192,7 +203,7 @@ class TranscriptExporterSession:
             end = self._to_float(row.get("absolute_end"), self._to_float(row.get("end"), -1.0))
             if start < 0.0 or end <= start:
                 continue
-            speaker = str(row.get("speaker") or "").strip()
+            speaker = self._normalize_export_speaker(str(row.get("speaker") or "").strip())
             key = (int(round(start * 1000.0)), int(round(end * 1000.0)), word, speaker)
             if key not in self._tokens:
                 self._tokens[key] = {
@@ -205,6 +216,7 @@ class TranscriptExporterSession:
 
     def _build_cues(self) -> list[dict[str, object]]:
         tokens = sorted(self._tokens.values(), key=lambda item: (float(item["start"]), float(item["end"])))
+        tokens = self._smooth_micro_speaker_tokens(tokens)
         if not tokens:
             event_cues = self._build_cues_from_events()
             if event_cues:
@@ -223,17 +235,8 @@ class TranscriptExporterSession:
             duration = float(token["end"]) - float(bucket[0]["start"])
             speaker_changed = str(token.get("speaker") or "") != str(prev.get("speaker") or "")
             current_text = self._join_words([str(item.get("word") or "") for item in bucket])
-            next_word = str(token.get("word") or "")
-            is_cjk_context = self._contains_cjk_or_japanese(current_text) or self._contains_cjk_or_japanese(next_word)
-            hard_gap = gap > 0.2
-            punctuation_boundary = self._ends_with_sentence_punctuation(current_text) and (
-                duration >= 1.2 or len(current_text) >= 18
-            )
-            if is_cjk_context:
-                too_long = duration > 10 or len(current_text) >= 60
-            else:
-                too_long = duration > 5.5 or len(current_text) >= 72
-            if hard_gap or speaker_changed or punctuation_boundary or too_long:
+            hard_gap = gap > 2.0
+            if hard_gap or speaker_changed:
                 cues.append(self._bucket_to_cue(bucket))
                 bucket = [token]
                 continue
@@ -241,6 +244,85 @@ class TranscriptExporterSession:
         if bucket:
             cues.append(self._bucket_to_cue(bucket))
         return cues
+
+    @staticmethod
+    def _smooth_micro_speaker_tokens(tokens: list[dict[str, object]]) -> list[dict[str, object]]:
+        if not tokens:
+            return []
+        labels = [str(item.get("speaker") or "").strip() for item in tokens]
+        runs: list[dict[str, object]] = []
+        start = 0
+        current = labels[0]
+        for idx in range(1, len(labels)):
+            if labels[idx] == current:
+                continue
+            runs.append({"label": current, "start": start, "end": idx})
+            start = idx
+            current = labels[idx]
+        runs.append({"label": current, "start": start, "end": len(labels)})
+
+        out = [dict(item) for item in tokens]
+        max_duration = 0.80
+        max_chars = 4
+        for run in runs:
+            start_idx = int(run.get("start") or 0)
+            end_idx = int(run.get("end") or start_idx)
+            run_tokens = out[start_idx:end_idx]
+            if not run_tokens:
+                run["duration"] = 0.0
+                run["chars"] = 0
+                continue
+            try:
+                run["duration"] = max(
+                    0.0,
+                    float(run_tokens[-1].get("end") or 0.0) - float(run_tokens[0].get("start") or 0.0),
+                )
+            except Exception:
+                run["duration"] = 0.0
+            run["chars"] = sum(len(str(item.get("word") or "").strip()) for item in run_tokens)
+            run["is_micro"] = (
+                float(run["duration"]) <= max_duration
+                or int(run["chars"]) <= max_chars
+            )
+
+        for run_idx, run in enumerate(runs):
+            label = str(run.get("label") or "")
+            start_idx = int(run.get("start") or 0)
+            end_idx = int(run.get("end") or start_idx)
+            if not label or end_idx <= start_idx:
+                continue
+            duration = float(run.get("duration", 0.0) or 0.0)
+            char_count = int(run.get("chars", 0) or 0)
+            if not bool(run.get("is_micro", False)):
+                continue
+            prev_run = runs[run_idx - 1] if run_idx > 0 else {}
+            next_run = runs[run_idx + 1] if run_idx + 1 < len(runs) else {}
+            prev_label = str(prev_run.get("label") or "")
+            next_label = str(next_run.get("label") or "")
+            replacement = ""
+            if prev_label and next_label and prev_label == next_label:
+                replacement = prev_label
+            else:
+                is_tiny = char_count <= 2
+                if is_tiny and (prev_label or next_label):
+                    if prev_label and not next_label:
+                        if int(prev_run.get("chars", 0) or 0) > 2:
+                            replacement = prev_label
+                    elif prev_label and next_label:
+                        prev_score = (
+                            int(prev_run.get("chars", 0) or 0),
+                            float(prev_run.get("duration", 0.0) or 0.0),
+                        )
+                        next_score = (
+                            int(next_run.get("chars", 0) or 0),
+                            float(next_run.get("duration", 0.0) or 0.0),
+                        )
+                        replacement = prev_label if prev_score >= next_score else next_label
+            if not replacement or replacement == label:
+                continue
+            for idx in range(start_idx, end_idx):
+                out[idx]["speaker"] = replacement
+        return out
 
     def _build_cues_from_events(self) -> list[dict[str, object]]:
         cues: list[dict[str, object]] = []
@@ -250,32 +332,94 @@ class TranscriptExporterSession:
             if not source:
                 continue
             start = self._to_float(event.get("elapsed_seconds"), 0.0)
+            is_snapshot = bool(event.get("snapshot_final", False))
+            total_duration = self._to_float(event.get("snapshot_total_duration_seconds"), 0.0)
             delta = self._extract_increment_text(prev_source, source)
             prev_source = source
             if not delta:
                 continue
-            for line in delta.splitlines():
+            lines = [line.strip() for line in delta.splitlines() if line.strip()]
+            if is_snapshot:
+                lines = self._collapse_snapshot_lines_by_speaker(lines)
+            line_duration = 0.0
+            if is_snapshot and total_duration > 0.0 and lines:
+                line_duration = max(0.4, total_duration / float(len(lines)))
+            for idx, line in enumerate(lines):
                 text = line.strip()
                 if not text:
                     continue
-                speaker = ""
-                body = text
-                m = re.match(r"^(S\d+):\s*(.+)$", text)
-                if m is not None:
-                    speaker = str(m.group(1))
-                    body = str(m.group(2)).strip()
+                cue_start = float(start + (idx * line_duration)) if line_duration > 0.0 else float(start)
+                speaker, body = self._parse_speaker_prefixed_line(text)
                 if not body:
                     continue
-                duration = max(0.4, min(3.5, 0.08 * float(len(body))))
+                duration = line_duration if line_duration > 0.0 else max(0.4, min(3.5, 0.08 * float(len(body))))
                 cues.append(
                     {
-                        "start": float(start),
-                        "end": float(start + duration),
+                        "start": float(cue_start),
+                        "end": float(cue_start + duration),
                         "speaker": speaker,
                         "text": body,
                     }
                 )
         return cues
+
+    @classmethod
+    def _collapse_snapshot_lines_by_speaker(cls, lines: list[str]) -> list[str]:
+        """Final snapshots may contain visual wraps; only speaker changes should force cues."""
+        out: list[str] = []
+        current_speaker = ""
+        current_body = ""
+        for raw in lines:
+            speaker, body = cls._parse_speaker_prefixed_line(str(raw or "").strip())
+            if not body:
+                continue
+            same_speaker = bool(out) and speaker == current_speaker
+            speaker_continues = bool(out) and (not speaker) and bool(current_speaker)
+            no_speaker_continues = bool(out) and (not speaker) and (not current_speaker)
+            if same_speaker or speaker_continues or no_speaker_continues:
+                current_body = cls._join_snapshot_text(current_body, body)
+                prefix = f"[{current_speaker}] " if current_speaker else ""
+                out[-1] = f"{prefix}{current_body}".strip()
+                continue
+            current_speaker = speaker
+            current_body = body
+            prefix = f"[{current_speaker}] " if current_speaker else ""
+            out.append(f"{prefix}{current_body}".strip())
+        return out
+
+    @classmethod
+    def _parse_speaker_prefixed_line(cls, text: str) -> tuple[str, str]:
+        body = str(text or "").strip()
+        speaker = ""
+        m = re.match(r"^\[(spk_\d+|speaker_\d+|s\d+)\]\s*(.+)$", body, flags=re.IGNORECASE)
+        if m is not None:
+            return (cls._normalize_export_speaker(str(m.group(1))), str(m.group(2)).strip())
+        m = re.match(r"^(S\d+|SPK_\d+|SPEAKER_\d+):\s*(.+)$", body, flags=re.IGNORECASE)
+        if m is not None:
+            return (cls._normalize_export_speaker(str(m.group(1))), str(m.group(2)).strip())
+        return (speaker, body)
+
+    @staticmethod
+    def _join_snapshot_text(left: str, right: str) -> str:
+        first = str(left or "").strip()
+        second = str(right or "").strip()
+        if not first:
+            return second
+        if not second:
+            return first
+        if re.fullmatch(r"[\.,!?;:，。！？；：、)\]\}】》」』]", second[:1]):
+            return first + second
+        if re.search(r"[\u3400-\u9FFF]", first[-1:]) or re.search(r"[\u3400-\u9FFF]", second[:1]):
+            return f"{first} {second}"
+        return f"{first} {second}"
+
+    @staticmethod
+    def _normalize_export_speaker(label: str) -> str:
+        src = str(label or "").strip()
+        m = re.search(r"(\d+)", src)
+        if not m:
+            return src.upper()
+        return f"spk_{int(m.group(1)):03d}"
 
     @staticmethod
     def _extract_increment_text(previous: str, current: str) -> str:
@@ -384,6 +528,10 @@ class TranscriptExporterSession:
                 out[-1] = out[-1] + token
                 prev = token
                 continue
+            if prev == "." and re.fullmatch(r"[A-Za-z0-9]+", token) and re.search(r"\d\.$", out[-1]):
+                out[-1] = out[-1] + token
+                prev = token
+                continue
             if re.search(r"[\u3400-\u9FFF]", token) or re.search(r"[\u3400-\u9FFF]", prev):
                 out.append(token)
             else:
@@ -441,5 +589,3 @@ class TranscriptExporterSession:
     def _emit(self, message: str) -> None:
         if self._on_status is not None:
             self._on_status(message)
-
-

@@ -31,6 +31,10 @@ class SpeakerMatchResult:
     profile_id: str
     similarity: float
     created: bool
+    staged: bool = False
+    candidate_id: str = ""
+    candidate_total_seconds: float = 0.0
+    promoted: bool = False
 
 
 class SpeakerProfileStore:
@@ -46,7 +50,9 @@ class SpeakerProfileStore:
         self._max_profiles = max(1, int(max_profiles))
         self._lock = threading.Lock()
         self._profiles: list[dict[str, object]] = []
+        self._candidates: list[dict[str, object]] = []
         self._next_index = 0
+        self._next_candidate_index = 0
         self._load()
 
     def match_or_create(
@@ -56,6 +62,8 @@ class SpeakerProfileStore:
         threshold: float,
         observed_label: str,
         duration_seconds: float,
+        candidate_min_seconds: float = 0.0,
+        candidate_threshold: float | None = None,
     ) -> SpeakerMatchResult:
         normalized = _normalize_embedding(embedding)
         if normalized.size == 0:
@@ -101,27 +109,247 @@ class SpeakerProfileStore:
             if len(self._profiles) >= self._max_profiles:
                 return SpeakerMatchResult(profile_id="", similarity=best_similarity, created=False)
 
-            profile_id = f"SPK_{int(self._next_index):03d}"
-            self._next_index += 1
-            created_profile = {
-                "id": profile_id,
-                "centroid": normalized.tolist(),
-                "weight": float(update_weight),
-                "samples": 1,
-                "total_seconds": float(max(0.0, duration_seconds)),
-                "observed_labels": [label] if label else [],
-            }
-            self._profiles.append(created_profile)
-            self._save_locked()
-            return SpeakerMatchResult(
-                profile_id=profile_id,
+            min_candidate_seconds = float(max(0.0, candidate_min_seconds))
+            if min_candidate_seconds > 0.0:
+                return self._stage_or_promote_candidate_locked(
+                    normalized=normalized,
+                    update_weight=update_weight,
+                    label=label,
+                    duration_seconds=duration_seconds,
+                    candidate_min_seconds=min_candidate_seconds,
+                    candidate_threshold=(
+                        float(max(0.0, min(0.999, candidate_threshold)))
+                        if candidate_threshold is not None
+                        else min_threshold
+                    ),
+                    best_profile_similarity=best_similarity,
+                )
+
+            return self._create_profile_locked(
+                normalized=normalized,
+                update_weight=update_weight,
+                label=label,
+                duration_seconds=duration_seconds,
                 similarity=best_similarity,
-                created=True,
+                promoted=False,
             )
 
     def profile_count(self) -> int:
         with self._lock:
             return int(len(self._profiles))
+
+    def candidate_count(self) -> int:
+        with self._lock:
+            return int(len(self._candidates))
+
+    def candidate_summaries(self) -> list[dict[str, object]]:
+        with self._lock:
+            return [
+                {
+                    "id": str(item.get("id") or ""),
+                    "samples": int(item.get("samples", 0) or 0),
+                    "total_seconds": float(item.get("total_seconds", 0.0) or 0.0),
+                    "observed_labels": list(item.get("observed_labels") or []),
+                }
+                for item in self._candidates
+            ]
+
+    def reconcile_similar_profiles(self, *, threshold: float) -> dict[str, object]:
+        """Merge highly similar profiles and return a remap from removed IDs to kept IDs."""
+        min_threshold = float(max(0.0, min(0.999, threshold)))
+        with self._lock:
+            remap: dict[str, str] = {}
+            merged_rows: list[dict[str, object]] = []
+            changed = True
+            while changed:
+                changed = False
+                best_pair: tuple[int, int, float] | None = None
+                for i in range(len(self._profiles)):
+                    left = self._profiles[i]
+                    left_centroid = _normalize_embedding(np.asarray(left.get("centroid") or [], dtype=np.float32))
+                    for j in range(i + 1, len(self._profiles)):
+                        right = self._profiles[j]
+                        right_centroid = _normalize_embedding(np.asarray(right.get("centroid") or [], dtype=np.float32))
+                        similarity = _cosine_similarity(left_centroid, right_centroid)
+                        if similarity < min_threshold:
+                            continue
+                        if best_pair is None or similarity > best_pair[2]:
+                            best_pair = (i, j, similarity)
+                if best_pair is None:
+                    break
+                keep_index, drop_index, similarity = best_pair
+                keep = self._profiles[keep_index]
+                drop = self._profiles[drop_index]
+                keep_id = str(keep.get("id") or "")
+                drop_id = str(drop.get("id") or "")
+                if not keep_id or not drop_id or keep_id == drop_id:
+                    break
+
+                keep_weight = float(keep.get("weight", 0.0) or 0.0)
+                drop_weight = float(drop.get("weight", 0.0) or 0.0)
+                keep_centroid = _normalize_embedding(np.asarray(keep.get("centroid") or [], dtype=np.float32))
+                drop_centroid = _normalize_embedding(np.asarray(drop.get("centroid") or [], dtype=np.float32))
+                merged = _normalize_embedding(keep_centroid * keep_weight + drop_centroid * drop_weight)
+                keep["centroid"] = merged.tolist()
+                keep["weight"] = float(keep_weight + drop_weight)
+                keep["samples"] = int(keep.get("samples", 0) or 0) + int(drop.get("samples", 0) or 0)
+                keep["total_seconds"] = (
+                    float(keep.get("total_seconds", 0.0) or 0.0)
+                    + float(drop.get("total_seconds", 0.0) or 0.0)
+                )
+                labels = list(keep.get("observed_labels") or [])
+                for label in list(drop.get("observed_labels") or []):
+                    if label not in labels:
+                        labels.append(label)
+                keep["observed_labels"] = labels[-12:]
+
+                remap[drop_id] = keep_id
+                for old, new in list(remap.items()):
+                    if new == drop_id:
+                        remap[old] = keep_id
+                merged_rows.append(
+                    {
+                        "from": drop_id,
+                        "to": keep_id,
+                        "similarity": float(similarity),
+                    }
+                )
+                del self._profiles[drop_index]
+                changed = True
+
+            if remap:
+                self._save_locked()
+            return {
+                "threshold": float(min_threshold),
+                "merged_count": int(len(merged_rows)),
+                "remap": dict(remap),
+                "merged": merged_rows,
+                "profile_count": int(len(self._profiles)),
+            }
+
+    def _stage_or_promote_candidate_locked(
+        self,
+        *,
+        normalized: np.ndarray,
+        update_weight: float,
+        label: str,
+        duration_seconds: float,
+        candidate_min_seconds: float,
+        candidate_threshold: float,
+        best_profile_similarity: float,
+    ) -> SpeakerMatchResult:
+        best_candidate_index = -1
+        best_candidate_similarity = -1.0
+        for idx, candidate in enumerate(self._candidates):
+            centroid = _normalize_embedding(np.asarray(candidate.get("centroid") or [], dtype=np.float32))
+            similarity = _cosine_similarity(centroid, normalized)
+            if similarity > best_candidate_similarity:
+                best_candidate_similarity = similarity
+                best_candidate_index = idx
+
+        if best_candidate_index >= 0 and best_candidate_similarity >= candidate_threshold:
+            candidate = self._candidates[best_candidate_index]
+            old_centroid = _normalize_embedding(np.asarray(candidate.get("centroid") or [], dtype=np.float32))
+            old_weight = float(candidate.get("weight", 0.0) or 0.0)
+            merged = _normalize_embedding(old_centroid * old_weight + normalized * update_weight)
+            candidate["centroid"] = merged.tolist()
+            candidate["weight"] = float(old_weight + update_weight)
+            candidate["samples"] = int(candidate.get("samples", 0) or 0) + 1
+            candidate["total_seconds"] = (
+                float(candidate.get("total_seconds", 0.0) or 0.0)
+                + float(max(0.0, duration_seconds))
+            )
+            if label:
+                labels = list(candidate.get("observed_labels") or [])
+                if label not in labels:
+                    labels.append(label)
+                candidate["observed_labels"] = labels[-12:]
+            total_seconds = float(candidate.get("total_seconds", 0.0) or 0.0)
+            if total_seconds >= candidate_min_seconds:
+                del self._candidates[best_candidate_index]
+                return self._create_profile_locked(
+                    normalized=_normalize_embedding(np.asarray(candidate.get("centroid") or [], dtype=np.float32)),
+                    update_weight=float(candidate.get("weight", 0.0) or 0.0),
+                    label=label,
+                    duration_seconds=total_seconds,
+                    similarity=best_candidate_similarity,
+                    promoted=True,
+                    observed_labels=list(candidate.get("observed_labels") or []),
+                    samples=int(candidate.get("samples", 0) or 0),
+                )
+            return SpeakerMatchResult(
+                profile_id="",
+                similarity=float(max(best_profile_similarity, best_candidate_similarity)),
+                created=False,
+                staged=True,
+                candidate_id=str(candidate.get("id") or ""),
+                candidate_total_seconds=total_seconds,
+            )
+
+        candidate_id = f"CAND_{int(self._next_candidate_index):03d}"
+        self._next_candidate_index += 1
+        total_seconds = float(max(0.0, duration_seconds))
+        if total_seconds >= candidate_min_seconds:
+            return self._create_profile_locked(
+                normalized=normalized,
+                update_weight=update_weight,
+                label=label,
+                duration_seconds=duration_seconds,
+                similarity=best_profile_similarity,
+                promoted=True,
+            )
+        self._candidates.append(
+            {
+                "id": candidate_id,
+                "centroid": normalized.tolist(),
+                "weight": float(update_weight),
+                "samples": 1,
+                "total_seconds": total_seconds,
+                "observed_labels": [label] if label else [],
+            }
+        )
+        return SpeakerMatchResult(
+            profile_id="",
+            similarity=float(max(best_profile_similarity, best_candidate_similarity)),
+            created=False,
+            staged=True,
+            candidate_id=candidate_id,
+            candidate_total_seconds=total_seconds,
+        )
+
+    def _create_profile_locked(
+        self,
+        *,
+        normalized: np.ndarray,
+        update_weight: float,
+        label: str,
+        duration_seconds: float,
+        similarity: float,
+        promoted: bool,
+        observed_labels: list[object] | None = None,
+        samples: int = 1,
+    ) -> SpeakerMatchResult:
+        profile_id = f"SPK_{int(self._next_index):03d}"
+        self._next_index += 1
+        labels: list[object] = list(observed_labels or [])
+        if label and label not in labels:
+            labels.append(label)
+        created_profile = {
+            "id": profile_id,
+            "centroid": _normalize_embedding(normalized).tolist(),
+            "weight": float(update_weight),
+            "samples": int(max(1, samples)),
+            "total_seconds": float(max(0.0, duration_seconds)),
+            "observed_labels": labels[-12:],
+        }
+        self._profiles.append(created_profile)
+        self._save_locked()
+        return SpeakerMatchResult(
+            profile_id=profile_id,
+            similarity=float(similarity),
+            created=True,
+            promoted=bool(promoted),
+        )
 
     def _load(self) -> None:
         if not self._path.exists():

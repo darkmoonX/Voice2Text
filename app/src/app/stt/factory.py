@@ -95,6 +95,7 @@ def _build_whisperx(config: RuntimeConfig, *, device_override: Optional[str], co
         speaker_profile_match_threshold=float(getattr(config, 'whisperx_speaker_profile_match_threshold', 0.72) or 0.72),
         speaker_profile_min_seconds=float(getattr(config, 'whisperx_speaker_profile_min_seconds', 0.8) or 0.8),
         speaker_profile_store_path=str(getattr(config, 'whisperx_speaker_profile_store_path', '') or ''),
+        speaker_marker_style=str(getattr(config, 'speaker_marker_style', 'spk') or 'spk'),
         auto_download=bool(config.stt_auto_download),
         progress_callback=progress_callback,
     )

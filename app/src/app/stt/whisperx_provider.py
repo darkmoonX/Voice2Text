@@ -46,6 +46,7 @@ class WhisperXTranscriber:
         speaker_profile_match_threshold: float = 0.72,
         speaker_profile_min_seconds: float = 0.8,
         speaker_profile_store_path: str = "",
+        speaker_marker_style: str = "spk",
         auto_download: bool = True,
         progress_callback: Callable[[str], None] | None = None,
     ) -> None:
@@ -100,7 +101,9 @@ class WhisperXTranscriber:
         self._diarization_device_setting = (diarization_device or "auto").strip().lower()
         (normalized_source_lang, _) = normalize_language_hint(source_language_hint)
         self._source_language_hint = normalized_source_lang
-        self._diarization_model = (diarization_model or "pyannote/speaker-diarization-3.1").strip()
+        self._diarization_model = self._normalize_diarization_model_ref(
+            diarization_model or "pyannote/speaker-diarization-3.1"
+        )
         self._hf_token = (hf_token or "").strip()
         self._speaker_profile_enabled = bool(speaker_profile_enabled)
         self._speaker_profile_backend = (speaker_profile_backend or "pyannote").strip()
@@ -114,6 +117,8 @@ class WhisperXTranscriber:
         self._speaker_profile_match_threshold = float(max(0.0, min(0.999, speaker_profile_match_threshold)))
         self._speaker_profile_min_seconds = float(max(0.2, speaker_profile_min_seconds))
         self._speaker_profile_store_path = self._resolve_speaker_profile_store_path(speaker_profile_store_path)
+        marker_style = str(speaker_marker_style or "").strip().lower()
+        self._speaker_marker_style = "arrow" if marker_style in {"arrow", "arrows", ">>"} else "spk"
         self._auto_download = bool(auto_download)
         self._progress_callback = progress_callback
         self._trace_enabled = (os.environ.get("VOICE2TEXT_TRACE_WHISPERX", "0").strip().lower() not in {"", "0", "false", "no", "off"})
@@ -152,6 +157,8 @@ class WhisperXTranscriber:
         self._speaker_identity_engine: SpeakerIdentityEngine | None = None
         self._last_speaker_profile_stats: dict[str, object] = {}
         self._last_transcription_meta: dict[str, object] = {}
+        self._last_alignment_timing: dict[str, object] = {}
+        self._last_diarization_timing: dict[str, object] = {}
         self._language_route_logged: set[tuple[str, str, str, str]] = set()
         self._last_speaker_label: str | None = None
         self._speaker_display_map: dict[str, str] = {}
@@ -202,48 +209,110 @@ class WhisperXTranscriber:
         return has_enough_signal(chunk, threshold=threshold, channel_mode=channel_mode)
 
     def transcribe(self, chunk, language: Optional[str] = None, channel_mode: str = "mono") -> str:
+        provider_started_at = time.perf_counter()
+        provider_timing: dict[str, object] = {
+            "trace_id": int(self._trace_counter + 1),
+            "input_sample_rate": int(getattr(chunk, "sample_rate", 0) or 0),
+            "input_channels": int(getattr(chunk, "channels", 0) or 0),
+            "alignment_enabled": bool(self._enable_forced_alignment),
+            "diarization_enabled": bool(self._enable_diarization),
+            "speaker_profile_enabled": bool(self._speaker_profile_enabled),
+        }
         self._trace_counter += 1
         trace_id = self._trace_counter
+        provider_timing["trace_id"] = int(trace_id)
+        stage_started_at = time.perf_counter()
         audio = pcm16_to_mono_float(chunk.pcm16, chunk.channels, channel_mode=channel_mode)
+        provider_timing["pcm_convert_seconds"] = time.perf_counter() - stage_started_at
         if audio.size == 0:
+            provider_timing["total_seconds"] = time.perf_counter() - provider_started_at
+            self._last_transcription_meta = {
+                "stability_ratio": 1.0,
+                "token_count": 0,
+                "stable_token_count": 0,
+                "token_timestamps": [],
+                "provider_timing": provider_timing,
+            }
             return ""
         if chunk.sample_rate != 16000:
+            stage_started_at = time.perf_counter()
             audio = resample(audio, chunk.sample_rate, 16000)
+            provider_timing["resample_seconds"] = time.perf_counter() - stage_started_at
+        else:
+            provider_timing["resample_seconds"] = 0.0
         if audio.size == 0:
+            provider_timing["total_seconds"] = time.perf_counter() - provider_started_at
+            self._last_transcription_meta = {
+                "stability_ratio": 1.0,
+                "token_count": 0,
+                "stable_token_count": 0,
+                "token_timestamps": [],
+                "provider_timing": provider_timing,
+            }
             return ""
+        provider_timing["audio_samples"] = int(audio.size)
+        provider_timing["audio_seconds"] = float(audio.size) / 16000.0
         if self._trace_enabled:
             self._emit(
                 f"[whisperx-trace] #{trace_id} start: in={chunk.sample_rate}Hz/{chunk.channels}ch, "
                 f"resampled=16000Hz/1ch, samples={int(audio.size)}"
             )
 
+        stage_started_at = time.perf_counter()
         (lang_hint, zh_script) = normalize_language_hint(language)
         kwargs: dict[str, object] = {"batch_size": self._batch_size}
         if lang_hint is not None:
             kwargs["language"] = lang_hint
         if not self._enable_phoneme_asr:
             kwargs["task"] = "transcribe"
+        provider_timing["prepare_seconds"] = time.perf_counter() - stage_started_at
 
+        stage_started_at = time.perf_counter()
         result = self._transcribe_with_compat(audio, kwargs)
+        provider_timing["asr_seconds"] = time.perf_counter() - stage_started_at
         segments = list(result.get("segments", []) or [])
+        provider_timing["asr_segment_count"] = int(len(segments))
         lang_detected = str(result.get("language") or "").strip().lower()
+        stage_started_at = time.perf_counter()
         align_lang = self._resolve_alignment_language(lang_hint, lang_detected)
         self._emit_language_route(language, lang_hint, lang_detected, align_lang)
+        provider_timing["language_route_seconds"] = time.perf_counter() - stage_started_at
         if self._trace_enabled:
             self._emit(
                 f"[whisperx-trace] #{trace_id} asr-done: segments={len(segments)}, "
                 f"detected_lang={lang_detected or 'n/a'}"
             )
-        aligned = self._align_segments(audio, segments, align_lang, trace_id=trace_id) if self._enable_forced_alignment else segments
+        self._last_alignment_timing = {}
+        if self._enable_forced_alignment:
+            stage_started_at = time.perf_counter()
+            aligned = self._align_segments(audio, segments, align_lang, trace_id=trace_id)
+            provider_timing["align_seconds"] = time.perf_counter() - stage_started_at
+            provider_timing["align_detail"] = dict(self._last_alignment_timing)
+        else:
+            aligned = segments
+            provider_timing["align_seconds"] = 0.0
+            provider_timing["align_detail"] = {"status": "disabled"}
         if self._trace_enabled:
             self._emit(
                 f"[whisperx-trace] #{trace_id} align-done: segments={len(aligned)}, "
                 f"align_lang={align_lang or 'n/a'}, align_device={self._alignment_device}"
             )
+        self._last_diarization_timing = {}
         if self._enable_diarization:
+            stage_started_at = time.perf_counter()
             aligned = self._attach_speaker_labels(audio, aligned)
+            provider_timing["diarization_seconds"] = time.perf_counter() - stage_started_at
+            provider_timing["diarization_detail"] = dict(self._last_diarization_timing)
+            stage_started_at = time.perf_counter()
             aligned = self._apply_speaker_profiles(audio, aligned)
+            provider_timing["speaker_profile_seconds"] = time.perf_counter() - stage_started_at
+        else:
+            provider_timing["diarization_seconds"] = 0.0
+            provider_timing["diarization_detail"] = {"status": "disabled"}
+            provider_timing["speaker_profile_seconds"] = 0.0
+        provider_timing["final_segment_count"] = int(len(aligned))
 
+        stage_started_at = time.perf_counter()
         token_meta: list[dict[str, float]] = []
         words_fallback: list[str] = []
         diarized_turns: list[dict[str, object]] = []
@@ -272,20 +341,19 @@ class WhisperXTranscriber:
         if not text:
             text = " ".join((str(seg.get("text") or "").strip() for seg in aligned if str(seg.get("text") or "").strip())).strip()
         for seg in aligned:
-            seg_speaker = self._resolve_segment_speaker(seg) if isinstance(seg, dict) else None
+            seg_speaker = self._resolve_segment_speaker(seg, prefer_profile=True) if isinstance(seg, dict) else None
             for wd in (seg.get("words") or []):
                 try:
                     start = float(wd.get("start"))
                     end = float(wd.get("end"))
                     score = float(wd.get("score")) if wd.get("score") is not None else 0.0
                     word_txt = str(wd.get("word") or "").strip()
-                    word_speaker = str(
-                        wd.get("profile_speaker")
-                        or wd.get("speaker")
-                        or (seg.get("profile_speaker") if isinstance(seg, dict) else "")
-                        or seg_speaker
-                        or ""
-                    ).strip()
+                    word_speaker = self._resolve_word_speaker(
+                        wd,
+                        seg if isinstance(seg, dict) else {},
+                        seg_speaker,
+                        prefer_profile=True,
+                    )
                     token_meta.append(
                         {
                             "start": start,
@@ -305,6 +373,11 @@ class WhisperXTranscriber:
             text = str(result.get("text") or "").strip()
         stable = [tok for tok in token_meta if tok.get("score", 0.0) >= 0.60 and 0.02 <= (tok.get("end", 0.0) - tok.get("start", 0.0)) <= 1.2]
         marker_count = self._count_speaker_markers(text)
+        provider_timing["meta_build_seconds"] = time.perf_counter() - stage_started_at
+        provider_timing["token_count"] = int(len(token_meta))
+        provider_timing["stable_token_count"] = int(len(stable))
+        provider_timing["speaker_turn_count"] = int(max(0, marker_count))
+        provider_timing["total_seconds"] = time.perf_counter() - provider_started_at
         self._last_transcription_meta = {
             "stability_ratio": float(len(stable) / max(1, len(token_meta))) if token_meta else 1.0,
             "token_count": int(len(token_meta)),
@@ -315,6 +388,7 @@ class WhisperXTranscriber:
             "speaker_turns": diarized_turns[:128],
             "speaker_turn_count": int(max(0, marker_count)),
             "speaker_profile_stats": dict(self._last_speaker_profile_stats),
+            "provider_timing": provider_timing,
         }
         if self._enable_diarization and (self._trace_enabled or marker_count > 0 or len(diarized_turns) > 0):
             unique_speakers = sorted(
@@ -334,7 +408,13 @@ class WhisperXTranscriber:
                 f"{float(self._speaker_switch_pending_duration_seconds):.2f}s"
             )
         if zh_script is not None:
+            stage_started_at = time.perf_counter()
             text = normalize_chinese_script(text, zh_script)
+            provider_timing["script_normalize_seconds"] = time.perf_counter() - stage_started_at
+            provider_timing["total_seconds"] = time.perf_counter() - provider_started_at
+            self._last_transcription_meta["provider_timing"] = provider_timing
+        else:
+            provider_timing["script_normalize_seconds"] = 0.0
         if not text:
             self._emit("WhisperX produced empty text after alignment/postprocess.")
         elif self._trace_enabled:
@@ -353,6 +433,15 @@ class WhisperXTranscriber:
             if self._speaker_identity_engine is not None:
                 self._speaker_identity_engine.prewarm()
 
+    def reconcile_speaker_profiles(self, *, threshold: float | None = None) -> dict[str, object]:
+        if self._speaker_identity_engine is None:
+            return {
+                "enabled": bool(self._speaker_profile_enabled),
+                "status": "skip_engine_unavailable",
+                "merged_count": 0,
+                "remap": {},
+            }
+        return self._speaker_identity_engine.reconcile_profiles(threshold=threshold)
 
     def _transcribe_with_compat(self, audio, kwargs: dict[str, object]):
         active = dict(kwargs)
@@ -417,13 +506,35 @@ class WhisperXTranscriber:
             f"detected={key[2] or 'n/a'}; align_mode={mode}; align={key[3] or 'n/a'}"
         )
     def _align_segments(self, audio, segments: list[dict], language_code: str, *, trace_id: int | None = None) -> list[dict]:
+        detail_started_at = time.perf_counter()
+        self._last_alignment_timing = {
+            "status": "start",
+            "input_segment_count": int(len(segments or [])),
+            "language": str(language_code or ""),
+            "device": str(self._alignment_device),
+        }
         if not segments or not language_code:
+            self._last_alignment_timing.update(
+                {
+                    "status": "skipped_no_segments_or_language",
+                    "total_seconds": time.perf_counter() - detail_started_at,
+                }
+            )
             return segments
         try:
+            stage_started_at = time.perf_counter()
             cached = self._ensure_alignment_model_loaded(language_code)
+            self._last_alignment_timing["model_load_seconds"] = time.perf_counter() - stage_started_at
             if cached is None:
+                self._last_alignment_timing.update(
+                    {
+                        "status": "skipped_model_unavailable",
+                        "total_seconds": time.perf_counter() - detail_started_at,
+                    }
+                )
                 return segments
             (align_model, metadata) = cached
+            stage_started_at = time.perf_counter()
             audio_f32 = np.asarray(audio, dtype=np.float32)
             if audio_f32.ndim != 1:
                 audio_f32 = audio_f32.reshape(-1)
@@ -434,13 +545,23 @@ class WhisperXTranscriber:
 
             audio_duration = float(audio_f32.size) / 16000.0 if audio_f32.size > 0 else 0.0
             segments_for_align = self._sanitize_alignment_segments(segments, audio_duration)
+            self._last_alignment_timing["prepare_seconds"] = time.perf_counter() - stage_started_at
+            self._last_alignment_timing["clean_segment_count"] = int(len(segments_for_align))
+            self._last_alignment_timing["audio_seconds"] = float(audio_duration)
             if not segments_for_align:
+                self._last_alignment_timing.update(
+                    {
+                        "status": "skipped_no_clean_segments",
+                        "total_seconds": time.perf_counter() - detail_started_at,
+                    }
+                )
                 return segments
 
             max_end = max(float(seg.get("end", 0.0) or 0.0) for seg in segments_for_align)
             crop_samples = int(min(audio_duration, max(0.5, max_end + 0.2)) * 16000.0)
             crop_samples = min(max(1, crop_samples), int(audio_f32.size))
             audio_for_align = audio_f32[:crop_samples]
+            self._last_alignment_timing["crop_seconds"] = float(crop_samples) / 16000.0
             if self._trace_enabled:
                 tid = str(trace_id) if trace_id is not None else "?"
                 self._emit(
@@ -462,10 +583,20 @@ class WhisperXTranscriber:
                 audio_for_align,
                 self._alignment_device,
             )
-            align_elapsed_ms = (time.perf_counter() - align_started_at) * 1000.0
+            align_run_seconds = time.perf_counter() - align_started_at
+            align_elapsed_ms = align_run_seconds * 1000.0
+            self._last_alignment_timing["run_seconds"] = float(align_run_seconds)
 
             if self._alignment_device == "cuda":
                 self._sync_cuda_if_available()
+            aligned_count = len(list(aligned_result.get("segments", segments) or [])) if isinstance(aligned_result, dict) else len(segments)
+            self._last_alignment_timing.update(
+                {
+                    "status": "ok",
+                    "aligned_segment_count": int(aligned_count),
+                    "total_seconds": time.perf_counter() - detail_started_at,
+                }
+            )
             if self._trace_enabled:
                 tid = str(trace_id) if trace_id is not None else "?"
                 self._align_bench_count += 1
@@ -478,10 +609,16 @@ class WhisperXTranscriber:
                     f"elapsed_ms={align_elapsed_ms:.1f} avg_ms={avg_ms:.1f} max_ms={self._align_bench_max_ms:.1f} "
                     f"count={self._align_bench_count}"
                 )
-                aligned_count = len(list(aligned_result.get("segments", segments) or [])) if isinstance(aligned_result, dict) else len(segments)
                 self._emit(f"[whisperx-trace] #{tid} align-success: aligned_segments={aligned_count}")
             return list(aligned_result.get("segments", segments))
         except Exception as exc:
+            self._last_alignment_timing.update(
+                {
+                    "status": "error",
+                    "error": str(exc),
+                    "total_seconds": time.perf_counter() - detail_started_at,
+                }
+            )
             self._emit(f"WhisperX alignment skipped: {exc}")
             return segments
 
@@ -827,32 +964,94 @@ class WhisperXTranscriber:
         return bool(has_config and has_weights)
 
     def _attach_speaker_labels(self, audio, segments: list[dict]) -> list[dict]:
+        detail_started_at = time.perf_counter()
+        self._last_diarization_timing = {
+            "status": "start",
+            "input_segment_count": int(len(segments or [])),
+            "device": str(self._diarization_device),
+        }
         if not self._enable_diarization:
+            self._last_diarization_timing.update(
+                {
+                    "status": "disabled",
+                    "total_seconds": time.perf_counter() - detail_started_at,
+                }
+            )
             return segments
         if self._diarization_disabled_reason:
+            self._last_diarization_timing.update(
+                {
+                    "status": "disabled_after_error",
+                    "reason": str(self._diarization_disabled_reason),
+                    "total_seconds": time.perf_counter() - detail_started_at,
+                }
+            )
             return segments
         if not segments:
+            self._last_diarization_timing.update(
+                {
+                    "status": "skipped_no_segments",
+                    "total_seconds": time.perf_counter() - detail_started_at,
+                }
+            )
             return segments
         try:
+            stage_started_at = time.perf_counter()
             audio_f32 = np.asarray(audio, dtype=np.float32).reshape(-1)
         except Exception:
             audio_f32 = np.zeros((0,), dtype=np.float32)
+        self._last_diarization_timing["prepare_seconds"] = time.perf_counter() - stage_started_at
+        self._last_diarization_timing["audio_seconds"] = float(audio_f32.size) / 16000.0 if audio_f32.size > 0 else 0.0
         if audio_f32.size < 1600:
             # Skip ultra-short windows to avoid unstable diarization stats on empty/near-empty frames.
+            self._last_diarization_timing.update(
+                {
+                    "status": "skipped_too_short",
+                    "total_seconds": time.perf_counter() - detail_started_at,
+                }
+            )
             return segments
         if (not np.isfinite(audio_f32).all()):
             audio_f32 = np.nan_to_num(audio_f32, nan=0.0, posinf=1.0, neginf=-1.0)
         rms = float(np.sqrt(np.mean(np.square(audio_f32)))) if audio_f32.size > 0 else 0.0
+        self._last_diarization_timing["rms"] = float(rms)
         if rms < 1e-4:
+            self._last_diarization_timing.update(
+                {
+                    "status": "skipped_low_rms",
+                    "total_seconds": time.perf_counter() - detail_started_at,
+                }
+            )
             return segments
         try:
+            stage_started_at = time.perf_counter()
             self._ensure_diarization_pipeline_loaded()
+            self._last_diarization_timing["pipeline_load_seconds"] = time.perf_counter() - stage_started_at
 
+            stage_started_at = time.perf_counter()
             diarize_segments = self._diarization_pipeline(audio_f32)
+            self._last_diarization_timing["pipeline_run_seconds"] = time.perf_counter() - stage_started_at
+            stage_started_at = time.perf_counter()
             aligned = self._whisperx.assign_word_speakers(diarize_segments, {"segments": segments})
-            return list((aligned.get("segments", segments) if isinstance(aligned, dict) else segments))
+            self._last_diarization_timing["assign_seconds"] = time.perf_counter() - stage_started_at
+            output_segments = list((aligned.get("segments", segments) if isinstance(aligned, dict) else segments))
+            self._last_diarization_timing.update(
+                {
+                    "status": "ok",
+                    "output_segment_count": int(len(output_segments)),
+                    "total_seconds": time.perf_counter() - detail_started_at,
+                }
+            )
+            return output_segments
         except Exception as exc:
             self._diarization_disabled_reason = str(exc)
+            self._last_diarization_timing.update(
+                {
+                    "status": "error",
+                    "error": str(exc),
+                    "total_seconds": time.perf_counter() - detail_started_at,
+                }
+            )
             self._emit(f"[download] whisperx-diarization failed: {exc}")
             self._emit(f"WhisperX diarization skipped: {exc}")
             self._emit("WhisperX diarization disabled for this runtime session after initialization failure.")
@@ -1011,7 +1210,7 @@ class WhisperXTranscriber:
         self._warmup_diarization_cuda_context()
 
     def _resolve_diarization_model_for_pipeline(self, *, model_name: str, hf_token: str | None) -> str:
-        token = (model_name or "").strip()
+        token = self._normalize_diarization_model_ref(model_name)
         if not token:
             token = "pyannote/speaker-diarization-3.1"
         path_like = ("/" in token or "\\" in token) and Path(token).exists()
@@ -1042,6 +1241,15 @@ class WhisperXTranscriber:
         if (local_repo_dir / "config.yaml").exists():
             self._emit(f"[download] whisperx-diarization cache ready: {local_repo_dir}")
             return str(local_repo_dir)
+        return token
+
+    @staticmethod
+    def _normalize_diarization_model_ref(model_name: str) -> str:
+        token = str(model_name or "").strip()
+        # Older settings may have persisted this typo; normalize before any
+        # download or pyannote pipeline construction to avoid a guaranteed 404.
+        if token.lower() == "pyannote/speaker-diarization-diarization-3.1":
+            return "pyannote/speaker-diarization-3.1"
         return token
 
     @staticmethod
@@ -1350,7 +1558,7 @@ class WhisperXTranscriber:
                     if marker == ">>":
                         turns.append(f"\n{marker} {text}" if turns else f"{marker} {text}")
                     else:
-                        turns.append(f"\n{marker}: {text}" if turns else f"{marker}: {text}")
+                        turns.append(f"\n{marker} {text}" if turns else f"{marker} {text}")
                     self._last_speaker_label = display_speaker
                 else:
                     turns.append(text)
@@ -1374,9 +1582,10 @@ class WhisperXTranscriber:
         merged = " ".join(turns).strip()
         # Keep speaker markers line-start anchored even when segment stitching
         # introduces inline spacing around the marker.
-        merged = re.sub(r"([^\n])\s*(>>|S\d+:)\s*", r"\1\n\2 ", merged)
-        merged = re.sub(r"^\s*(>>|S\d+:)\s*", r"\1 ", merged)
-        merged = re.sub(r"\n\s*(>>|S\d+:)\s*", r"\n\1 ", merged)
+        marker_pattern = r"(>>|S\d+:|\[spk_\d+\])"
+        merged = re.sub(rf"([^\n])\s*{marker_pattern}\s*", r"\1\n\2 ", merged, flags=re.IGNORECASE)
+        merged = re.sub(rf"^\s*{marker_pattern}\s*", r"\1 ", merged, flags=re.IGNORECASE)
+        merged = re.sub(rf"\n\s*{marker_pattern}\s*", r"\n\1 ", merged, flags=re.IGNORECASE)
         lines = []
         for line in merged.splitlines():
             cleaned = re.sub(r"[ \t]+", " ", line).strip()
@@ -1385,15 +1594,37 @@ class WhisperXTranscriber:
         return "\n".join(lines).strip()
 
     def _speaker_label_to_marker(self, speaker_label: str | None) -> str:
-        _ = speaker_label
-        # Product requirement: speaker turn lines should start with '>>'.
-        return ">>"
+        label = str(speaker_label or "").strip()
+        if not label:
+            return ""
+        if self._speaker_marker_style == "arrow":
+            return ">>"
+        return f"[{self._speaker_to_display_label(label).lower()}]"
+
+    def _speaker_to_display_label(self, speaker_label: str) -> str:
+        label = str(speaker_label or "").strip()
+        if not label:
+            return ""
+        existing = self._speaker_display_map.get(label)
+        if existing:
+            return existing
+        match = re.search(r"(\d+)$", label)
+        if match is not None:
+            display = f"SPK_{int(match.group(1)):03d}"
+        else:
+            display = f"SPK_{self._speaker_display_next_index:03d}"
+        self._speaker_display_map[label] = display
+        self._speaker_display_next_index = max(
+            self._speaker_display_next_index + 1,
+            int(display.rsplit("_", 1)[-1]) + 1,
+        )
+        return display
 
     @staticmethod
     def _count_speaker_markers(text: str) -> int:
         if not text:
             return 0
-        return len(re.findall(r"(?m)^\s*(?:>>|S\d+:)\s+", text))
+        return len(re.findall(r"(?m)^\s*(?:>>|S\d+:|\[spk_\d+\])\s+", text, flags=re.IGNORECASE))
 
     @staticmethod
     def _resolve_segment_speaker(segment: dict, *, prefer_profile: bool = True) -> str | None:
@@ -1434,6 +1665,36 @@ class WhisperXTranscriber:
         if counts_profile:
             return max(counts_profile.items(), key=lambda pair: pair[1])[0]
         return None
+
+    @staticmethod
+    def _resolve_word_speaker(
+        word: dict,
+        segment: dict,
+        segment_speaker: str | None = None,
+        *,
+        prefer_profile: bool = False,
+    ) -> str:
+        if prefer_profile:
+            profile_word = str(word.get("profile_speaker") or "").strip()
+            if profile_word:
+                return profile_word
+            if segment_speaker:
+                return str(segment_speaker).strip()
+            profile_segment = str(segment.get("profile_speaker") or "").strip()
+            if profile_segment:
+                return profile_segment
+        local_word = str(word.get("speaker") or "").strip()
+        if local_word:
+            return local_word
+        if segment_speaker:
+            return str(segment_speaker).strip()
+        local_segment = str(segment.get("speaker") or "").strip()
+        if local_segment:
+            return local_segment
+        profile_word = str(word.get("profile_speaker") or "").strip()
+        if profile_word:
+            return profile_word
+        return str(segment.get("profile_speaker") or "").strip()
 
     def _resolve_stt_model_arg(self, model_ref: str) -> str:
         if not model_ref:

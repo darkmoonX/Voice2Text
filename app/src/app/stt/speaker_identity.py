@@ -150,6 +150,64 @@ class _PyannoteEmbeddingBackend(_BaseEmbeddingBackend):
         return None
 
 
+class _FallbackEmbeddingBackend(_BaseEmbeddingBackend):
+    backend_name = "fallback"
+
+    def __init__(
+        self,
+        *,
+        primary: _BaseEmbeddingBackend,
+        fallback: _BaseEmbeddingBackend,
+        on_status: Callable[[str], None] | None,
+    ) -> None:
+        super().__init__(device=primary._device, model_root=primary._model_root, on_status=on_status)
+        self._primary = primary
+        self._fallback = fallback
+        self._active: _BaseEmbeddingBackend | None = None
+
+    @property
+    def active_backend_name(self) -> str:
+        active = self._active or self._primary
+        return str(getattr(active, "backend_name", "unknown"))
+
+    def ensure_loaded(self) -> bool:
+        if self._active is not None:
+            return self._active.ensure_loaded()
+        if self._primary.ensure_loaded():
+            self._active = self._primary
+            return True
+        primary_reason = self._short_reason(self._primary.disabled_reason)
+        self._emit(
+            "Speaker backend fallback: "
+            f"{self._primary.backend_name} unavailable ({primary_reason}); trying {self._fallback.backend_name}"
+        )
+        if self._fallback.ensure_loaded():
+            self._active = self._fallback
+            self._disabled_reason = None
+            return True
+        fallback_reason = self._short_reason(self._fallback.disabled_reason)
+        self._disabled_reason = (
+            f"{self._primary.backend_name}: {primary_reason}; "
+            f"{self._fallback.backend_name}: {fallback_reason}"
+        )
+        return False
+
+    def extract_embedding(self, clip: np.ndarray) -> np.ndarray | None:
+        if not self.ensure_loaded():
+            return None
+        active = self._active or self._primary
+        return active.extract_embedding(clip)
+
+    @staticmethod
+    def _short_reason(reason: str) -> str:
+        text = " ".join(str(reason or "unavailable").split())
+        if "pyannote/embedding" in text and ("403" in text or "gated repo" in text.lower()):
+            return "pyannote/embedding gated access denied"
+        if len(text) > 220:
+            return text[:217] + "..."
+        return text
+
+
 class _SpeechBrainEcapaBackend(_BaseEmbeddingBackend):
     backend_name = "speechbrain_ecapa"
 
@@ -303,6 +361,35 @@ class SpeakerIdentityEngine:
             return
         self._backend.ensure_loaded()
 
+    def reconcile_profiles(self, *, threshold: float | None = None) -> dict[str, object]:
+        stats: dict[str, object] = {
+            "enabled": bool(self._enabled),
+            "backend": self._backend_name,
+            "profile_store_ready": bool(self._profile_store is not None),
+            "status": "init",
+            "threshold": float(self._match_threshold if threshold is None else threshold),
+            "merged_count": 0,
+            "remap": {},
+            "profile_count": int(self._profile_store.profile_count()) if self._profile_store is not None else 0,
+        }
+        if not self._enabled:
+            stats["status"] = "skip_disabled"
+            return stats
+        if self._profile_store is None:
+            stats["status"] = "skip_store_unavailable"
+            return stats
+        result = self._profile_store.reconcile_similar_profiles(
+            threshold=float(self._match_threshold if threshold is None else threshold)
+        )
+        stats.update(result)
+        stats["status"] = "done"
+        if self._on_status is not None and int(stats.get("merged_count", 0) or 0) > 0:
+            self._on_status(
+                "[speaker-profile] reconciliation: "
+                f"merged={stats.get('merged_count', 0)}; profile_total={stats.get('profile_count', 0)}"
+            )
+        return stats
+
     def apply(
         self,
         *,
@@ -354,6 +441,8 @@ class SpeakerIdentityEngine:
             return segments
         backend_ready = self._backend.ensure_loaded()
         stats["backend_ready"] = bool(backend_ready)
+        if isinstance(self._backend, _FallbackEmbeddingBackend):
+            stats["backend"] = self._backend.active_backend_name
         stats["backend_disabled_reason"] = str(self._backend.disabled_reason or "")
         if not backend_ready:
             stats["status"] = "skip_backend_unavailable"
@@ -388,6 +477,10 @@ class SpeakerIdentityEngine:
         skipped_short_count = 0
         skipped_no_embedding_count = 0
         skipped_no_profile_count = 0
+        staged_count = 0
+        promoted_count = 0
+        candidate_min_seconds = float(max(self._min_seconds * 2.0, 4.0))
+        candidate_threshold = float(max(0.0, self._match_threshold - 0.05))
 
         for (speaker, spans) in spans_by_speaker.items():
             clip = self._collect_speaker_clip(audio_f32, spans)
@@ -407,13 +500,30 @@ class SpeakerIdentityEngine:
                 threshold=self._match_threshold,
                 observed_label=speaker,
                 duration_seconds=duration_seconds,
+                candidate_min_seconds=candidate_min_seconds,
+                candidate_threshold=candidate_threshold,
             )
             if not matched.profile_id:
+                if matched.staged:
+                    staged_count += 1
+                    assignment_rows.append(
+                        {
+                            "local_speaker": str(speaker),
+                            "candidate_speaker": str(matched.candidate_id),
+                            "similarity": float(matched.similarity),
+                            "staged": True,
+                            "candidate_total_seconds": float(matched.candidate_total_seconds),
+                            "duration_seconds": float(duration_seconds),
+                            "span_count": int(len(spans)),
+                        }
+                    )
                 skipped_no_profile_count += 1
                 continue
             profile_by_local_speaker[speaker] = matched.profile_id
             if matched.created:
                 created_count += 1
+                if matched.promoted:
+                    promoted_count += 1
             else:
                 matched_count += 1
             assignment_rows.append(
@@ -422,6 +532,7 @@ class SpeakerIdentityEngine:
                     "profile_speaker": str(matched.profile_id),
                     "similarity": float(matched.similarity),
                     "created": bool(matched.created),
+                    "promoted": bool(matched.promoted),
                     "duration_seconds": float(duration_seconds),
                     "span_count": int(len(spans)),
                 }
@@ -434,6 +545,11 @@ class SpeakerIdentityEngine:
         stats["skipped_short_count"] = int(skipped_short_count)
         stats["skipped_no_embedding_count"] = int(skipped_no_embedding_count)
         stats["skipped_no_profile_count"] = int(skipped_no_profile_count)
+        stats["staged_candidate_count"] = int(staged_count)
+        stats["promoted_candidate_count"] = int(promoted_count)
+        stats["candidate_count"] = int(self._profile_store.candidate_count())
+        stats["candidate_min_seconds"] = float(candidate_min_seconds)
+        stats["candidate_threshold"] = float(candidate_threshold)
 
         if not profile_by_local_speaker:
             stats["profile_count"] = int(self._profile_store.profile_count())
@@ -465,9 +581,11 @@ class SpeakerIdentityEngine:
         if self._on_status is not None:
             self._on_status(
                 "[speaker-profile] window summary: "
-                f"backend={self._backend_name}; local={stats.get('local_speaker_count', 0)}; "
+                f"backend={stats.get('backend', self._backend_name)}; local={stats.get('local_speaker_count', 0)}; "
                 f"assigned={stats.get('assigned_local_speaker_count', 0)}; "
                 f"matched={stats.get('matched_count', 0)}; created={stats.get('created_count', 0)}; "
+                f"staged={stats.get('staged_candidate_count', 0)}; promoted={stats.get('promoted_candidate_count', 0)}; "
+                f"candidates={stats.get('candidate_count', 0)}; "
                 f"skip_short={stats.get('skipped_short_count', 0)}; profile_total={stats.get('profile_count', 0)}"
             )
         return segments
@@ -489,11 +607,21 @@ class SpeakerIdentityEngine:
                 model_root=model_root,
                 on_status=cfg.on_status,
             )
-        return _PyannoteEmbeddingBackend(
+        pyannote_backend = _PyannoteEmbeddingBackend(
             model_ref=cfg.pyannote_model,
             hf_token=cfg.hf_token,
             device=cfg.device,
             model_root=model_root,
+            on_status=cfg.on_status,
+        )
+        return _FallbackEmbeddingBackend(
+            primary=pyannote_backend,
+            fallback=_SpeechBrainEcapaBackend(
+                model_ref=cfg.speechbrain_model,
+                device=cfg.device,
+                model_root=model_root,
+                on_status=cfg.on_status,
+            ),
             on_status=cfg.on_status,
         )
 
@@ -518,4 +646,3 @@ class SpeakerIdentityEngine:
         if not pieces:
             return np.zeros((0,), dtype=np.float32)
         return np.concatenate(pieces, axis=0)
-

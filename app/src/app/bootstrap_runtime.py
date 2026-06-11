@@ -176,7 +176,9 @@ def build_restart_keys() -> set[str]:
         "whisperx_speaker_nemo_model",
         "whisperx_speaker_profile_match_threshold",
         "whisperx_speaker_profile_min_seconds",
+        "whisperx_speaker_profile_reconcile_threshold",
         "whisperx_speaker_profile_store_path",
+        "speaker_marker_style",
         "ffmpeg_dll_dir",
         "source_mode",
         "source_device_indices",
@@ -199,6 +201,21 @@ def build_restart_keys() -> set[str]:
         "transcript_export_include_speaker",
         "transcript_export_dir",
     }
+
+
+_SENSITIVE_SETTING_KEYS = {
+    "whisperx_hf_token",
+}
+
+
+def sanitize_settings_for_log(updates: dict[str, object]) -> dict[str, object]:
+    safe: dict[str, object] = {}
+    for (key, value) in updates.items():
+        if key in _SENSITIVE_SETTING_KEYS:
+            safe[key] = "<redacted>" if str(value or "").strip() else ""
+        else:
+            safe[key] = value
+    return safe
 
 
 def run_qt_app(cfg: RuntimeConfig) -> int:
@@ -359,7 +376,7 @@ def run_qt_app(cfg: RuntimeConfig) -> int:
             logger.info("Persisted settings saved: %s", settings_path)
         except Exception:
             logger.exception("Failed to save persisted settings")
-        logger.info("Settings updated: %s", updates)
+        logger.info("Settings updated: %s", sanitize_settings_for_log(updates))
         ensure_debug_window_state()
         if deferred_restart_updates:
             overlay.push_status("Imported audio replay is still running. Runtime-restart settings were deferred until replay stops.")
