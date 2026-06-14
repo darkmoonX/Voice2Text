@@ -976,7 +976,15 @@ class SubtitleAssembler:
 
     @staticmethod
     def _compact_for_overlap(text: str) -> str:
-        return re.sub(r'\s+', '', str(text or '').lower())
+        compact = re.sub(r'\s+', '', str(text or '').lower())
+        if not compact:
+            return ''
+        try:
+            from app.stt.audio_utils import normalize_chinese_script
+
+            return normalize_chinese_script(compact, 'hans')
+        except Exception:
+            return compact
 
     @staticmethod
     def _should_join_without_space(base: str, incoming: str) -> bool:

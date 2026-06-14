@@ -406,7 +406,12 @@ class WhisperXTranscriber:
             "stability_ratio": float(len(stable) / max(1, len(token_meta))) if token_meta else 1.0,
             "token_count": int(len(token_meta)),
             "stable_token_count": int(len(stable)),
-            "token_timestamps": token_meta[:512],
+            # Keep the full token set. Realtime windows (segment_seconds) produce far fewer than
+            # this, but a single long-audio transcribe() call (e.g. compare direct full-file pass)
+            # can emit thousands; an earlier 512-token cap silently truncated those exports to the
+            # first ~2-3 minutes. Debug-trace compaction (sampling) happens at the event layer,
+            # not here, so this stays the source of truth for transcript export.
+            "token_timestamps": list(token_meta),
             "detected_language": str(lang_detected or ""),
             "alignment_language": str(align_lang or ""),
             "speaker_turns": diarized_turns[:128],
