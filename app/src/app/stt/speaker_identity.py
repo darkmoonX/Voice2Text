@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import math
 from pathlib import Path
 from typing import Callable
 
@@ -38,6 +39,7 @@ class SpeakerIdentityConfig:
     store_path: str
     match_threshold: float
     min_seconds: float
+    reconcile_threshold: float
     model_root: str
     device: str
     hf_token: str
@@ -345,6 +347,7 @@ class SpeakerIdentityEngine:
         self._backend_name = _normalize_backend(config.backend)
         self._match_threshold = float(max(0.0, min(0.999, config.match_threshold)))
         self._min_seconds = float(max(0.2, config.min_seconds))
+        self._reconcile_threshold = float(max(0.0, min(0.999, config.reconcile_threshold)))
         self._on_status = config.on_status
         self._last_stats: dict[str, object] = {}
         self._profile_store: SpeakerProfileStore | None = None
@@ -479,7 +482,17 @@ class SpeakerIdentityEngine:
         skipped_no_profile_count = 0
         staged_count = 0
         promoted_count = 0
-        candidate_min_seconds = float(max(self._min_seconds * 2.0, 4.0))
+        audio_seconds = float(audio_f32.size) / 16000.0
+        candidate_min_seconds, candidate_min_samples, evidence_cap_seconds = self._profile_evidence_policy(
+            audio_seconds=audio_seconds,
+            min_seconds=self._min_seconds,
+        )
+        visible_min_seconds, visible_min_samples = self._visible_profile_policy(
+            audio_seconds=audio_seconds,
+            candidate_min_seconds=candidate_min_seconds,
+            candidate_min_samples=candidate_min_samples,
+        )
+        visible_alias_threshold = float(max(self._match_threshold, min(0.82, self._match_threshold + 0.04)))
         candidate_threshold = float(max(0.0, self._match_threshold - 0.05))
 
         for (speaker, spans) in spans_by_speaker.items():
@@ -491,6 +504,7 @@ class SpeakerIdentityEngine:
             if duration_seconds < self._min_seconds:
                 skipped_short_count += 1
                 continue
+            evidence_seconds = float(min(duration_seconds, evidence_cap_seconds))
             embedding = self._backend.extract_embedding(clip)
             if embedding is None:
                 skipped_no_embedding_count += 1
@@ -499,8 +513,9 @@ class SpeakerIdentityEngine:
                 embedding=embedding,
                 threshold=self._match_threshold,
                 observed_label=speaker,
-                duration_seconds=duration_seconds,
+                duration_seconds=evidence_seconds,
                 candidate_min_seconds=candidate_min_seconds,
+                candidate_min_samples=candidate_min_samples,
                 candidate_threshold=candidate_threshold,
             )
             if not matched.profile_id:
@@ -514,12 +529,21 @@ class SpeakerIdentityEngine:
                             "staged": True,
                             "candidate_total_seconds": float(matched.candidate_total_seconds),
                             "duration_seconds": float(duration_seconds),
+                            "evidence_seconds": float(evidence_seconds),
                             "span_count": int(len(spans)),
                         }
                     )
                 skipped_no_profile_count += 1
                 continue
-            profile_by_local_speaker[speaker] = matched.profile_id
+            visible = self._profile_store.visible_profile_alias(
+                profile_id=matched.profile_id,
+                embedding=embedding,
+                min_total_seconds=visible_min_seconds,
+                min_samples=visible_min_samples,
+                similarity_threshold=visible_alias_threshold,
+            )
+            visible_profile_id = str(visible.get("alias") or matched.profile_id)
+            profile_by_local_speaker[speaker] = visible_profile_id
             if matched.created:
                 created_count += 1
                 if matched.promoted:
@@ -530,10 +554,15 @@ class SpeakerIdentityEngine:
                 {
                     "local_speaker": str(speaker),
                     "profile_speaker": str(matched.profile_id),
+                    "visible_profile_speaker": str(visible_profile_id),
+                    "visible_profile_aliased": bool(visible.get("aliased", False)),
+                    "visible_profile_alias_similarity": float(visible.get("similarity", -1.0) or -1.0),
+                    "visible_profile_mature": bool(visible.get("mature", False)),
                     "similarity": float(matched.similarity),
                     "created": bool(matched.created),
                     "promoted": bool(matched.promoted),
                     "duration_seconds": float(duration_seconds),
+                    "evidence_seconds": float(evidence_seconds),
                     "span_count": int(len(spans)),
                 }
             )
@@ -549,7 +578,48 @@ class SpeakerIdentityEngine:
         stats["promoted_candidate_count"] = int(promoted_count)
         stats["candidate_count"] = int(self._profile_store.candidate_count())
         stats["candidate_min_seconds"] = float(candidate_min_seconds)
+        stats["candidate_min_samples"] = int(candidate_min_samples)
         stats["candidate_threshold"] = float(candidate_threshold)
+        stats["evidence_cap_seconds"] = float(evidence_cap_seconds)
+        stats["visible_min_seconds"] = float(visible_min_seconds)
+        stats["visible_min_samples"] = int(visible_min_samples)
+        stats["visible_alias_threshold"] = float(visible_alias_threshold)
+        stats["visible_alias_count"] = int(
+            sum(1 for row in assignment_rows if isinstance(row, dict) and bool(row.get("visible_profile_aliased", False)))
+        )
+        stats["auto_reconcile_threshold"] = float(self._reconcile_threshold)
+        stats["auto_reconcile"] = {
+            "enabled": bool(self._reconcile_threshold > 0.0),
+            "merged_count": 0,
+            "remap": {},
+        }
+
+        if self._reconcile_threshold > 0.0 and self._profile_store.profile_count() > 1:
+            reconcile_stats = self._profile_store.reconcile_similar_profiles(
+                threshold=float(self._reconcile_threshold)
+            )
+            remap = {
+                str(old): str(new)
+                for (old, new) in dict(reconcile_stats.get("remap") or {}).items()
+                if str(old) and str(new)
+            }
+            if remap:
+                profile_by_local_speaker = {
+                    local: remap.get(profile_id, profile_id)
+                    for (local, profile_id) in profile_by_local_speaker.items()
+                }
+                for row in assignment_rows:
+                    if not isinstance(row, dict):
+                        continue
+                    profile_id = str(row.get("profile_speaker") or "")
+                    if profile_id in remap:
+                        row["profile_reconciled_from"] = profile_id
+                        row["profile_speaker"] = remap[profile_id]
+                    visible_id = str(row.get("visible_profile_speaker") or "")
+                    if visible_id in remap:
+                        row["visible_profile_reconciled_from"] = visible_id
+                        row["visible_profile_speaker"] = remap[visible_id]
+            stats["auto_reconcile"] = reconcile_stats
 
         if not profile_by_local_speaker:
             stats["profile_count"] = int(self._profile_store.profile_count())
@@ -586,9 +656,53 @@ class SpeakerIdentityEngine:
                 f"matched={stats.get('matched_count', 0)}; created={stats.get('created_count', 0)}; "
                 f"staged={stats.get('staged_candidate_count', 0)}; promoted={stats.get('promoted_candidate_count', 0)}; "
                 f"candidates={stats.get('candidate_count', 0)}; "
+                f"candidate_min={float(stats.get('candidate_min_seconds', 0.0) or 0.0):.2f}s/"
+                f"{int(stats.get('candidate_min_samples', 0) or 0)}x; "
+                f"visible_min={float(stats.get('visible_min_seconds', 0.0) or 0.0):.2f}s/"
+                f"{int(stats.get('visible_min_samples', 0) or 0)}x; "
+                f"visible_alias={stats.get('visible_alias_count', 0)}; "
+                f"evidence_cap={float(stats.get('evidence_cap_seconds', 0.0) or 0.0):.2f}s; "
                 f"skip_short={stats.get('skipped_short_count', 0)}; profile_total={stats.get('profile_count', 0)}"
             )
         return segments
+
+    @staticmethod
+    def _profile_evidence_policy(*, audio_seconds: float, min_seconds: float) -> tuple[float, int, float]:
+        """Return candidate evidence thresholds for long direct chunks vs rolling windows.
+
+        Rolling windows are heavily overlapped, so raw local-speaker duration is
+        not unique evidence. Direct chunks are much longer and should keep the
+        older quick-promotion behavior so reference exports can get speaker
+        labels early.
+        """
+        window_seconds = float(max(0.0, audio_seconds))
+        base_min_seconds = float(max(float(min_seconds) * 3.0, 6.0))
+        if window_seconds <= 15.0:
+            min_samples = max(8, int(math.ceil(window_seconds / max(0.5, float(min_seconds)))))
+            evidence_cap = float(max(0.5, min(1.5, float(min_seconds))))
+            return base_min_seconds, int(min_samples), evidence_cap
+        return base_min_seconds, 1, float(max(base_min_seconds, window_seconds))
+
+    @staticmethod
+    def _visible_profile_policy(
+        *,
+        audio_seconds: float,
+        candidate_min_seconds: float,
+        candidate_min_samples: int,
+    ) -> tuple[float, int]:
+        """Return maturity thresholds before a profile becomes a stable visible identity.
+
+        Long direct chunks are reference-style processing and should label early.
+        Short rolling windows need more repeated evidence because the same audio
+        appears in many overlapping windows.
+        """
+        window_seconds = float(max(0.0, audio_seconds))
+        if window_seconds <= 15.0:
+            return (
+                float(max(candidate_min_seconds * 4.0, 24.0)),
+                int(max(candidate_min_samples * 2, 16)),
+            )
+        return (0.0, 1)
 
     def _build_backend(self, cfg: SpeakerIdentityConfig) -> _BaseEmbeddingBackend:
         model_root = Path(str(cfg.model_root or ".")).resolve()

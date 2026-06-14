@@ -51,11 +51,14 @@ from .settings.widgets import (
 )
 
 
+def _keep_above_overlay(dialog: QDialog) -> None:
+    """Keep operator dialogs above the always-on-top subtitle overlay."""
+    dialog.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, True)
+
+
 class TranscriptExportDialog(QDialog):
     _FORMAT_ITEMS: tuple[tuple[str, str], ...] = (
         ("txt", "Text (*.txt)"),
-        ("srt", "SubRip (*.srt)"),
-        ("json", "JSON (*.json)"),
     )
 
     def __init__(
@@ -69,6 +72,7 @@ class TranscriptExportDialog(QDialog):
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
+        _keep_above_overlay(self)
         zh = str(lang or "").strip().lower() == "zh"
         self.setWindowTitle("匯出字幕" if zh else "Export Subtitle")
         self.setMinimumWidth(420)
@@ -80,20 +84,16 @@ class TranscriptExportDialog(QDialog):
         self._auto_export_check.setChecked(bool(auto_export_enabled))
         form.addRow("自動匯出" if zh else "Auto export", self._auto_export_check)
 
-        self._format_combo = QComboBox()
-        for (fmt, label) in self._FORMAT_ITEMS:
-            self._format_combo.addItem(label, fmt)
-        idx = self._format_combo.findData(default_format)
-        self._format_combo.setCurrentIndex(max(0, idx))
-        form.addRow("格式" if zh else "Format", self._format_combo)
+        self._format_label = QLabel("TXT")
+        form.addRow("格式" if zh else "Format", self._format_label)
 
-        self._timestamps_check = QCheckBox("包含時間戳" if zh else "Include timestamps")
-        self._timestamps_check.setChecked(bool(include_timestamps))
-        form.addRow("", self._timestamps_check)
-
-        self._speaker_check = QCheckBox("包含說話者標記" if zh else "Include speaker labels")
-        self._speaker_check.setChecked(bool(include_speaker))
-        form.addRow("", self._speaker_check)
+        description = QLabel(
+            "匯出目前主畫面顯示的字幕文字。時間軸/SRT/JSON 字幕檔匯出列為後續功能。"
+            if zh
+            else "Exports the subtitle text currently shown in the main overlay. Timed SRT/JSON subtitle export is deferred."
+        )
+        description.setWordWrap(True)
+        form.addRow("", description)
 
         root.addLayout(form)
 
@@ -108,15 +108,15 @@ class TranscriptExportDialog(QDialog):
 
     @property
     def include_timestamps(self) -> bool:
-        return self._timestamps_check.isChecked()
+        return False
 
     @property
     def include_speaker(self) -> bool:
-        return self._speaker_check.isChecked()
+        return True
 
     @property
     def export_format(self) -> str:
-        return str(self._format_combo.currentData() or "txt")
+        return "txt"
 
 
 class SettingsDialog(QDialog):
@@ -132,6 +132,7 @@ class SettingsDialog(QDialog):
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
+        _keep_above_overlay(self)
         self._config = config
         self._default_config = RuntimeConfig()
         self._devices = list(devices)
@@ -484,32 +485,21 @@ class SettingsDialog(QDialog):
         default_dir = str(getattr(self._config, "transcript_export_dir", "") or "").strip()
         if not default_dir:
             default_dir = str((Path(self._config.log_dir).resolve().parent / "exports"))
-        filters = "Text (*.txt);;SubRip (*.srt);;JSON (*.json)"
-        default_filter_map = {
-            "txt": "Text (*.txt)",
-            "srt": "SubRip (*.srt)",
-            "json": "JSON (*.json)",
-        }
-        default_name = f"transcript.{self._transcript_export_default_format}"
-        path, selected_filter = QFileDialog.getSaveFileName(
+        filters = "Text (*.txt)"
+        default_name = "transcript.txt"
+        path, _selected_filter = QFileDialog.getSaveFileName(
             self,
             "Export Transcript",
             str(Path(default_dir) / default_name),
             filters,
-            default_filter_map.get(self._transcript_export_default_format, "Text (*.txt)"),
+            "Text (*.txt)",
         )
         if not path:
             return
-        selected = selected_filter.lower()
-        if "srt" in selected:
-            fmt = "srt"
-        elif "json" in selected:
-            fmt = "json"
-        else:
-            fmt = "txt"
+        fmt = "txt"
         suffix = Path(path).suffix.lower()
-        if suffix not in {".txt", ".srt", ".json"}:
-            path = str(Path(path).with_suffix(f".{fmt}"))
+        if suffix != ".txt":
+            path = str(Path(path).with_suffix(".txt"))
         try:
             written = callback(
                 path,

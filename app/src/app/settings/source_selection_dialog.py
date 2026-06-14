@@ -31,6 +31,7 @@ class SourceSelectionDialog(QDialog):
         ui_language: str = "zh",
     ) -> None:
         super().__init__(parent)
+        self.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, True)
         self._lang = normalize_ui_language(ui_language)
         self._entries = list(entries)
         self._refresh_entries_callback = refresh_entries_callback

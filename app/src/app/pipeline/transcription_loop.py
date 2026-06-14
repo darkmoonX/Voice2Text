@@ -277,6 +277,8 @@ class TranscriptionLoopEngine:
                     key: round(float(value), 4) for (key, value) in timing.items()
                 }
                 if bool(getattr(self._deps.config, "debug_mode", False)):
+                    history_tail_max_words = 160
+                    history_count = int((merge_diagnostics or {}).get("history_count_after", 0) or 0)
                     self._deps.emit_debug_event(
                         {
                             "provider": getattr(self._deps.config, "stt_provider", "unknown"),
@@ -285,7 +287,9 @@ class TranscriptionLoopEngine:
                             ),
                             "raw_text": source_text,
                             "merged_text": source_rolling,
-                            "history_text": self._deps.subtitle_assembler.get_history_text(),
+                            "history_text": self._deps.subtitle_assembler.get_history_tail_text(history_tail_max_words),
+                            "history_text_truncated": history_count > history_tail_max_words,
+                            "history_text_max_words": history_tail_max_words,
                             "stable_text": self._deps.subtitle_assembler.get_stable_text(),
                             "partial_text": self._deps.subtitle_assembler.get_partial_text(),
                             "assembler_summary": self._deps.subtitle_assembler.get_debug_summary(),
@@ -422,6 +426,9 @@ class TranscriptionLoopEngine:
             return
         if not isinstance(merge_diagnostics, dict) or not merge_diagnostics:
             return
+        history_dedupe = merge_diagnostics.get("history_dedupe")
+        if not isinstance(history_dedupe, dict):
+            history_dedupe = {}
         self._deps.emit_status(
             "[merge-timing] "
             f"window={int(window_index)}; "
@@ -440,8 +447,16 @@ class TranscriptionLoopEngine:
             f"history_after={int(merge_diagnostics.get('history_count_after', 0) or 0)}; "
             f"stable_after={int(merge_diagnostics.get('stable_count_after', 0) or 0)}; "
             f"partial_after={int(merge_diagnostics.get('partial_count_after', 0) or 0)}; "
+            f"moved_to_history={int(merge_diagnostics.get('moved_to_history_count', 0) or 0)}; "
+            f"rolling_source={str(merge_diagnostics.get('rolling_base_source', ''))}; "
+            f"rolling_base_chars={int(merge_diagnostics.get('rolling_base_chars', 0) or 0)}; "
+            f"rolling_committed_chars={int(merge_diagnostics.get('rolling_committed_chars', 0) or 0)}; "
             f"history_chars={int(merge_diagnostics.get('history_chars', 0) or 0)}; "
             f"merged_chars={int(merge_diagnostics.get('merged_chars', 0) or 0)}; "
+            f"dedupe_mode={str(history_dedupe.get('mode', ''))}; "
+            f"dedupe_input={int(history_dedupe.get('input_count', 0) or 0)}; "
+            f"dedupe_tail={int(history_dedupe.get('tail_count', 0) or 0)}; "
+            f"dedupe_moved={int(history_dedupe.get('moved_count', 0) or 0)}; "
             f"empty={str(bool(merge_diagnostics.get('returned_empty', False))).lower()}"
         )
 

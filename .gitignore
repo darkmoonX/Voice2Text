@@ -4,7 +4,6 @@ __pycache__/
 .vscode/
 *.md
 !*README.md
-!docs/agents/git-workflow.md
 
 app/.venv/
 app/logs/
@@ -19,6 +18,8 @@ app/src/__pycache__/
 app/native/audio_bridge/build*
 app/src/tests/
 app/scripts/
+
+./docs/tasks
 
 test_data
 

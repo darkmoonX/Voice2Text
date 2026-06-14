@@ -24,9 +24,81 @@ def format_download_progress(provider: str, model_name: str, downloaded: int, to
         filled = max(0, min(bar_width, filled))
         bar = '#' * filled + '-' * (bar_width - filled)
         return f'[download] {provider} downloading: {model_name} [{bar}] {percent:.0f}% ({downloaded_mb:.1f}/{total_mb:.1f} MB)'
-    cursor = int(downloaded_mb) % bar_width
-    bar = '-' * cursor + '>' + '-' * max(0, bar_width - cursor - 1)
-    return f'[download] {provider} downloading: {model_name} [{bar}] ({downloaded_mb:.1f} MB)'
+    return f'[download] {provider} downloading: {model_name} ({downloaded_mb:.1f} MB downloaded; total unknown)'
+
+
+def estimate_hf_files_total(
+    *,
+    repo_id: str,
+    allow_patterns: list[str],
+    local_dir: str | Path | None = None,
+    revision: Optional[str] = None,
+    token: Optional[str | bool] = None,
+    timeout_seconds: int = 60,
+) -> tuple[int | None, int]:
+    """Best-effort HF file total preflight without downloading files.
+
+    Returns ``(total_bytes, existing_bytes)``. ``total_bytes`` is ``None`` when
+    at least one matching file size cannot be resolved. ``existing_bytes`` is
+    capped to known file sizes when possible and can be used as a baseline.
+    """
+    try:
+        from huggingface_hub import HfApi, hf_hub_url
+    except Exception:
+        return (None, 0)
+
+    token_value = str(token or "").strip() if isinstance(token, str) else ""
+    auth_headers: dict[str, str] = {}
+    if token_value:
+        auth_headers["Authorization"] = f"Bearer {token_value}"
+
+    try:
+        info = HfApi().model_info(repo_id=repo_id, revision=revision, token=token)
+    except Exception:
+        return (None, 0)
+
+    total = 0
+    known_total = True
+    existing = 0
+    base_dir = Path(local_dir) if local_dir is not None else None
+
+    for item in list(getattr(info, "siblings", []) or []):
+        filename = str(getattr(item, "rfilename", "") or "").strip()
+        if not filename:
+            continue
+        if allow_patterns and (not any((fnmatch(filename, pattern) for pattern in allow_patterns))):
+            continue
+
+        size_value = getattr(item, "size", None)
+        size_num: int | None = int(size_value) if isinstance(size_value, int) and size_value > 0 else None
+        if size_num is None:
+            try:
+                url = hf_hub_url(repo_id=repo_id, filename=filename, revision=revision)
+                size_num = _probe_remote_file_size(
+                    url=url,
+                    timeout_seconds=timeout_seconds,
+                    headers=auth_headers,
+                )
+            except Exception:
+                size_num = None
+
+        if size_num is None:
+            known_total = False
+        else:
+            total += int(size_num)
+
+        if base_dir is not None:
+            local_path = base_dir / filename
+            if local_path.exists():
+                try:
+                    disk_size = max(0, int(local_path.stat().st_size))
+                except Exception:
+                    disk_size = 0
+                existing += min(disk_size, int(size_num)) if size_num else disk_size
+
+    if total <= 0 or (not known_total):
+        return (None, existing)
+    return (total, existing)
 
 
 def _probe_remote_file_size(

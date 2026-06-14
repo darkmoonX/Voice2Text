@@ -63,6 +63,7 @@ class SpeakerProfileStore:
         observed_label: str,
         duration_seconds: float,
         candidate_min_seconds: float = 0.0,
+        candidate_min_samples: int = 1,
         candidate_threshold: float | None = None,
     ) -> SpeakerMatchResult:
         normalized = _normalize_embedding(embedding)
@@ -117,6 +118,7 @@ class SpeakerProfileStore:
                     label=label,
                     duration_seconds=duration_seconds,
                     candidate_min_seconds=min_candidate_seconds,
+                    candidate_min_samples=max(1, int(candidate_min_samples)),
                     candidate_threshold=(
                         float(max(0.0, min(0.999, candidate_threshold)))
                         if candidate_threshold is not None
@@ -153,6 +155,93 @@ class SpeakerProfileStore:
                 }
                 for item in self._candidates
             ]
+
+    def visible_profile_alias(
+        self,
+        *,
+        profile_id: str,
+        embedding: np.ndarray,
+        min_total_seconds: float,
+        min_samples: int,
+        similarity_threshold: float,
+    ) -> dict[str, object]:
+        """Return a mature display profile for a low-evidence profile when safe.
+
+        Raw profiles are intentionally more granular than visible speaker labels:
+        a new profile can exist for diagnostics while still being displayed as a
+        mature neighbouring identity if its embedding is close enough.
+        """
+        normalized_id = str(profile_id or "").strip()
+        if not normalized_id:
+            return {"profile_id": "", "alias": "", "aliased": False, "similarity": -1.0, "mature": False}
+        query = _normalize_embedding(embedding)
+        if query.size == 0:
+            return {
+                "profile_id": normalized_id,
+                "alias": normalized_id,
+                "aliased": False,
+                "similarity": -1.0,
+                "mature": False,
+            }
+        min_seconds = float(max(0.0, min_total_seconds))
+        min_sample_count = int(max(1, min_samples))
+        threshold = float(max(0.0, min(0.999, similarity_threshold)))
+        with self._lock:
+            target: dict[str, object] | None = None
+            mature: list[dict[str, object]] = []
+            for profile in self._profiles:
+                pid = str(profile.get("id") or "")
+                is_mature = (
+                    float(profile.get("total_seconds", 0.0) or 0.0) >= min_seconds
+                    and int(profile.get("samples", 0) or 0) >= min_sample_count
+                )
+                if pid == normalized_id:
+                    target = profile
+                elif is_mature:
+                    mature.append(profile)
+            if target is None:
+                return {
+                    "profile_id": normalized_id,
+                    "alias": normalized_id,
+                    "aliased": False,
+                    "similarity": -1.0,
+                    "mature": False,
+                }
+            target_mature = (
+                float(target.get("total_seconds", 0.0) or 0.0) >= min_seconds
+                and int(target.get("samples", 0) or 0) >= min_sample_count
+            )
+            if target_mature or not mature:
+                return {
+                    "profile_id": normalized_id,
+                    "alias": normalized_id,
+                    "aliased": False,
+                    "similarity": 1.0 if target_mature else -1.0,
+                    "mature": bool(target_mature),
+                }
+            best_id = ""
+            best_similarity = -1.0
+            for profile in mature:
+                centroid = _normalize_embedding(np.asarray(profile.get("centroid") or [], dtype=np.float32))
+                similarity = _cosine_similarity(centroid, query)
+                if similarity > best_similarity:
+                    best_similarity = similarity
+                    best_id = str(profile.get("id") or "")
+            if best_id and best_similarity >= threshold:
+                return {
+                    "profile_id": normalized_id,
+                    "alias": best_id,
+                    "aliased": True,
+                    "similarity": float(best_similarity),
+                    "mature": False,
+                }
+            return {
+                "profile_id": normalized_id,
+                "alias": normalized_id,
+                "aliased": False,
+                "similarity": float(best_similarity),
+                "mature": False,
+            }
 
     def reconcile_similar_profiles(self, *, threshold: float) -> dict[str, object]:
         """Merge highly similar profiles and return a remap from removed IDs to kept IDs."""
@@ -235,6 +324,7 @@ class SpeakerProfileStore:
         label: str,
         duration_seconds: float,
         candidate_min_seconds: float,
+        candidate_min_samples: int,
         candidate_threshold: float,
         best_profile_similarity: float,
     ) -> SpeakerMatchResult:
@@ -265,7 +355,8 @@ class SpeakerProfileStore:
                     labels.append(label)
                 candidate["observed_labels"] = labels[-12:]
             total_seconds = float(candidate.get("total_seconds", 0.0) or 0.0)
-            if total_seconds >= candidate_min_seconds:
+            samples = int(candidate.get("samples", 0) or 0)
+            if total_seconds >= candidate_min_seconds and samples >= max(1, int(candidate_min_samples)):
                 del self._candidates[best_candidate_index]
                 return self._create_profile_locked(
                     normalized=_normalize_embedding(np.asarray(candidate.get("centroid") or [], dtype=np.float32)),
@@ -275,7 +366,7 @@ class SpeakerProfileStore:
                     similarity=best_candidate_similarity,
                     promoted=True,
                     observed_labels=list(candidate.get("observed_labels") or []),
-                    samples=int(candidate.get("samples", 0) or 0),
+                    samples=samples,
                 )
             return SpeakerMatchResult(
                 profile_id="",
@@ -289,7 +380,7 @@ class SpeakerProfileStore:
         candidate_id = f"CAND_{int(self._next_candidate_index):03d}"
         self._next_candidate_index += 1
         total_seconds = float(max(0.0, duration_seconds))
-        if total_seconds >= candidate_min_seconds:
+        if total_seconds >= candidate_min_seconds and max(1, int(candidate_min_samples)) <= 1:
             return self._create_profile_locked(
                 normalized=normalized,
                 update_weight=update_weight,

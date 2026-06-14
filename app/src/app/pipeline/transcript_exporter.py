@@ -17,6 +17,7 @@ class TranscriptExportOptions:
     include_timestamps: bool
     include_speaker: bool
     output_dir: str
+    display_text_only: bool = False
 
 
 class TranscriptExporterSession:
@@ -86,6 +87,14 @@ class TranscriptExporterSession:
         stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         base = f"transcript_{stamp}"
         written: list[Path] = []
+        if self._options.display_text_only:
+            path = output_dir / f"{base}.txt"
+            path.write_text(last_source.strip() + "\n", encoding="utf-8")
+            written.append(path)
+            self._emit("Displayed subtitle text exported: " + str(path))
+            with self._lock:
+                self._finalized_paths = list(written)
+            return written
         for fmt in self._options.formats:
             if fmt == "txt":
                 path = output_dir / f"{base}.txt"
@@ -189,6 +198,26 @@ class TranscriptExporterSession:
         self._emit(f"Transcript exported: {target}")
         return target
 
+    def export_display_text_file(self, *, output_path: str) -> Path:
+        """Write the latest main overlay text exactly as displayed."""
+        if not self._options.enabled:
+            raise RuntimeError("Transcript exporter is disabled.")
+        target = Path(str(output_path or "").strip())
+        if not target.name:
+            raise ValueError("Export path is empty.")
+        if target.suffix.lower() != ".txt":
+            target = target.with_suffix(".txt")
+        target = target.resolve()
+        target.parent.mkdir(parents=True, exist_ok=True)
+
+        with self._lock:
+            display_text = str(self._last_source or "").strip()
+        if not display_text:
+            raise RuntimeError("No displayed subtitle text available yet.")
+        target.write_text(display_text + "\n", encoding="utf-8")
+        self._emit(f"Displayed subtitle text exported: {target}")
+        return target
+
     def _ingest_tokens(self, meta: dict[str, object]) -> None:
         rows = meta.get("token_timestamps")
         if not isinstance(rows, list):
@@ -203,7 +232,9 @@ class TranscriptExporterSession:
             end = self._to_float(row.get("absolute_end"), self._to_float(row.get("end"), -1.0))
             if start < 0.0 or end <= start:
                 continue
-            speaker = self._normalize_export_speaker(str(row.get("speaker") or "").strip())
+            speaker = self._normalize_export_speaker(
+                str(row.get("profile_speaker") or row.get("speaker") or "").strip()
+            )
             key = (int(round(start * 1000.0)), int(round(end * 1000.0)), word, speaker)
             if key not in self._tokens:
                 self._tokens[key] = {

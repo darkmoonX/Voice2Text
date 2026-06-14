@@ -13,7 +13,7 @@ import urllib.request
 
 from ..model_paths import library_model_dir
 from .audio_utils import has_enough_signal, normalize_chinese_script, normalize_language_hint, pcm16_to_mono_float, resample
-from .model_download import download_hf_files_with_progress, download_hf_snapshot_with_progress, emit_progress, format_download_progress
+from .model_download import download_hf_files_with_progress, download_hf_snapshot_with_progress, emit_progress, estimate_hf_files_total, format_download_progress
 from .speaker_identity import SpeakerIdentityConfig, SpeakerIdentityEngine
 import re
 
@@ -45,6 +45,7 @@ class WhisperXTranscriber:
         speaker_nemo_model: str = "nvidia/speakerverification_en_titanet_large",
         speaker_profile_match_threshold: float = 0.72,
         speaker_profile_min_seconds: float = 0.8,
+        speaker_profile_reconcile_threshold: float = 0.52,
         speaker_profile_store_path: str = "",
         speaker_marker_style: str = "spk",
         auto_download: bool = True,
@@ -116,6 +117,9 @@ class WhisperXTranscriber:
         ).strip()
         self._speaker_profile_match_threshold = float(max(0.0, min(0.999, speaker_profile_match_threshold)))
         self._speaker_profile_min_seconds = float(max(0.2, speaker_profile_min_seconds))
+        self._speaker_profile_reconcile_threshold = float(
+            max(0.0, min(0.999, speaker_profile_reconcile_threshold))
+        )
         self._speaker_profile_store_path = self._resolve_speaker_profile_store_path(speaker_profile_store_path)
         marker_style = str(speaker_marker_style or "").strip().lower()
         self._speaker_marker_style = "arrow" if marker_style in {"arrow", "arrows", ">>"} else "spk"
@@ -183,6 +187,7 @@ class WhisperXTranscriber:
                     store_path=self._speaker_profile_store_path,
                     match_threshold=self._speaker_profile_match_threshold,
                     min_seconds=self._speaker_profile_min_seconds,
+                    reconcile_threshold=self._speaker_profile_reconcile_threshold,
                     model_root=str(self._model_root),
                     device=self._diarization_device,
                     hf_token=self._resolve_hf_token() or "",
@@ -313,7 +318,7 @@ class WhisperXTranscriber:
         provider_timing["final_segment_count"] = int(len(aligned))
 
         stage_started_at = time.perf_counter()
-        token_meta: list[dict[str, float]] = []
+        token_meta: list[dict[str, object]] = []
         words_fallback: list[str] = []
         diarized_turns: list[dict[str, object]] = []
         if self._enable_diarization:
@@ -340,19 +345,36 @@ class WhisperXTranscriber:
         text = self._format_diarized_text(aligned) if self._enable_diarization else ""
         if not text:
             text = " ".join((str(seg.get("text") or "").strip() for seg in aligned if str(seg.get("text") or "").strip())).strip()
+        require_profile_identity = self._require_profile_identity_for_display()
         for seg in aligned:
-            seg_speaker = self._resolve_segment_speaker(seg, prefer_profile=True) if isinstance(seg, dict) else None
+            seg_speaker = (
+                self._resolve_display_segment_speaker(seg)
+                if isinstance(seg, dict)
+                else None
+            )
+            local_seg_speaker = (
+                self._resolve_segment_speaker(seg, prefer_profile=False)
+                if isinstance(seg, dict)
+                else None
+            )
             for wd in (seg.get("words") or []):
                 try:
                     start = float(wd.get("start"))
                     end = float(wd.get("end"))
                     score = float(wd.get("score")) if wd.get("score") is not None else 0.0
                     word_txt = str(wd.get("word") or "").strip()
-                    word_speaker = self._resolve_word_speaker(
+                    local_word_speaker = self._resolve_word_speaker(
+                        wd,
+                        seg if isinstance(seg, dict) else {},
+                        local_seg_speaker,
+                        prefer_profile=False,
+                    )
+                    profile_word_speaker = self._resolve_word_speaker(
                         wd,
                         seg if isinstance(seg, dict) else {},
                         seg_speaker,
                         prefer_profile=True,
+                        require_profile=require_profile_identity,
                     )
                     token_meta.append(
                         {
@@ -360,7 +382,9 @@ class WhisperXTranscriber:
                             "end": end,
                             "score": score,
                             "word": word_txt,
-                            "speaker": word_speaker,
+                            "speaker": profile_word_speaker,
+                            "profile_speaker": profile_word_speaker,
+                            "local_speaker": local_word_speaker,
                         }
                     )
                     if word_txt:
@@ -727,6 +751,7 @@ class WhisperXTranscriber:
             local_dir=align_local_dir,
             provider="whisperx-align",
             model_name=(explicit_model or language_code),
+            token=self._resolve_hf_token() or None,
         )
         kwargs: dict[str, object] = {
             "language_code": language_code,
@@ -743,11 +768,17 @@ class WhisperXTranscriber:
         if resolved_model_name:
             kwargs["model_name"] = resolved_model_name
             model_selection = resolved_model_name
+        expected_external_total = self._estimate_alignment_external_download_total(
+            repo_id=align_repo_id,
+            local_dir=align_local_dir,
+            token=self._resolve_hf_token() or None,
+        )
         model_a, metadata = self._run_with_torch_hub_download_progress(
             f"align-{language_code}",
             lambda: self._run_with_external_download_progress(
                 f"align-{language_code}",
                 lambda: self._whisperx.load_align_model(**kwargs),
+                expected_total_bytes=expected_external_total,
             ),
         )
         self._align_cache[cache_key] = (model_a, metadata)
@@ -776,6 +807,39 @@ class WhisperXTranscriber:
         if explicit_model:
             return explicit_model
         return ""
+
+    def _estimate_alignment_external_download_total(self, *, repo_id: str, local_dir: Path, token: str | None = None) -> int | None:
+        if not repo_id or (not self._auto_download):
+            return None
+        if self._is_local_hf_model_dir_ready(local_dir):
+            return None
+        total, existing = estimate_hf_files_total(
+            repo_id=repo_id,
+            local_dir=local_dir,
+            allow_patterns=self._hf_alignment_allow_patterns(),
+            token=token,
+            timeout_seconds=20,
+        )
+        if total is None or total <= 0:
+            return None
+        remaining = max(0, int(total) - max(0, int(existing)))
+        return remaining or None
+
+    @staticmethod
+    def _hf_alignment_allow_patterns() -> list[str]:
+        return [
+            "*.bin",
+            "*.json",
+            "*.safetensors",
+            "*.model",
+            "*.txt",
+            "*.yaml",
+            "*.yml",
+            "*.pt",
+            "*.ckpt",
+            "*.index",
+            "*.onnx",
+        ]
 
     def _alignment_root_dir(self) -> Path:
         root = self._model_root / "align"
@@ -1496,7 +1560,7 @@ class WhisperXTranscriber:
             text = str(raw.get("text") or "").strip()
             if not text:
                 continue
-            speaker = self._resolve_segment_speaker(raw, prefer_profile=False)
+            speaker = self._resolve_display_segment_speaker(raw)
             display_speaker = prev_speaker
             if speaker:
                 saw_any_speaker = True
@@ -1626,6 +1690,45 @@ class WhisperXTranscriber:
             return 0
         return len(re.findall(r"(?m)^\s*(?:>>|S\d+:|\[spk_\d+\])\s+", text, flags=re.IGNORECASE))
 
+    def _require_profile_identity_for_display(self) -> bool:
+        if not bool(getattr(self, "_enable_diarization", False)):
+            return False
+        if not bool(getattr(self, "_speaker_profile_enabled", False)):
+            return False
+        if getattr(self, "_speaker_identity_engine", None) is None:
+            return False
+        stats = getattr(self, "_last_speaker_profile_stats", {})
+        status = str((stats if isinstance(stats, dict) else {}).get("status") or "").strip().lower()
+        if status in {
+            "skip_engine_unavailable",
+            "skip_backend_unavailable",
+            "skip_disabled",
+            "skip_store_unavailable",
+        }:
+            return False
+        if status.startswith("skip_backend") or status.startswith("skip_engine"):
+            return False
+        return True
+
+    def _resolve_display_segment_speaker(self, segment: dict) -> str | None:
+        if self._require_profile_identity_for_display():
+            profile_speaker = str(segment.get("profile_speaker") or "").strip()
+            if profile_speaker:
+                return profile_speaker
+            words = segment.get("words")
+            if isinstance(words, list):
+                counts: dict[str, int] = {}
+                for item in words:
+                    if not isinstance(item, dict):
+                        continue
+                    label = str(item.get("profile_speaker") or "").strip()
+                    if label:
+                        counts[label] = counts.get(label, 0) + 1
+                if counts:
+                    return max(counts.items(), key=lambda pair: pair[1])[0]
+            return None
+        return self._resolve_segment_speaker(segment, prefer_profile=False)
+
     @staticmethod
     def _resolve_segment_speaker(segment: dict, *, prefer_profile: bool = True) -> str | None:
         profile_speaker = str(segment.get("profile_speaker") or "").strip()
@@ -1673,6 +1776,7 @@ class WhisperXTranscriber:
         segment_speaker: str | None = None,
         *,
         prefer_profile: bool = False,
+        require_profile: bool = False,
     ) -> str:
         if prefer_profile:
             profile_word = str(word.get("profile_speaker") or "").strip()
@@ -1683,6 +1787,8 @@ class WhisperXTranscriber:
             profile_segment = str(segment.get("profile_speaker") or "").strip()
             if profile_segment:
                 return profile_segment
+            if require_profile:
+                return ""
         local_word = str(word.get("speaker") or "").strip()
         if local_word:
             return local_word
@@ -1773,7 +1879,7 @@ class WhisperXTranscriber:
             download_hf_files_with_progress(
                 repo_id=repo_id,
                 output_dir=str(local_dir),
-                allow_patterns=["*.bin", "*.json", "*.safetensors", "*.model", "*.txt", "*.yaml", "*.yml", "*.pt", "*.ckpt", "*.index", "*.onnx"],
+                allow_patterns=self._hf_alignment_allow_patterns(),
                 progress_callback=self._progress_callback,
                 provider=provider,
                 model_name=model_name,
@@ -1785,7 +1891,7 @@ class WhisperXTranscriber:
                 download_hf_snapshot_with_progress(
                     repo_id=repo_id,
                     output_dir=str(local_dir),
-                    allow_patterns=["*.bin", "*.json", "*.safetensors", "*.model", "*.txt", "*.yaml", "*.yml", "*.pt", "*.ckpt", "*.index", "*.onnx"],
+                    allow_patterns=self._hf_alignment_allow_patterns(),
                     progress_callback=self._progress_callback,
                     provider=provider,
                     model_name=model_name,
@@ -1834,6 +1940,8 @@ class WhisperXTranscriber:
             return ''
         try:
             alignment_mod = getattr(self._whisperx, 'alignment', None)
+            if alignment_mod is None:
+                import whisperx.alignment as alignment_mod  # type: ignore
             if alignment_mod is None:
                 return ''
             mapping_hf = getattr(alignment_mod, 'DEFAULT_ALIGN_MODELS_HF', None)
@@ -1940,7 +2048,7 @@ class WhisperXTranscriber:
     def _current_probe_size(self) -> int:
         return sum(self._safe_dir_size(root) for root in self._download_probe_roots)
 
-    def _run_with_external_download_progress(self, label: str, fn):
+    def _run_with_external_download_progress(self, label: str, fn, expected_total_bytes: int | None = None):
         if self._progress_callback is None:
             return fn()
 
@@ -1977,9 +2085,10 @@ class WhisperXTranscriber:
                         done.wait(0.6)
                         continue
                     state["last_delta"] = delta
+                    display_delta = min(delta, expected_total_bytes) if expected_total_bytes else delta
                     emit_progress(
                         self._progress_callback,
-                        format_download_progress("download", f"whisperx:{label}", delta, None),
+                        format_download_progress("download", f"whisperx:{label}", display_delta, expected_total_bytes),
                     )
                 except Exception as exc:
                     emit_progress(self._progress_callback, f"download monitor skipped: {exc}")
@@ -2000,12 +2109,13 @@ class WhisperXTranscriber:
                 return
             after_size = self._current_probe_size()
             final_delta = max(0, after_size - before_size)
-            total = max(state["peak_delta"], final_delta, 0)
-            if total > 0 or final_delta > 0:
+            observed_delta = max(state["peak_delta"], final_delta, 0)
+            if observed_delta > 0 or final_delta > 0:
                 try:
+                    display_delta = min(observed_delta, expected_total_bytes) if expected_total_bytes else observed_delta
                     emit_progress(
                         self._progress_callback,
-                        format_download_progress("download", f"whisperx:{label}", final_delta, None),
+                        format_download_progress("download", f"whisperx:{label}", display_delta, expected_total_bytes),
                     )
                 except Exception as exc:
                     emit_progress(self._progress_callback, f"download final-progress skipped: {exc}")

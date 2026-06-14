@@ -268,7 +268,7 @@ class TranscriptionController(QObject):
         TranscriptionLoopEngine(deps).run(self._running)
 
     def _build_transcript_exporter(self) -> TranscriptExporterSession | None:
-        raw_formats = str(getattr(self._config, "transcript_export_formats", "txt,srt,json") or "txt,srt,json")
+        raw_formats = "txt"
         formats: list[str] = []
         for token in raw_formats.split(","):
             item = token.strip().lower()
@@ -285,6 +285,7 @@ class TranscriptionController(QObject):
             include_timestamps=bool(getattr(self._config, "transcript_export_include_timestamps", True)),
             include_speaker=bool(getattr(self._config, "transcript_export_include_speaker", True)),
             output_dir=output_dir,
+            display_text_only=True,
         )
         return TranscriptExporterSession(options, on_status=self._emit_status)
 
@@ -314,12 +315,7 @@ class TranscriptionController(QObject):
         exporter = self._transcript_exporter
         if exporter is None:
             raise RuntimeError("Transcript exporter is unavailable; start capture first.")
-        written = exporter.export_single_file(
-            output_path=output_path,
-            format_hint=export_format,
-            include_timestamps=bool(getattr(self._config, "transcript_export_include_timestamps", True)),
-            include_speaker=bool(getattr(self._config, "transcript_export_include_speaker", True)),
-        )
+        written = exporter.export_display_text_file(output_path=output_path)
         return str(written)
 
     def _restore_temporary_source_if_needed(self) -> None:

@@ -8,6 +8,7 @@ Time-aligned merge strategy:
 from __future__ import annotations
 
 from dataclasses import dataclass
+from difflib import SequenceMatcher
 import re
 import time
 
@@ -25,6 +26,8 @@ class _WordState:
 
 class SubtitleAssembler:
     _CJK_MAX_COMPACT_CHARS = 18
+    _HISTORY_TAIL_DEDUPE_WORDS = 160
+    _DEDUPE_BUCKET_SECONDS = 0.5
 
     def __init__(self) -> None:
         self._is_cjk_source = False
@@ -39,6 +42,9 @@ class SubtitleAssembler:
         self._partial_words: list[_WordState] = []
         self._latest_partial_text = ''
         self._last_emitted_source_text = ''
+        self._rolling_visible_text = ''
+        self._rolling_committed_text = ''
+        self._rolling_committed_last_speaker = ''
         self._speaker_display_map: dict[str, str] = {}
         self._speaker_display_next_index = 0
         self._required_agreement_count = 3
@@ -50,6 +56,8 @@ class SubtitleAssembler:
         self._last_cjk_spacing_summary: dict[str, object] = {}
         self._last_speaker_smoothing_summary: dict[str, object] = {}
         self._last_merge_diagnostics: dict[str, object] = {}
+        self._last_overlap_summary: dict[str, object] = {}
+        self._last_history_dedupe_summary: dict[str, object] = {}
 
     def set_language_context(self, source_language: str | None) -> None:
         token = (source_language or '').strip().lower()
@@ -81,8 +89,11 @@ class SubtitleAssembler:
             'partial_count_before': int(len(self._partial_words)),
             'cleaned_chars': 0,
             'history_chars': 0,
+            'history_word_count': int(len(self._history_words)),
+            'rolling_base_chars': 0,
             'visible_chars': 0,
             'merged_chars': 0,
+            'visible_source': 'rolling',
             'returned_empty': False,
         }
         step_started_at = time.perf_counter()
@@ -111,14 +122,18 @@ class SubtitleAssembler:
         step_started_at = time.perf_counter()
         if incoming:
             raw_start = min((w.start for w in incoming), default=elapsed)
-            self._flush_stable_to_history(raw_start)
+            moved_to_history = self._flush_stable_to_history(raw_start)
+            self._append_to_rolling_committed_text(moved_to_history)
             self._merge_incoming_words(incoming)
             self._promote_partial_to_stable()
             self._prune_active_words(raw_start)
         else:
             raw_start = elapsed
-            self._flush_stable_to_history(raw_start)
+            moved_to_history = self._flush_stable_to_history(raw_start)
+            self._append_to_rolling_committed_text(moved_to_history)
         diagnostics['state_update_seconds'] = time.perf_counter() - step_started_at
+        diagnostics['history_dedupe'] = dict(self._last_history_dedupe_summary)
+        diagnostics['moved_to_history_count'] = int(len(moved_to_history))
         diagnostics['raw_start'] = float(raw_start)
         diagnostics['history_count_after_state'] = int(len(self._history_words))
         diagnostics['stable_count_after_state'] = int(len(self._stable_words))
@@ -131,25 +146,31 @@ class SubtitleAssembler:
             self._latest_partial_text = cleaned
         diagnostics['partial_render_seconds'] = time.perf_counter() - step_started_at
 
-        # Output policy:
-        # - keep token-level state updates (history/stable/partial) for stability bookkeeping
-        # - but compose visible text as history + current raw overlap-merge to avoid
-        #   duplicated tails from stable/partial rendering overlap.
-        step_started_at = time.perf_counter()
-        history_text = self._words_to_text(self._history_words)
-        diagnostics['history_render_seconds'] = time.perf_counter() - step_started_at
-        diagnostics['history_chars'] = int(len(history_text))
         step_started_at = time.perf_counter()
         visible_cleaned = self._apply_cjk_pause_spacing_to_text(cleaned, incoming)
         diagnostics['spacing_seconds'] = time.perf_counter() - step_started_at
         diagnostics['visible_chars'] = int(len(visible_cleaned))
+        # UI rolling output is separate from full immutable history. Stable
+        # words that moved into history are appended once to a committed UI
+        # buffer; each new raw window replaces the previous raw tail through
+        # overlap merge. This models the overlay as: committed history + raw.
+        rolling_base = self._rolling_committed_text or self._rolling_visible_text
+        rolling_base_source = 'committed_history' if self._rolling_committed_text else 'previous_rolling'
+        diagnostics['rolling_base_source'] = rolling_base_source
+        diagnostics['history_render_seconds'] = 0.0
+        diagnostics['history_chars'] = 0
+        diagnostics['history_word_count'] = int(len(self._history_words))
+        diagnostics['rolling_committed_chars'] = int(len(self._rolling_committed_text))
+        diagnostics['rolling_base_chars'] = int(len(rolling_base))
         step_started_at = time.perf_counter()
-        merged = self._merge_by_exact_overlap(history_text, visible_cleaned)
+        merged = self._merge_by_exact_overlap(rolling_base, visible_cleaned)
         diagnostics['overlap_seconds'] = time.perf_counter() - step_started_at
+        diagnostics['rolling_overlap'] = dict(self._last_overlap_summary)
         step_started_at = time.perf_counter()
-        merged = self._normalize_output_text(merged)[-1800:]
+        merged = self._normalize_output_text(merged)
         diagnostics['final_normalize_seconds'] = time.perf_counter() - step_started_at
         diagnostics['merged_chars'] = int(len(merged))
+        self._rolling_visible_text = merged
         diagnostics['history_count_after'] = int(len(self._history_words))
         diagnostics['stable_count_after'] = int(len(self._stable_words))
         diagnostics['partial_count_after'] = int(len(self._partial_words))
@@ -191,7 +212,7 @@ class SubtitleAssembler:
                     score=score,
                     count=1,
                     last_seen=end_abs,
-                    speaker=str(raw.get('speaker') or '').strip(),
+                    speaker=str(raw.get('speaker') or raw.get('profile_speaker') or '').strip(),
                 )
             )
         out.sort(key=lambda w: (w.start, w.end))
@@ -219,9 +240,10 @@ class SubtitleAssembler:
         self._partial_words = keep_partial
         self._stable_words = self._dedupe_words(self._stable_words)
 
-    def _flush_stable_to_history(self, raw_start: float) -> None:
+    def _flush_stable_to_history(self, raw_start: float) -> list[_WordState]:
         if not self._stable_words:
-            return
+            self._set_history_dedupe_summary('none', 0, len(self._history_words), len(self._history_words))
+            return []
         remain: list[_WordState] = []
         moved: list[_WordState] = []
         for word in self._stable_words:
@@ -231,9 +253,78 @@ class SubtitleAssembler:
                 remain.append(word)
         self._stable_words = remain
         if moved:
-            self._history_words.extend(moved)
-            self._history_words.sort(key=lambda w: (w.start, w.end))
-            self._history_words = self._dedupe_words(self._history_words)
+            self._append_history_words(moved)
+        else:
+            self._set_history_dedupe_summary('none', 0, len(self._history_words), 0)
+        return moved
+
+    def _append_history_words(self, words: list[_WordState]) -> None:
+        if not words:
+            self._set_history_dedupe_summary('none', 0, len(self._history_words), 0)
+            return
+        moved = self._dedupe_words(words)
+        if not moved:
+            self._set_history_dedupe_summary('none', 0, len(self._history_words), 0)
+            return
+        if not self._history_words:
+            self._history_words = moved
+            self._set_history_dedupe_summary('init', len(moved), len(self._history_words), 0, moved_count=len(moved))
+            return
+
+        moved.sort(key=lambda w: (w.start, w.end))
+        history_count_before = len(self._history_words)
+        tail_size = max(self._HISTORY_TAIL_DEDUPE_WORDS, len(moved) * 4)
+        split_at = max(0, history_count_before - tail_size)
+        prefix = self._history_words[:split_at]
+        tail = self._history_words[split_at:]
+
+        # Normal streaming input appends near the history tail. If an older
+        # correction arrives before the bounded tail, fall back to full dedupe.
+        if prefix and moved[0].start < prefix[-1].start:
+            combined = self._history_words + moved
+            self._history_words = self._dedupe_words(combined)
+            self._set_history_dedupe_summary(
+                'full',
+                len(combined),
+                len(self._history_words),
+                history_count_before,
+                moved_count=len(moved),
+                tail_count=len(tail),
+            )
+            return
+
+        merged_tail = self._dedupe_words(tail + moved)
+        self._history_words = prefix + merged_tail
+        self._set_history_dedupe_summary(
+            'tail',
+            len(tail) + len(moved),
+            len(self._history_words),
+            history_count_before,
+            moved_count=len(moved),
+            tail_count=len(tail),
+            prefix_count=len(prefix),
+        )
+
+    def _set_history_dedupe_summary(
+        self,
+        mode: str,
+        input_count: int,
+        history_count: int,
+        history_count_before: int,
+        *,
+        moved_count: int = 0,
+        tail_count: int = 0,
+        prefix_count: int = 0,
+    ) -> None:
+        self._last_history_dedupe_summary = {
+            'mode': str(mode),
+            'input_count': int(input_count),
+            'history_count': int(history_count),
+            'history_count_before': int(history_count_before),
+            'moved_count': int(moved_count),
+            'tail_count': int(tail_count),
+            'prefix_count': int(prefix_count),
+        }
 
     def _prune_active_words(self, raw_start: float) -> None:
         # Keep partial near current raw window; older unresolved words are dropped.
@@ -244,10 +335,10 @@ class SubtitleAssembler:
     def mark_sentence_break(self) -> None:
         # Force current confirmed words into immutable history on sentence break.
         if self._stable_words:
-            self._history_words.extend(self._stable_words)
-            self._history_words.sort(key=lambda w: (w.start, w.end))
-            self._history_words = self._dedupe_words(self._history_words)
+            moved = list(self._stable_words)
+            self._append_history_words(moved)
             self._stable_words = []
+            self._append_to_rolling_committed_text(moved)
 
     def get_stable_text(self) -> str:
         return self._words_to_text(self._stable_words)
@@ -258,6 +349,13 @@ class SubtitleAssembler:
 
     def get_history_text(self) -> str:
         return self._words_to_text(self._history_words)
+
+    def get_history_tail_text(self, max_words: int = 160) -> str:
+        try:
+            limit = max(1, int(max_words))
+        except Exception:
+            limit = 160
+        return self._words_to_text(self._history_words[-limit:])
 
     def get_history_state(self) -> list[dict[str, object]]:
         return self._words_to_state(self._history_words)
@@ -273,10 +371,13 @@ class SubtitleAssembler:
             'history_count': len(self._history_words),
             'stable_count': len(self._stable_words),
             'partial_count': len(self._partial_words),
+            'rolling_visible_chars': len(self._rolling_visible_text),
+            'rolling_committed_chars': len(self._rolling_committed_text),
             'is_cjk_source': bool(self._is_cjk_source),
             'auto_detect_cjk': bool(self._auto_detect_cjk),
             'cjk_spacing': dict(self._last_cjk_spacing_summary),
             'speaker_smoothing': dict(self._last_speaker_smoothing_summary),
+            'history_dedupe': dict(self._last_history_dedupe_summary),
             'merge_diagnostics': dict(self._last_merge_diagnostics),
         }
 
@@ -333,14 +434,14 @@ class SubtitleAssembler:
             if float(incoming.score) >= float(target.score):
                 target.speaker = incoming.speaker
 
-    def _words_to_text(self, words: list[_WordState]) -> str:
+    def _words_to_text(self, words: list[_WordState], *, initial_speaker_label: str = '') -> str:
         if not words:
             return ''
         ordered = sorted(words, key=lambda w: (w.start, w.end))
         speaker_labels = self._stabilize_speakers(ordered)
         out: list[str] = []
         prev: _WordState | None = None
-        last_speaker_label = ''
+        last_speaker_label = str(initial_speaker_label or '').strip()
         for (w, speaker) in zip(ordered, speaker_labels):
             raw_token = str(w.word or '')
             token = self._normalize_cjk_token(raw_token) if self._is_cjk_source else raw_token.strip()
@@ -483,8 +584,11 @@ class SubtitleAssembler:
             if prev_label and next_label and prev_label == next_label:
                 replacement = prev_label
             else:
-                is_tiny = char_count <= 2
-                if is_tiny and (prev_label or next_label):
+                is_short_island = (
+                    char_count <= int(self._speaker_micro_turn_max_chars)
+                    and duration <= float(self._speaker_micro_turn_max_duration_seconds)
+                )
+                if is_short_island and (prev_label or next_label):
                     if prev_label and not next_label:
                         if int(prev_run.get('chars', 0) or 0) > 2:
                             replacement = prev_label
@@ -700,18 +804,58 @@ class SubtitleAssembler:
             return []
         ordered = sorted(words, key=lambda w: (w.start, w.end))
         deduped: list[_WordState] = []
+        index: dict[tuple[str, int], list[int]] = {}
         for word in ordered:
-            found = self._find_match(deduped, word)
+            norm = self._normalize_word(word.word)
+            bucket = self._dedupe_bucket(word.start)
+            found: _WordState | None = None
+            for nearby_bucket in range(bucket - 1, bucket + 2):
+                for candidate_index in index.get((norm, nearby_bucket), []):
+                    candidate = deduped[candidate_index]
+                    if self._word_matches(candidate, word):
+                        found = candidate
+                        break
+                if found is not None:
+                    break
             if found is None:
                 deduped.append(word)
+                index.setdefault((norm, bucket), []).append(len(deduped) - 1)
             else:
                 self._update_word(found, word)
         return deduped
+
+    @classmethod
+    def _dedupe_bucket(cls, start: float) -> int:
+        try:
+            return int(float(start) / cls._DEDUPE_BUCKET_SECONDS)
+        except Exception:
+            return 0
+
+    def _append_to_rolling_committed_text(self, words: list[_WordState]) -> None:
+        if not words:
+            return
+        moved_text = self._words_to_text(words, initial_speaker_label=self._rolling_committed_last_speaker)
+        if not moved_text:
+            return
+        previous_summary = dict(self._last_overlap_summary)
+        self._rolling_committed_text = self._merge_by_exact_overlap(self._rolling_committed_text, moved_text)
+        self._last_overlap_summary = previous_summary
+        self._rolling_committed_last_speaker = self._last_non_empty_speaker_label(words) or self._rolling_committed_last_speaker
+
+    def _last_non_empty_speaker_label(self, words: list[_WordState]) -> str:
+        ordered = sorted(words, key=lambda w: (w.start, w.end))
+        labels = self._stabilize_speakers(ordered)
+        for label in reversed(labels):
+            token = str(label or '').strip()
+            if token:
+                return token
+        return ''
 
     def _normalize_output_text(self, text: str) -> str:
         if not text:
             return ''
         text = self._normalize_speaker_marker_boundaries(text)
+        text = self._collapse_redundant_speaker_marker_lines(text)
         lines = []
         for line in text.splitlines():
             cleaned = re.sub(r'[ \t]+', ' ', line).strip()
@@ -719,27 +863,120 @@ class SubtitleAssembler:
                 lines.append(cleaned)
         return '\n'.join(lines).strip()
 
+    def _collapse_redundant_speaker_marker_lines(self, text: str) -> str:
+        if not text:
+            return ''
+        out: list[str] = []
+        current_marker = ''
+        marker_pattern = re.compile(r'^\s*(>>|S\d+:|\[spk_\d+\])\s*(.*)$', flags=re.IGNORECASE)
+        for raw_line in str(text).splitlines():
+            line = re.sub(r'[ \t]+', ' ', raw_line).strip()
+            if not line:
+                continue
+            match = marker_pattern.match(line)
+            if not match:
+                out.append(line)
+                continue
+            marker = match.group(1)
+            marker_key = marker.lower()
+            content = str(match.group(2) or '').strip()
+            if marker_key == current_marker:
+                if content:
+                    if out:
+                        sep = '' if self._should_join_without_space(out[-1], content) else ' '
+                        out[-1] = f'{out[-1].rstrip()}{sep}{content}'
+                    else:
+                        out.append(content)
+                continue
+            current_marker = marker_key
+            out.append(f'{marker} {content}'.strip())
+        return '\n'.join(out)
+
     def _merge_by_exact_overlap(self, base: str, incoming: str) -> str:
+        self._last_overlap_summary = {'method': 'none', 'chars': 0, 'ratio': 0.0}
         base = self._normalize_output_text(base)
         incoming = self._normalize_output_text(incoming)
         if not base:
+            self._last_overlap_summary = {'method': 'replace-empty-base', 'chars': len(incoming), 'ratio': 1.0}
             return incoming
         if not incoming:
+            self._last_overlap_summary = {'method': 'keep-empty-incoming', 'chars': 0, 'ratio': 1.0}
             return base
         overlap = self._max_prefix_suffix_overlap(base, incoming)
         if overlap >= len(incoming):
+            self._last_overlap_summary = {'method': 'exact-contained', 'chars': overlap, 'ratio': 1.0}
             return base
         if overlap > 0:
+            self._last_overlap_summary = {'method': 'exact', 'chars': overlap, 'ratio': 1.0}
             return self._normalize_output_text(f'{base}{incoming[overlap:]}')
         if incoming in base[-max(16, len(incoming) * 2):]:
+            self._last_overlap_summary = {'method': 'tail-contained', 'chars': len(incoming), 'ratio': 1.0}
             return base
+        protected_prefix, fuzzy_base = self._split_fuzzy_overlap_base(base)
+        fuzzy_overlap, fuzzy_ratio = self._max_fuzzy_prefix_suffix_overlap(fuzzy_base, incoming)
+        if fuzzy_overlap > 0:
+            self._last_overlap_summary = {
+                'method': 'fuzzy-replace',
+                'chars': fuzzy_overlap,
+                'ratio': round(fuzzy_ratio, 4),
+            }
+            return self._normalize_output_text(f'{protected_prefix}{fuzzy_base[:-fuzzy_overlap]}{incoming}')
         if self._starts_with_speaker_marker(incoming) and not base.endswith('\n'):
             sep = '\n'
         elif self._should_join_without_space(base, incoming):
             sep = ''
         else:
             sep = '' if base.endswith(('?', '!', ',', '.', ' ', '\n')) else ' '
+        self._last_overlap_summary = {'method': 'append', 'chars': 0, 'ratio': 0.0}
         return self._normalize_output_text(f'{base}{sep}{incoming}')
+
+    def _max_fuzzy_prefix_suffix_overlap(self, base: str, incoming: str) -> tuple[int, float]:
+        """Return a near-match overlap for sliding-window STT corrections.
+
+        WhisperX may revise a few characters in the same phrase between adjacent
+        windows. When exact overlap fails, replacing the matched rolling tail
+        with the newer incoming window avoids duplicate visible text and lets
+        the overlay absorb those recognition corrections.
+        """
+        if not base or not incoming:
+            return 0, 0.0
+        has_cjk = bool(re.search(r'[\u3400-\u4DBF\u4E00-\u9FFF]', f'{base}{incoming}'))
+        min_overlap = 8 if has_cjk else 16
+        max_overlap = min(len(base), len(incoming), 180)
+        if max_overlap < min_overlap:
+            return 0, 0.0
+
+        best_size = 0
+        best_ratio = 0.0
+        threshold = 0.72 if has_cjk else 0.78
+        fallback_threshold = 0.66 if has_cjk else 0.72
+        for size in range(max_overlap, min_overlap - 1, -1):
+            left = self._compact_for_overlap(base[-size:])
+            right = self._compact_for_overlap(incoming[:size])
+            if not left or not right:
+                continue
+            ratio = SequenceMatcher(None, left, right).ratio()
+            if ratio >= threshold:
+                return size, ratio
+            if ratio > best_ratio:
+                best_size = size
+                best_ratio = ratio
+        if best_size >= min_overlap * 2 and best_ratio >= fallback_threshold:
+            return best_size, best_ratio
+        return 0, 0.0
+
+    @staticmethod
+    def _split_fuzzy_overlap_base(base: str) -> tuple[str, str]:
+        """Keep speaker markers out of fuzzy replacement ranges."""
+        matches = list(re.finditer(r'(?:^|\n)\s*(?:>>|S\d+:|\[spk_\d+\])\s*', str(base or ''), flags=re.IGNORECASE))
+        if not matches:
+            return '', base
+        split_at = matches[-1].end()
+        return base[:split_at], base[split_at:]
+
+    @staticmethod
+    def _compact_for_overlap(text: str) -> str:
+        return re.sub(r'\s+', '', str(text or '').lower())
 
     @staticmethod
     def _should_join_without_space(base: str, incoming: str) -> bool:
