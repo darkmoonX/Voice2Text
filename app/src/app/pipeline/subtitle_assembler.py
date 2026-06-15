@@ -393,7 +393,15 @@ class SubtitleAssembler:
 
     @staticmethod
     def _normalize_word(word: str) -> str:
-        return word.strip().lower().replace(' ', '')
+        key = word.strip().lower().replace(' ', '')
+        if not key:
+            return ''
+        try:
+            from app.stt.audio_utils import normalize_chinese_script
+
+            return normalize_chinese_script(key, 'hans')
+        except Exception:
+            return key
 
     @staticmethod
     def _interval_iou(a_start: float, a_end: float, b_start: float, b_end: float) -> float:
