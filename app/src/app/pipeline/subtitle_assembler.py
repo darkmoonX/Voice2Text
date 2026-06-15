@@ -910,6 +910,9 @@ class SubtitleAssembler:
         if not incoming:
             self._last_overlap_summary = {'method': 'keep-empty-incoming', 'chars': 0, 'ratio': 1.0}
             return base
+        marker_merged = self._merge_across_leading_speaker_marker(base, incoming)
+        if marker_merged:
+            return marker_merged
         overlap = self._max_prefix_suffix_overlap(base, incoming)
         if overlap >= len(incoming):
             self._last_overlap_summary = {'method': 'exact-contained', 'chars': overlap, 'ratio': 1.0}
@@ -929,6 +932,10 @@ class SubtitleAssembler:
                 'ratio': round(fuzzy_ratio, 4),
             }
             return self._normalize_output_text(f'{protected_prefix}{fuzzy_base[:-fuzzy_overlap]}{incoming}')
+        short_revision = self._merge_short_cjk_revision(fuzzy_base, incoming)
+        if short_revision:
+            self._last_overlap_summary = short_revision['summary']
+            return self._normalize_output_text(f'{protected_prefix}{short_revision["text"]}')
         if self._starts_with_speaker_marker(incoming) and not base.endswith('\n'):
             sep = '\n'
         elif self._should_join_without_space(base, incoming):
@@ -937,6 +944,119 @@ class SubtitleAssembler:
             sep = '' if base.endswith(('?', '!', ',', '.', ' ', '\n')) else ' '
         self._last_overlap_summary = {'method': 'append', 'chars': 0, 'ratio': 0.0}
         return self._normalize_output_text(f'{base}{sep}{incoming}')
+
+    def _merge_across_leading_speaker_marker(self, base: str, incoming: str) -> str:
+        match = re.match(r'^\s*(?P<marker>>>|S\d+:|\[spk_\d+\])\s*(?P<content>.*)$', incoming, flags=re.IGNORECASE | re.DOTALL)
+        if match is None:
+            return ''
+        content = str(match.group('content') or '').strip()
+        if not content:
+            return ''
+        marker_matches = list(re.finditer(r'(?:^|\n)\s*(?:>>|S\d+:|\[spk_\d+\])\s*', base, flags=re.IGNORECASE))
+        if not marker_matches:
+            return ''
+        marker_start = marker_matches[-1].start()
+        before_marker = base[:marker_start].rstrip()
+        if not before_marker:
+            return ''
+        overlap = self._marker_prefix_suffix_overlap(before_marker, content)
+        if overlap > 0:
+            marker_text = match.group('marker')
+            self._last_overlap_summary = {
+                'method': 'marker-exact',
+                'chars': int(overlap),
+                'ratio': 1.0,
+            }
+            return self._normalize_output_text(f'{before_marker[:-overlap]}\n{marker_text} {content}')
+        short_revision = self._merge_short_cjk_revision(before_marker, content)
+        if not short_revision:
+            return ''
+        marker_text = match.group('marker')
+        self._last_overlap_summary = {
+            'method': 'marker-short-revision',
+            'chars': int(short_revision['summary'].get('chars', 0) or 0),
+            'ratio': float(short_revision['summary'].get('ratio', 0.0) or 0.0),
+        }
+        return self._normalize_output_text(f'{short_revision["text"]}\n{marker_text} {content}')
+
+    def _marker_prefix_suffix_overlap(self, base: str, incoming_content: str) -> int:
+        max_size = min(len(base), len(incoming_content), 12)
+        for size in range(max_size, 1, -1):
+            left = self._compact_for_overlap(base[-size:])
+            right = self._compact_for_overlap(incoming_content[:size])
+            if left and left == right:
+                return size
+        return 0
+
+    def _merge_short_cjk_revision(self, base: str, incoming: str) -> dict[str, object]:
+        if not base or not incoming:
+            return {}
+        if not re.search(r'[\u3400-\u4DBF\u4E00-\u9FFF]', f'{base}{incoming}'):
+            return {}
+        max_size = min(len(base), len(incoming), 12)
+        min_size = min(5, max_size)
+        if max_size < min_size:
+            return {}
+        best: tuple[int, float] | None = None
+        for size in range(max_size, min_size - 1, -1):
+            left = base[-size:]
+            right = incoming[:size]
+            left_key = self._compact_for_overlap(left)
+            right_key = self._compact_for_overlap(right)
+            if not left_key or not right_key:
+                continue
+            ratio = SequenceMatcher(None, left_key, right_key).ratio()
+            if ratio >= 0.82:
+                # Short revisions should only absorb a small continuation.
+                # A long new tail is likely fresh content, not an overlap fix.
+                if len(incoming[size:]) > 4:
+                    continue
+                best = (size, ratio)
+                break
+        if best is None:
+            return {}
+        size, ratio = best
+        merged_overlap = self._short_common_supersequence(base[-size:], incoming[:size])
+        return {
+            'text': f'{base[:-size]}{merged_overlap}{incoming[size:]}',
+            'summary': {
+                'method': 'short-cjk-revision',
+                'chars': int(size),
+                'ratio': round(float(ratio), 4),
+            },
+        }
+
+    @staticmethod
+    def _short_common_supersequence(left: str, right: str) -> str:
+        out: list[str] = []
+        matcher = SequenceMatcher(None, left, right)
+        for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+            if tag == 'equal':
+                out.append(left[i1:i2])
+            elif tag == 'delete':
+                out.append(left[i1:i2])
+            elif tag == 'insert':
+                out.append(right[j1:j2])
+            else:
+                left_part = left[i1:i2]
+                right_part = right[j1:j2]
+                left_key = SubtitleAssembler._compact_for_overlap(left_part)
+                right_key = SubtitleAssembler._compact_for_overlap(right_part)
+                # Fold-aware: when one side's script-folded key is contained in the
+                # other's, the longer side already carries the shorter's content, so
+                # keep only the superset instead of zipping the two scripts together
+                # (prevents e.g. '国家' + '個國家' -> '国個國家'). Prefer incoming
+                # (right) on an exact fold tie.
+                if left_key and right_key and left_key == right_key:
+                    out.append(right_part)
+                elif left_key and right_key and left_key in right_key:
+                    out.append(right_part)
+                elif left_key and right_key and right_key in left_key:
+                    out.append(left_part)
+                else:
+                    out.append(left_part)
+                    out.append(right_part)
+        return ''.join(out)
 
     def _max_fuzzy_prefix_suffix_overlap(self, base: str, incoming: str) -> tuple[int, float]:
         """Return a near-match overlap for sliding-window STT corrections.
