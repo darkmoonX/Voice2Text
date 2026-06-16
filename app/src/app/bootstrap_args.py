@@ -18,6 +18,7 @@ def build_arg_parser(whisper_defaults: WhisperRuntimeParams) -> argparse.Argumen
     parser.add_argument("--device", default="cuda", help="Whisper device: cuda or cpu")
     parser.add_argument("--compute-type", choices=["float16", "int8_float16", "int8"], default="float16", help="Whisper compute type. float16 preserves accuracy; int8_float16/int8 can reduce GPU/CPU load with possible accuracy cost.")
     parser.add_argument("--batch-size", type=int, default=4, help="WhisperX decode batch size.")
+    parser.add_argument("--whisperx-rolling-prompt-chars", type=int, default=0, help="Feed this many recent committed chars as a per-window initial_prompt for cross-window context (code-switch / proper nouns). 0 disables.")
     parser.add_argument("--whisperx-phoneme-asr", dest="whisperx_phoneme_asr", action="store_true", help="Enable WhisperX phoneme-based ASR pipeline.")
     parser.add_argument("--no-whisperx-phoneme-asr", dest="whisperx_phoneme_asr", action="store_false", help="Disable WhisperX phoneme-based ASR pipeline.")
     parser.add_argument("--whisperx-forced-alignment", dest="whisperx_forced_alignment", action="store_true", help="Enable WhisperX forced alignment.")

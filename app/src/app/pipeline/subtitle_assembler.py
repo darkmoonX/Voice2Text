@@ -462,6 +462,28 @@ class SubtitleAssembler:
             limit = 160
         return self._words_to_text(self._history_words[-limit:])
 
+    def get_prompt_tail(self, max_chars: int = 160) -> str:
+        """Recent committed text as a decode prompt: markers/newlines stripped.
+
+        Uses the committed (stable) rolling text only -- never the volatile raw
+        window -- so a per-window initial_prompt is conditioned on already-agreed
+        context, bounding prompt-feedback risk. Returns '' when disabled.
+        """
+        try:
+            limit = int(max_chars)
+        except Exception:
+            limit = 0
+        if limit <= 0:
+            return ''
+        base = self._rolling_committed_text or self._rolling_visible_text or ''
+        if not base:
+            return ''
+        stripped = re.sub(r'\[spk_\d+\]|>>', ' ', base)
+        stripped = re.sub(r'\s+', ' ', stripped).strip()
+        if not stripped:
+            return ''
+        return stripped[-limit:]
+
     def get_history_state(self) -> list[dict[str, object]]:
         return self._words_to_state(self._history_words)
 

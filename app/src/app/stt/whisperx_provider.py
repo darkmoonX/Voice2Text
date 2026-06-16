@@ -95,6 +95,13 @@ class WhisperXTranscriber:
         self._beam_size = max(1, int(beam_size))
         self._batch_size = max(1, int(batch_size))
         self._enable_phoneme_asr = bool(enable_phoneme_asr)
+        # Rolling per-window initial_prompt (cross-window decoder context for
+        # short windows). whisperx sets ASR options at load time, so a per-window
+        # prompt is applied by mutating the loaded model's options before each
+        # transcribe (the same `dataclasses.replace` pattern whisperx uses
+        # internally). '' / None means no prompt (byte-identical to pre-0012).
+        self._rolling_initial_prompt: str = ''
+        self._initial_prompt_compat_ok: bool = True
         self._enable_forced_alignment = bool(enable_forced_alignment)
         self._enable_vad = bool(enable_vad)
         self._vad_method = (vad_method or "silero-vad").strip().lower()
@@ -321,6 +328,7 @@ class WhisperXTranscriber:
             kwargs["task"] = "transcribe"
         provider_timing["prepare_seconds"] = time.perf_counter() - stage_started_at
 
+        self._apply_initial_prompt_to_model()
         stage_started_at = time.perf_counter()
         result = self._transcribe_with_compat(audio, kwargs)
         provider_timing["asr_seconds"] = time.perf_counter() - stage_started_at
@@ -520,6 +528,36 @@ class WhisperXTranscriber:
                 "remap": {},
             }
         return self._speaker_identity_engine.reconcile_profiles(threshold=threshold)
+
+    def set_initial_prompt(self, text: str | None) -> None:
+        """Set the rolling initial_prompt fed to the next window transcribe.
+
+        Bounded by the caller; stored verbatim and applied to the loaded model's
+        options right before the next transcribe. Empty disables the prompt.
+        """
+        self._rolling_initial_prompt = str(text or '').strip()
+
+    def _apply_initial_prompt_to_model(self) -> None:
+        if not self._initial_prompt_compat_ok:
+            return
+        model = getattr(self, "_model", None)
+        if model is None or not hasattr(model, "options"):
+            return
+        prompt = self._rolling_initial_prompt or None
+        try:
+            from dataclasses import replace
+            current = getattr(model.options, "initial_prompt", "__missing__")
+            if current == "__missing__":
+                self._initial_prompt_compat_ok = False
+                return
+            if current == prompt:
+                return
+            model.options = replace(model.options, initial_prompt=prompt)
+        except Exception as exc:
+            # Unsupported on this whisperx/faster-whisper build: degrade to no
+            # prompt for the rest of the session rather than failing transcribe.
+            self._initial_prompt_compat_ok = False
+            self._emit(f"WhisperX initial_prompt unsupported, disabled: {exc}")
 
     def _transcribe_with_compat(self, audio, kwargs: dict[str, object]):
         active = dict(kwargs)

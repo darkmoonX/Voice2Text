@@ -65,6 +65,10 @@ class RuntimeConfig:
     whisper_beam_size: Optional[int] = 5
     whisper_batch_size: int = 4
     whisper_best_of: Optional[int] = None
+    # Rolling per-window initial_prompt: feed this many recent committed chars as
+    # decode context for cross-window continuity (code-switch / proper nouns).
+    # 0 disables (byte-identical to no prompt).
+    whisperx_rolling_prompt_chars: int = 0
     max_lines: int = 10
     overlay_width: int = 1200
     overlay_height: int = 320

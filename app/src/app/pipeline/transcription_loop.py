@@ -197,6 +197,13 @@ class TranscriptionLoopEngine:
                     if transcriber is None:
                         break
                     source_language_hint = self._runtime_source_language_hint()
+                    prompt_chars = self._to_int(
+                        getattr(self._deps.config, "whisperx_rolling_prompt_chars", 0), 0
+                    )
+                    if prompt_chars > 0:
+                        set_prompt = getattr(transcriber, "set_initial_prompt", None)
+                        if callable(set_prompt):
+                            set_prompt(self._deps.subtitle_assembler.get_prompt_tail(prompt_chars))
                     try:
                         stage_started_at = time.monotonic()
                         source_text = transcriber.transcribe(
