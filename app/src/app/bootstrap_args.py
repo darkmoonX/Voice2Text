@@ -45,6 +45,7 @@ def build_arg_parser(whisper_defaults: WhisperRuntimeParams) -> argparse.Argumen
     parser.add_argument("--source-language", choices=["auto", "en", "zh-hant", "zh-hans", "ja", "ko"], default="auto", help="STT language hint. auto uses multilingual detection.")
     parser.add_argument("--cjk-no-space-gap-seconds", type=float, default=0.2, help="When source language is Chinese, adjacent tokens within this gap are concatenated without spaces in stable/history text.")
     parser.add_argument("--speaker-pause-break-seconds", type=float, default=1.8, help="Re-emit the speaker marker and line break when the same speaker resumes after this silence gap.")
+    parser.add_argument("--subtitle-display-script", choices=["off", "hant", "hans"], default="hant", help="Fold the visible/exported subtitle to one Chinese script (char-level, comparison/CER unaffected). off keeps per-word original script.")
     parser.add_argument("--max-context", "-mc", type=int, default=whisper_defaults.max_context, help="WhisperX decode max context tokens.")
     parser.add_argument("--entropy-thold", type=float, default=whisper_defaults.entropy_thold, help="Whisper entropy threshold (Python maps to compression_ratio_threshold).")
     parser.add_argument("--logprob-thold", type=float, default=whisper_defaults.logprob_thold, help="Whisper log probability threshold.")

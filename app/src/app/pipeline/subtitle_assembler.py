@@ -72,6 +72,11 @@ class SubtitleAssembler:
         # overlapping STT windows where provider-side, window-relative detection
         # cannot). 0 disables.
         self._speaker_pause_break_seconds = 1.8
+        # Final display-script fold (one consistent Simplified/Traditional script
+        # in the visible/exported text). '' disables. Applied only to the output
+        # projection -- never to internal word state or the overlap-comparison
+        # keys -- so dedup/merge and CER stay byte-neutral (char-level s2t/t2s).
+        self._display_script = ''
         self._last_cjk_spacing_summary: dict[str, object] = {}
         self._last_speaker_smoothing_summary: dict[str, object] = {}
         self._last_merge_diagnostics: dict[str, object] = {}
@@ -104,6 +109,22 @@ class SubtitleAssembler:
         except Exception:
             value = 1.8
         self._speaker_pause_break_seconds = max(0.0, value)
+
+    def set_display_script(self, script: str | None) -> None:
+        token = str(script or '').strip().lower()
+        if token in {'hant', 'zh-hant', 'zh-tw', 'zh-hk', 'tw', 'traditional'}:
+            self._display_script = 'hant'
+        elif token in {'hans', 'zh-hans', 'zh-cn', 'zh-sg', 'cn', 'simplified'}:
+            self._display_script = 'hans'
+        else:
+            self._display_script = ''
+
+    def _project_display_script(self, text: str) -> str:
+        """Fold the final output to one display script (char-level, no vocab change)."""
+        if not text or not self._display_script:
+            return text
+        from app.stt.audio_utils import unify_chinese_script
+        return unify_chinese_script(text, self._display_script)
 
     def merge_incremental_text(self, text: str, *, overlap_merge_method: str, segment_seconds: float, hop_seconds: float, transcription_meta: dict[str, object] | None = None) -> str:
         _ = (overlap_merge_method, segment_seconds, hop_seconds)
@@ -212,7 +233,7 @@ class SubtitleAssembler:
         self._last_emitted_source_text = merged
         diagnostics['total_seconds'] = time.perf_counter() - total_started_at
         self._last_merge_diagnostics = diagnostics
-        return merged
+        return self._project_display_script(merged)
 
     def _extract_incoming_words(self, meta: dict[str, object], elapsed: float) -> list[_WordState]:
         items = meta.get('token_timestamps')
@@ -414,7 +435,7 @@ class SubtitleAssembler:
         if finalized_word_count <= 0 and final_text == prev_committed:
             return ''
         self._last_emitted_source_text = final_text
-        return final_text
+        return self._project_display_script(final_text)
 
     def mark_sentence_break(self) -> None:
         # Force current confirmed words into immutable history on sentence break.

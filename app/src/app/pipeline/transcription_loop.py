@@ -73,6 +73,9 @@ class TranscriptionLoopEngine:
         self._deps.subtitle_assembler.set_speaker_pause_break_seconds(
             float(getattr(self._deps.config, "speaker_pause_break_seconds", 1.8) or 0.0)
         )
+        self._deps.subtitle_assembler.set_display_script(
+            str(getattr(self._deps.config, "subtitle_display_script", "") or "")
+        )
 
         (bytes_per_second, frame_bytes, segment_bytes, hop_bytes) = aligned_window_sizes(
             sample_rate=stream_rate,

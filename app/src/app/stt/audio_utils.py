@@ -9,6 +9,8 @@ except Exception:
     OpenCC = None
 _opencc_hant = None
 _opencc_hans = None
+_opencc_unify_hant = None
+_opencc_unify_hans = None
 
 def has_enough_signal(chunk: AudioChunk, threshold: float=0.008, channel_mode: str='mono') -> bool:
     audio = pcm16_to_mono_float(chunk.pcm16, chunk.channels, channel_mode=channel_mode)
@@ -84,5 +86,30 @@ def normalize_chinese_script(text: str, script: Optional[str]) -> str:
         if _opencc_hans is None:
             _opencc_hans = OpenCC('t2s')
         return _opencc_hans.convert(text)
+    except Exception:
+        return text
+
+def unify_chinese_script(text: str, script: Optional[str]) -> str:
+    """Fold mixed Simplified/Traditional text to one *display* script.
+
+    Unlike ``normalize_chinese_script`` (which uses the vocabulary-localizing
+    ``s2twp`` profile), this is a **character-level only** conversion (``s2t`` /
+    ``t2s``). Display-script consistency must not change vocabulary, otherwise the
+    comparison's own S/T fold would no longer cancel it out and CER would move.
+    Safe no-op when OpenCC is absent or ``script`` is not a known target.
+    """
+    if not text or script not in {'hant', 'hans'}:
+        return text
+    if OpenCC is None:
+        return text
+    global _opencc_unify_hant, _opencc_unify_hans
+    try:
+        if script == 'hant':
+            if _opencc_unify_hant is None:
+                _opencc_unify_hant = OpenCC('s2t')
+            return _opencc_unify_hant.convert(text)
+        if _opencc_unify_hans is None:
+            _opencc_unify_hans = OpenCC('t2s')
+        return _opencc_unify_hans.convert(text)
     except Exception:
         return text

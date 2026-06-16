@@ -34,6 +34,9 @@ class RuntimeConfig:
     whisperx_speaker_profile_store_path: str = ''
     speaker_marker_style: str = 'spk'
     speaker_pause_break_seconds: float = 1.8
+    # Final display-script fold for the visible/exported subtitle: '' (off, keep
+    # per-word original script), 'hant', or 'hans'. Comparison/CER unaffected.
+    subtitle_display_script: str = 'hant'
     cpu_fallback_on_cuda_error: bool = True
     cuda_compat_source_dll: str = 'D:\\CUDA\\bin\\x64\\cublas64_13.dll'
     ffmpeg_dll_dir: str = 'D:\\FFmpeg\\ffmpeg-7.1.1-full_build-shared\\bin'
