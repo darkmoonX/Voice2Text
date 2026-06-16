@@ -45,6 +45,9 @@ class SubtitleAssembler:
         self._rolling_visible_text = ''
         self._rolling_committed_text = ''
         self._rolling_committed_last_speaker = ''
+        # Absolute end time of the last word folded into the committed text, so a
+        # long same-speaker pause that straddles a commit boundary still breaks.
+        self._rolling_committed_last_end: float | None = None
         # End-of-stream finalize returns the longest clean merged snapshot seen
         # (the last "full" window before the audio tails off). That snapshot is a
         # real overlay frame the hot path already produced and emitted, so it
@@ -63,6 +66,12 @@ class SubtitleAssembler:
         self._speaker_switch_min_duration_seconds = 0.18
         self._speaker_micro_turn_max_duration_seconds = 0.80
         self._speaker_micro_turn_max_chars = 4
+        # When the same speaker resumes after a silence longer than this, re-emit
+        # the marker behind a blank-line hard boundary so a long pause reads as a
+        # new utterance. Driven off absolute word times (works across the
+        # overlapping STT windows where provider-side, window-relative detection
+        # cannot). 0 disables.
+        self._speaker_pause_break_seconds = 1.8
         self._last_cjk_spacing_summary: dict[str, object] = {}
         self._last_speaker_smoothing_summary: dict[str, object] = {}
         self._last_merge_diagnostics: dict[str, object] = {}
@@ -88,6 +97,13 @@ class SubtitleAssembler:
     def set_speaker_marker_style(self, style: str | None) -> None:
         token = str(style or '').strip().lower()
         self._speaker_marker_style = 'arrow' if token in {'arrow', 'arrows', '>>'} else 'spk'
+
+    def set_speaker_pause_break_seconds(self, seconds: float) -> None:
+        try:
+            value = float(seconds)
+        except Exception:
+            value = 1.8
+        self._speaker_pause_break_seconds = max(0.0, value)
 
     def merge_incremental_text(self, text: str, *, overlap_merge_method: str, segment_seconds: float, hop_seconds: float, transcription_meta: dict[str, object] | None = None) -> str:
         _ = (overlap_merge_method, segment_seconds, hop_seconds)
@@ -524,15 +540,34 @@ class SubtitleAssembler:
             if not token:
                 continue
             marker = self._speaker_label_to_marker(speaker)
-            if marker and speaker and (speaker != last_speaker_label):
+            speaker_changed = bool(marker and speaker and (speaker != last_speaker_label))
+            # Gap to the previous rendered word. A long same-speaker gap inside
+            # this batch is a pause break; a speaker change already starts its own
+            # line. Pauses across a commit boundary are handled by
+            # _append_to_rolling_committed_text (the leading break here would be
+            # stripped/merged away).
+            inter_gap = (float(w.start) - float(prev.end)) if prev is not None else None
+            pause_break = (
+                not speaker_changed
+                and bool(marker and speaker)
+                and speaker == last_speaker_label
+                and float(self._speaker_pause_break_seconds) > 0.0
+                and inter_gap is not None
+                and inter_gap > float(self._speaker_pause_break_seconds)
+            )
+            if speaker_changed:
                 if self._is_cjk_source:
                     out.append(f'\n{marker} ')
                 else:
-                    if marker == '>>':
-                        out.append(f'\n{marker}' if out else f'{marker}')
-                    else:
-                        out.append(f'\n{marker}' if out else f'{marker}')
+                    out.append(f'\n{marker}' if out else f'{marker}')
                 last_speaker_label = speaker
+            elif pause_break:
+                # Blank-line hard boundary so _collapse_redundant_speaker_marker_lines
+                # keeps the re-emitted same-speaker marker instead of collapsing it.
+                if self._is_cjk_source:
+                    out.append(f'\n\n{marker} ')
+                else:
+                    out.append(f'\n\n{marker}')
             if not self._is_cjk_source:
                 out.append(token)
                 continue
@@ -555,6 +590,8 @@ class SubtitleAssembler:
                 cleaned = re.sub(r'[ \t]+', ' ', line).strip()
                 if cleaned:
                     lines.append(cleaned)
+                elif lines and lines[-1] != '':
+                    lines.append('')
             return '\n'.join(lines).strip()
         text = ''.join(out)
         lines = []
@@ -562,6 +599,8 @@ class SubtitleAssembler:
             cleaned = re.sub(r'[ \t]+', ' ', line).strip()
             if cleaned:
                 lines.append(cleaned)
+            elif lines and lines[-1] != '':
+                lines.append('')
         return '\n'.join(lines).strip()
 
     def _stabilize_speakers(self, words: list[_WordState]) -> list[str]:
@@ -914,9 +953,38 @@ class SubtitleAssembler:
         if not moved_text:
             return
         previous_summary = dict(self._last_overlap_summary)
-        self._rolling_committed_text = self._merge_by_exact_overlap(self._rolling_committed_text, moved_text)
+        ordered = sorted(words, key=lambda w: (w.start, w.end))
+        first_speaker = ''
+        labels = self._stabilize_speakers(ordered)
+        for label in labels:
+            token = str(label or '').strip()
+            if token:
+                first_speaker = token
+                break
+        # A long same-speaker silence that straddles this commit boundary (the
+        # words after the pause arrive in a later window than the words before
+        # it) still reads as a new utterance: append behind a blank-line hard
+        # boundary + re-emitted marker instead of overlap-merging inline.
+        boundary_pause = (
+            bool(self._rolling_committed_text)
+            and self._rolling_committed_last_end is not None
+            and float(self._speaker_pause_break_seconds) > 0.0
+            and bool(first_speaker)
+            and first_speaker == self._rolling_committed_last_speaker
+            and (float(ordered[0].start) - float(self._rolling_committed_last_end)) > float(self._speaker_pause_break_seconds)
+        )
+        if boundary_pause:
+            marker = self._speaker_label_to_marker(first_speaker)
+            self._rolling_committed_text = self._normalize_output_text(
+                f'{self._rolling_committed_text}\n\n{marker} {moved_text}'
+            )
+        else:
+            self._rolling_committed_text = self._merge_by_exact_overlap(self._rolling_committed_text, moved_text)
         self._last_overlap_summary = previous_summary
         self._rolling_committed_last_speaker = self._last_non_empty_speaker_label(words) or self._rolling_committed_last_speaker
+        committed_end = max((float(w.end) for w in words), default=None)
+        if committed_end is not None:
+            self._rolling_committed_last_end = committed_end
 
     def _last_non_empty_speaker_label(self, words: list[_WordState]) -> str:
         ordered = sorted(words, key=lambda w: (w.start, w.end))
@@ -937,6 +1005,8 @@ class SubtitleAssembler:
             cleaned = re.sub(r'[ \t]+', ' ', line).strip()
             if cleaned:
                 lines.append(cleaned)
+            elif lines and lines[-1] != '':
+                lines.append('')
         return '\n'.join(lines).strip()
 
     def _collapse_redundant_speaker_marker_lines(self, text: str) -> str:
@@ -944,28 +1014,42 @@ class SubtitleAssembler:
             return ''
         out: list[str] = []
         current_marker = ''
+        blank_before_line = False
         marker_pattern = re.compile(r'^\s*(>>|S\d+:|\[spk_\d+\])\s*(.*)$', flags=re.IGNORECASE)
         for raw_line in str(text).splitlines():
             line = re.sub(r'[ \t]+', ' ', raw_line).strip()
             if not line:
+                blank_before_line = bool(out)
                 continue
             match = marker_pattern.match(line)
             if not match:
                 out.append(line)
+                blank_before_line = False
                 continue
             marker = match.group(1)
             marker_key = marker.lower()
             content = str(match.group(2) or '').strip()
             if marker_key == current_marker:
+                if blank_before_line:
+                    # Pause-separated same-speaker marker: keep the blank-line
+                    # hard boundary in the output so it survives the next
+                    # normalize/merge pass instead of being re-collapsed inline.
+                    if out and out[-1] != '':
+                        out.append('')
+                    out.append(f'{marker} {content}'.strip())
+                    blank_before_line = False
+                    continue
                 if content:
                     if out:
                         sep = '' if self._should_join_without_space(out[-1], content) else ' '
                         out[-1] = f'{out[-1].rstrip()}{sep}{content}'
                     else:
                         out.append(content)
+                blank_before_line = False
                 continue
             current_marker = marker_key
             out.append(f'{marker} {content}'.strip())
+            blank_before_line = False
         return '\n'.join(out)
 
     def _merge_by_exact_overlap(self, base: str, incoming: str) -> str:
@@ -1360,9 +1444,9 @@ class SubtitleAssembler:
         # Force speaker markers to start on a new line to avoid inline jitter.
         # jitter when overlap-merge glues history + raw chunks.
         marker = r'(>>|S\d+:|\[spk_\d+\])'
-        normalized = re.sub(rf'([^\n])\s*{marker}\s*', r'\1\n\2 ', text, flags=re.IGNORECASE)
-        normalized = re.sub(rf'^\s*{marker}\s*', r'\1 ', normalized, flags=re.IGNORECASE)
-        normalized = re.sub(rf'\n\s*{marker}\s*', r'\n\1 ', normalized, flags=re.IGNORECASE)
+        normalized = re.sub(rf'([^\n])[ \t]*{marker}[ \t]*', r'\1\n\2 ', text, flags=re.IGNORECASE)
+        normalized = re.sub(rf'^[ \t]*{marker}[ \t]*', r'\1 ', normalized, flags=re.IGNORECASE)
+        normalized = re.sub(rf'\n[ \t]*{marker}[ \t]*', r'\n\1 ', normalized, flags=re.IGNORECASE)
         return normalized
 
     @staticmethod

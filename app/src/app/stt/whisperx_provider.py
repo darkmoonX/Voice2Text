@@ -49,6 +49,7 @@ class WhisperXTranscriber:
         speaker_profile_reconcile_threshold: float = 0.52,
         speaker_profile_store_path: str = "",
         speaker_marker_style: str = "spk",
+        speaker_pause_break_seconds: float = 1.8,
         auto_download: bool = True,
         progress_callback: Callable[[str], None] | None = None,
     ) -> None:
@@ -125,6 +126,7 @@ class WhisperXTranscriber:
         self._speaker_profile_store_path = self._resolve_speaker_profile_store_path(speaker_profile_store_path)
         marker_style = str(speaker_marker_style or "").strip().lower()
         self._speaker_marker_style = "arrow" if marker_style in {"arrow", "arrows", ">>"} else "spk"
+        self._speaker_pause_break_seconds = float(max(0.0, speaker_pause_break_seconds))
         self._auto_download = bool(auto_download)
         self._progress_callback = progress_callback
         self._trace_enabled = (os.environ.get("VOICE2TEXT_TRACE_WHISPERX", "0").strip().lower() not in {"", "0", "false", "no", "off"})
@@ -175,12 +177,13 @@ class WhisperXTranscriber:
         self._speaker_switch_min_duration_seconds = 0.18
         # Allow immediate switch if one new-speaker segment is clearly long.
         self._speaker_switch_single_segment_min_duration_seconds = max(
-            0.35,
-            float(self._speaker_switch_min_duration_seconds) * 2.0,
+            0.25,
+            float(self._speaker_switch_min_duration_seconds),
         )
         self._speaker_switch_pending_label = ""
         self._speaker_switch_pending_count = 0
         self._speaker_switch_pending_duration_seconds = 0.0
+        self._last_speaker_segment_end: float | None = None
         if self._enable_diarization:
             if self._speaker_profile_enabled:
                 self._reset_speaker_profile_store_on_startup()
@@ -1605,17 +1608,27 @@ class WhisperXTranscriber:
         switch_events: list[str] = []
         pending_trace: list[str] = []
         saw_any_speaker = False
+        last_segment_end = getattr(self, "_last_speaker_segment_end", None)
         for raw in segments:
             if not isinstance(raw, dict):
                 continue
             text = str(raw.get("text") or "").strip()
             if not text:
                 continue
+            segment_start = _to_float(raw.get("start"), 0.0)
+            segment_end = _to_float(raw.get("end"), segment_start)
+            if (
+                last_segment_end is not None
+                and segment_start + 0.05 < float(last_segment_end)
+            ):
+                # Segment timestamps are window-relative. A lower start means a
+                # fresh STT window, not a negative pause across calls.
+                last_segment_end = None
             speaker = self._resolve_display_segment_speaker(raw)
             display_speaker = prev_speaker
             if speaker:
                 saw_any_speaker = True
-                segment_duration = max(0.0, _to_float(raw.get("end"), 0.0) - _to_float(raw.get("start"), 0.0))
+                segment_duration = max(0.0, segment_end - segment_start)
                 if not prev_speaker:
                     prev_speaker = speaker
                     pending_speaker = ""
@@ -1669,16 +1682,27 @@ class WhisperXTranscriber:
             if display_speaker:
                 marker = self._speaker_label_to_marker(display_speaker)
                 is_first_marker = (not turns) and (self._last_speaker_label is None)
-                if is_first_marker or (display_speaker != self._last_speaker_label):
-                    if marker == ">>":
-                        turns.append(f"\n{marker} {text}" if turns else f"{marker} {text}")
-                    else:
-                        turns.append(f"\n{marker} {text}" if turns else f"{marker} {text}")
+                gap = (
+                    segment_start - float(last_segment_end)
+                    if last_segment_end is not None
+                    else 0.0
+                )
+                pause_break = (
+                    bool(turns)
+                    and display_speaker == self._last_speaker_label
+                    and float(self._speaker_pause_break_seconds) > 0.0
+                    and gap > float(self._speaker_pause_break_seconds)
+                )
+                if is_first_marker or (display_speaker != self._last_speaker_label) or pause_break:
+                    prefix = "\n\n" if pause_break else "\n"
+                    turns.append(f"{prefix}{marker} {text}" if turns else f"{marker} {text}")
                     self._last_speaker_label = display_speaker
                 else:
                     turns.append(text)
             else:
                 turns.append(text)
+            last_segment_end = segment_end
+        self._last_speaker_segment_end = last_segment_end
         if prev_speaker:
             self._last_speaker_label = prev_speaker
         if saw_any_speaker:
@@ -1698,14 +1722,16 @@ class WhisperXTranscriber:
         # Keep speaker markers line-start anchored even when segment stitching
         # introduces inline spacing around the marker.
         marker_pattern = r"(>>|S\d+:|\[spk_\d+\])"
-        merged = re.sub(rf"([^\n])\s*{marker_pattern}\s*", r"\1\n\2 ", merged, flags=re.IGNORECASE)
-        merged = re.sub(rf"^\s*{marker_pattern}\s*", r"\1 ", merged, flags=re.IGNORECASE)
-        merged = re.sub(rf"\n\s*{marker_pattern}\s*", r"\n\1 ", merged, flags=re.IGNORECASE)
+        merged = re.sub(rf"([^\n])[ \t]*{marker_pattern}[ \t]*", r"\1\n\2 ", merged, flags=re.IGNORECASE)
+        merged = re.sub(rf"^[ \t]*{marker_pattern}[ \t]*", r"\1 ", merged, flags=re.IGNORECASE)
+        merged = re.sub(rf"\n[ \t]*{marker_pattern}[ \t]*", r"\n\1 ", merged, flags=re.IGNORECASE)
         lines = []
         for line in merged.splitlines():
             cleaned = re.sub(r"[ \t]+", " ", line).strip()
             if cleaned:
                 lines.append(cleaned)
+            elif lines and lines[-1] != "":
+                lines.append("")
         return "\n".join(lines).strip()
 
     def _speaker_label_to_marker(self, speaker_label: str | None) -> str:
@@ -2340,7 +2366,4 @@ class WhisperXTranscriber:
             "Set VOICE2TEXT_WHISPERX_ALLOW_UNSAFE_CUDA_ALIGN=1 to force CUDA alignment."
         )
         return "cpu"
-
-
-
 

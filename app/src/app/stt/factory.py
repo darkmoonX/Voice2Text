@@ -98,6 +98,7 @@ def _build_whisperx(config: RuntimeConfig, *, device_override: Optional[str], co
         speaker_profile_reconcile_threshold=float(getattr(config, 'whisperx_speaker_profile_reconcile_threshold', 0.52) or 0.52),
         speaker_profile_store_path=str(getattr(config, 'whisperx_speaker_profile_store_path', '') or ''),
         speaker_marker_style=str(getattr(config, 'speaker_marker_style', 'spk') or 'spk'),
+        speaker_pause_break_seconds=float(getattr(config, 'speaker_pause_break_seconds', 1.8)),
         auto_download=bool(config.stt_auto_download),
         progress_callback=progress_callback,
     )

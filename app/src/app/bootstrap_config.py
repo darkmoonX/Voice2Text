@@ -62,6 +62,7 @@ def build_runtime_config(args: argparse.Namespace) -> RuntimeConfig:
         hop_seconds=max(0.1, args.hop_seconds),
         source_language=None,
         cjk_no_space_gap_seconds=max(0.0, float(args.cjk_no_space_gap_seconds)),
+        speaker_pause_break_seconds=max(0.0, float(args.speaker_pause_break_seconds)),
         source_mode=args.source_mode,
         source_file_path=str(args.source_file or ""),
         source_file_replay_speed=max(0.0, float(args.source_file_replay_speed)),
