@@ -936,6 +936,10 @@ class SubtitleAssembler:
         if short_revision:
             self._last_overlap_summary = short_revision['summary']
             return self._normalize_output_text(f'{protected_prefix}{short_revision["text"]}')
+        interior_duplicate = self._merge_interior_duplicate_head(fuzzy_base, incoming)
+        if interior_duplicate:
+            self._last_overlap_summary = interior_duplicate['summary']
+            return self._normalize_output_text(f'{protected_prefix}{interior_duplicate["text"]}')
         if self._starts_with_speaker_marker(incoming) and not base.endswith('\n'):
             sep = '\n'
         elif self._should_join_without_space(base, incoming):
@@ -954,7 +958,7 @@ class SubtitleAssembler:
             return ''
         marker_matches = list(re.finditer(r'(?:^|\n)\s*(?:>>|S\d+:|\[spk_\d+\])\s*', base, flags=re.IGNORECASE))
         if not marker_matches:
-            return ''
+            return self._merge_leading_marker_content_against_unmarked_base(base, match.group('marker'), content)
         marker_start = marker_matches[-1].start()
         before_marker = base[:marker_start].rstrip()
         if not before_marker:
@@ -969,15 +973,82 @@ class SubtitleAssembler:
             }
             return self._normalize_output_text(f'{before_marker[:-overlap]}\n{marker_text} {content}')
         short_revision = self._merge_short_cjk_revision(before_marker, content)
-        if not short_revision:
+        if short_revision:
+            marker_text = match.group('marker')
+            self._last_overlap_summary = {
+                'method': 'marker-short-revision',
+                'chars': int(short_revision['summary'].get('chars', 0) or 0),
+                'ratio': float(short_revision['summary'].get('ratio', 0.0) or 0.0),
+            }
+            return self._normalize_output_text(f'{short_revision["text"]}\n{marker_text} {content}')
+        interior_duplicate = self._merge_interior_duplicate_head(before_marker, content, prefer_incoming_head=True)
+        if not interior_duplicate:
             return ''
         marker_text = match.group('marker')
         self._last_overlap_summary = {
-            'method': 'marker-short-revision',
-            'chars': int(short_revision['summary'].get('chars', 0) or 0),
-            'ratio': float(short_revision['summary'].get('ratio', 0.0) or 0.0),
+            'method': 'marker-interior-duplicate',
+            'chars': int(interior_duplicate['summary'].get('chars', 0) or 0),
+            'ratio': float(interior_duplicate['summary'].get('ratio', 0.0) or 0.0),
         }
-        return self._normalize_output_text(f'{short_revision["text"]}\n{marker_text} {content}')
+        return self._normalize_output_text(f'{interior_duplicate["text"]}\n{marker_text} {content}')
+
+    def _merge_leading_marker_content_against_unmarked_base(self, base: str, marker_text: str, content: str) -> str:
+        if not base or not content:
+            return ''
+        overlap = self._max_prefix_suffix_overlap(base, content)
+        if overlap >= len(content):
+            self._last_overlap_summary = {
+                'method': 'leading-marker-exact-contained',
+                'chars': int(overlap),
+                'ratio': 1.0,
+            }
+            return self._normalize_output_text(f'{base}\n{marker_text}')
+        if overlap > 0:
+            self._last_overlap_summary = {
+                'method': 'leading-marker-exact',
+                'chars': int(overlap),
+                'ratio': 1.0,
+            }
+            return self._normalize_output_text(f'{base}\n{marker_text} {content[overlap:]}')
+        if content in base[-max(16, len(content) * 2):]:
+            self._last_overlap_summary = {
+                'method': 'leading-marker-tail-contained',
+                'chars': len(content),
+                'ratio': 1.0,
+            }
+            return self._normalize_output_text(f'{base}\n{marker_text}')
+
+        protected_prefix, fuzzy_base = self._split_fuzzy_overlap_base(base)
+        fuzzy_overlap, fuzzy_ratio = self._max_fuzzy_prefix_suffix_overlap(fuzzy_base, content)
+        if fuzzy_overlap > 0:
+            self._last_overlap_summary = {
+                'method': 'leading-marker-fuzzy-replace',
+                'chars': fuzzy_overlap,
+                'ratio': round(fuzzy_ratio, 4),
+            }
+            merged_base = f'{protected_prefix}{fuzzy_base[:-fuzzy_overlap]}{content[:fuzzy_overlap]}'
+            return self._normalize_output_text(f'{merged_base}\n{marker_text} {content[fuzzy_overlap:]}')
+
+        short_revision = self._merge_short_cjk_revision(fuzzy_base, content)
+        if short_revision:
+            consumed = int(short_revision['summary'].get('chars', 0) or 0)
+            self._last_overlap_summary = {
+                'method': 'leading-marker-short-revision',
+                'chars': consumed,
+                'ratio': float(short_revision['summary'].get('ratio', 0.0) or 0.0),
+            }
+            return self._normalize_output_text(f'{protected_prefix}{short_revision["text"]}\n{marker_text} {content[consumed:]}')
+
+        interior_duplicate = self._merge_interior_duplicate_head(fuzzy_base, content)
+        if not interior_duplicate:
+            return ''
+        self._last_overlap_summary = {
+            'method': 'leading-marker-interior-duplicate',
+            'chars': int(interior_duplicate['summary'].get('chars', 0) or 0),
+            'ratio': float(interior_duplicate['summary'].get('ratio', 0.0) or 0.0),
+        }
+        consumed = int(interior_duplicate['summary'].get('chars', 0) or 0)
+        return self._normalize_output_text(f'{protected_prefix}{interior_duplicate["text"]}\n{marker_text} {content[consumed:]}')
 
     def _marker_prefix_suffix_overlap(self, base: str, incoming_content: str) -> int:
         max_size = min(len(base), len(incoming_content), 12)
@@ -1025,6 +1096,87 @@ class SubtitleAssembler:
                 'ratio': round(float(ratio), 4),
             },
         }
+
+    def _merge_interior_duplicate_head(
+        self,
+        base: str,
+        incoming: str,
+        *,
+        prefer_incoming_head: bool = False,
+    ) -> dict[str, object]:
+        if not base or not incoming:
+            return {}
+        if not re.search(r'[\u3400-\u4DBF\u4E00-\u9FFF]', f'{base}{incoming}'):
+            return {}
+        lookback_chars = 32
+        min_match_chars = 4
+        max_match_chars = min(len(incoming), 14)
+        max_remnant_chars = 6
+        if max_match_chars < min_match_chars:
+            return {}
+
+        base_tail_start = max(0, len(base) - lookback_chars)
+        base_tail = base[base_tail_start:]
+        tail_key, tail_positions = self._compact_with_positions(base_tail)
+        if not tail_key:
+            return {}
+
+        for size in range(max_match_chars, min_match_chars - 1, -1):
+            incoming_head = incoming[:size]
+            incoming_key = self._compact_for_overlap(incoming_head)
+            if len(incoming_key) < min_match_chars:
+                continue
+            key_index = tail_key.find(incoming_key)
+            while key_index >= 0:
+                raw_start = tail_positions[key_index]
+                raw_end = tail_positions[key_index + len(incoming_key) - 1] + 1
+                if raw_end >= len(base_tail):
+                    key_index = tail_key.find(incoming_key, key_index + 1)
+                    continue
+                remnant = base_tail[raw_end:]
+                remnant_key = self._compact_for_overlap(remnant)
+                if 0 < len(remnant_key) <= max_remnant_chars:
+                    base_match_start = base_tail_start + raw_start
+                    base_match_end = base_tail_start + raw_end
+                    if prefer_incoming_head:
+                        text = f'{base[:base_match_start].rstrip()}'
+                    else:
+                        text = f'{base[:base_match_end]}{incoming[size:]}'
+                    return {
+                        'text': text,
+                        'summary': {
+                            'method': 'interior-duplicate',
+                            'chars': int(size),
+                            'ratio': 1.0,
+                        },
+                    }
+                key_index = tail_key.find(incoming_key, key_index + 1)
+        return {}
+
+    @staticmethod
+    def _compact_with_positions(text: str) -> tuple[str, list[int]]:
+        compact_chars: list[str] = []
+        positions: list[int] = []
+        try:
+            from app.stt.audio_utils import normalize_chinese_script
+        except Exception:
+            normalize_chinese_script = None
+
+        for idx, char in enumerate(str(text or '')):
+            lowered = char.lower()
+            if lowered.isspace():
+                continue
+            if normalize_chinese_script is not None:
+                try:
+                    folded = normalize_chinese_script(lowered, 'hans')
+                except Exception:
+                    folded = lowered
+            else:
+                folded = lowered
+            for folded_char in folded:
+                compact_chars.append(folded_char)
+                positions.append(idx)
+        return ''.join(compact_chars), positions
 
     @staticmethod
     def _short_common_supersequence(left: str, right: str) -> str:
