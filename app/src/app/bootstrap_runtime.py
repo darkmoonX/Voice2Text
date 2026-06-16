@@ -179,6 +179,8 @@ def build_restart_keys() -> set[str]:
         "whisperx_speaker_profile_reconcile_threshold",
         "whisperx_speaker_profile_store_path",
         "speaker_marker_style",
+        "whisper_beam_size",
+        "whisper_batch_size",
         "ffmpeg_dll_dir",
         "source_mode",
         "source_device_indices",

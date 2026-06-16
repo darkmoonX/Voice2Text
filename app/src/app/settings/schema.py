@@ -9,6 +9,10 @@ def allowed_stt_variants(provider: str) -> list[str]:
     return ['auto']
 
 
+def allowed_compute_types() -> list[str]:
+    return ['float16', 'int8_float16', 'int8']
+
+
 def default_stt_model(provider: str) -> str:
     normalize_stt_provider(provider)
     return 'small'

@@ -10,6 +10,7 @@ class SettingsPayloadInput:
     source_mode: str
     stt_provider: str
     stt_variant: str
+    compute_type: str
     stt_model_path: str
     stt_auto_download: bool
     whisperx_enable_phoneme_asr: bool
@@ -64,6 +65,10 @@ def build_settings_updates(payload: SettingsPayloadInput, *, lang: str, hop_gt_s
     if hop_seconds > segment_seconds:
         raise ValueError(hop_gt_segment_message)
 
+    compute_type = (payload.compute_type or "float16").strip().lower()
+    if compute_type not in {"float16", "int8_float16", "int8"}:
+        compute_type = "float16"
+
     source_device_indices: list[int] = []
     source_app_names: list[str] = []
     if payload.source_mode == 'loopback':
@@ -92,6 +97,7 @@ def build_settings_updates(payload: SettingsPayloadInput, *, lang: str, hop_gt_s
         'ui_language': lang,
         'stt_provider': stt_provider,
         'stt_variant': payload.stt_variant or 'auto',
+        'compute_type': compute_type,
         'stt_auto_download': bool(payload.stt_auto_download),
         'stt_model_path': stt_model_path,
         'whisperx_enable_phoneme_asr': bool(payload.whisperx_enable_phoneme_asr),

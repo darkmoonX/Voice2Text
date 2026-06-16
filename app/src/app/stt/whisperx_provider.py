@@ -25,6 +25,7 @@ class WhisperXTranscriber:
         *,
         device: str = "cuda",
         compute_type: str = "float16",
+        beam_size: int = 5,
         batch_size: int = 4,
         enable_phoneme_asr: bool = True,
         enable_forced_alignment: bool = True,
@@ -90,6 +91,7 @@ class WhisperXTranscriber:
         self._model_ref = (model_ref or "small").strip() or "small"
         self._device = "cpu" if device.strip().lower().startswith("cpu") else "cuda"
         self._compute_type = (compute_type or "float16").strip()
+        self._beam_size = max(1, int(beam_size))
         self._batch_size = max(1, int(batch_size))
         self._enable_phoneme_asr = bool(enable_phoneme_asr)
         self._enable_forced_alignment = bool(enable_forced_alignment)
@@ -143,13 +145,15 @@ class WhisperXTranscriber:
         self._cleanup_alignment_partial_cache()
 
         model_arg = self._resolve_stt_model_arg(self._model_ref)
-        self._model = whisperx.load_model(
+        self._model = self._load_model_with_compat(
             model_arg,
-            self._device,
-            compute_type=self._compute_type,
-            language=self._source_language_hint,
-            vad_method=self._resolve_whisperx_vad_method(self._vad_method),
-            download_root=str(self._model_root / "stt"),
+            {
+                "compute_type": self._compute_type,
+                "language": self._source_language_hint,
+                "vad_method": self._resolve_whisperx_vad_method(self._vad_method),
+                "download_root": str(self._model_root / "stt"),
+                "asr_options": self._build_asr_options(),
+            },
         )
 
         self._align_cache: dict[str, tuple[object, object]] = {}
@@ -209,6 +213,48 @@ class WhisperXTranscriber:
                 "WhisperX diarization device override active: "
                 f"asr_device={self._device}, diarization_device={self._diarization_device}"
             )
+
+    def _build_asr_options(self) -> dict[str, object]:
+        options: dict[str, object] = {}
+        defaults = self._resolve_default_asr_options()
+        if isinstance(defaults, dict):
+            options.update(defaults)
+        options["beam_size"] = self._beam_size
+        return options
+
+    def _resolve_default_asr_options(self) -> dict[str, object]:
+        candidates: list[object] = []
+        direct = getattr(self._whisperx, "asr", None)
+        if direct is not None:
+            candidates.append(direct)
+        try:
+            import whisperx.asr as asr_mod  # type: ignore
+            candidates.append(asr_mod)
+        except Exception:
+            pass
+        for candidate in candidates:
+            defaults = getattr(candidate, "DEFAULT_ASR_OPTIONS", None)
+            if isinstance(defaults, dict):
+                return dict(defaults)
+        return {}
+
+    def _load_model_with_compat(self, model_arg: str, kwargs: dict[str, object]):
+        active = dict(kwargs)
+        for _ in range(6):
+            try:
+                return self._whisperx.load_model(model_arg, self._device, **active)
+            except TypeError as exc:
+                msg = str(exc)
+                m = re.search(r"unexpected keyword argument ['\"]([^'\"]+)['\"]", msg)
+                if not m:
+                    raise
+                bad = m.group(1)
+                if bad in active:
+                    self._emit(f"WhisperX compatibility: dropping unsupported load_model kwarg '{bad}'")
+                    active.pop(bad, None)
+                    continue
+                raise
+        return self._whisperx.load_model(model_arg, self._device)
 
     def has_enough_signal(self, chunk, threshold: float = 0.008, channel_mode: str = "mono") -> bool:
         return has_enough_signal(chunk, threshold=threshold, channel_mode=channel_mode)
@@ -2294,9 +2340,6 @@ class WhisperXTranscriber:
             "Set VOICE2TEXT_WHISPERX_ALLOW_UNSAFE_CUDA_ALIGN=1 to force CUDA alignment."
         )
         return "cpu"
-
-
-
 
 
 

@@ -81,6 +81,7 @@ def build_runtime_config(args: argparse.Namespace) -> RuntimeConfig:
         whisper_no_speech_thold=args.no_speech_thold,
         whisper_temperature=args.temperature,
         whisper_beam_size=max(1, args.beam_size),
+        whisper_batch_size=max(1, args.batch_size),
         whisper_best_of=max(1, args.best_of),
         overlay_width=max(480, args.overlay_width),
         overlay_height=max(160, args.overlay_height),

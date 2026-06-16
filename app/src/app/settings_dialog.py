@@ -39,6 +39,7 @@ from .settings.presenter import (
 from .settings.schema import allowed_stt_variants, default_stt_model, is_path_like
 from .settings.source_selection_dialog import SourceSelectionDialog
 from .settings.widgets import (
+    create_compute_type_combo,
     create_mode_combo,
     create_source_language_combo,
     create_stt_provider_combo,
@@ -170,6 +171,7 @@ class SettingsDialog(QDialog):
         self._stt_provider_combo.currentIndexChanged.connect(self._on_stt_provider_changed)
 
         self._stt_variant_combo = create_stt_variant_combo()
+        self._compute_type_combo = create_compute_type_combo()
 
         self._stt_model_path_edit = QLineEdit()
         self._stt_auto_download_check = QCheckBox(self._t("auto_download"))
@@ -276,6 +278,7 @@ class SettingsDialog(QDialog):
         form_left.addRow(self._t("source"), source_row)
 
         form_left.addRow(self._t("stt_variant"), self._stt_variant_combo)
+        form_left.addRow(self._t("compute_type"), self._compute_type_combo)
         form_left.addRow(self._t("model_path"), self._stt_model_path_edit)
         form_left.addRow(self._t("auto_download"), self._stt_auto_download_check)
         form_left.addRow(self._t("whisperx_vad"), self._whisperx_vad_check)
@@ -366,6 +369,7 @@ class SettingsDialog(QDialog):
         self._set_combo_data(self._mode_combo, cfg.source_mode)
         self._set_combo_data(self._stt_provider_combo, "whisperx")
         self._set_combo_data(self._stt_variant_combo, cfg.stt_variant)
+        self._set_combo_data(self._compute_type_combo, str(getattr(cfg, "compute_type", "float16") or "float16"))
         self._stt_model_path_edit.setText(cfg.stt_model_path)
         self._stt_auto_download_check.setChecked(cfg.stt_auto_download)
         self._set_combo_data(self._whisperx_vad_check, str(getattr(cfg, "whisperx_vad_method", "silero-vad") or "silero-vad"))
@@ -676,6 +680,7 @@ class SettingsDialog(QDialog):
             self._transcript_export_now_btn: "Open export subtitle settings and then choose file path.",
             self._import_audio_btn: "Import an audio/video file and replay it through the realtime subtitle pipeline.",
             self._reset_defaults_btn: "Reset all settings in this dialog back to default values.",
+            self._compute_type_combo: "ASR compute type. float16 preserves current default; int8_float16/int8 can reduce load with possible accuracy cost.",
         }
         for (widget, tip) in tips.items():
             try:
@@ -701,6 +706,7 @@ class SettingsDialog(QDialog):
             source_mode=str(self._mode_combo.currentData()),
             stt_provider="whisperx",
             stt_variant=str(self._stt_variant_combo.currentData() or "auto"),
+            compute_type=str(self._compute_type_combo.currentData() or "float16"),
             stt_model_path=self._stt_model_path_edit.text(),
             stt_auto_download=self._stt_auto_download_check.isChecked(),
             whisperx_enable_phoneme_asr=True,

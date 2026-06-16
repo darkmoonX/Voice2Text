@@ -58,7 +58,8 @@ class RuntimeConfig:
     whisper_logprob_thold: Optional[float] = None
     whisper_no_speech_thold: Optional[float] = None
     whisper_temperature: Optional[float] = None
-    whisper_beam_size: Optional[int] = None
+    whisper_beam_size: Optional[int] = 5
+    whisper_batch_size: int = 4
     whisper_best_of: Optional[int] = None
     max_lines: int = 10
     overlay_width: int = 1200

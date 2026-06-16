@@ -26,6 +26,14 @@ def create_stt_variant_combo() -> QComboBox:
     return combo
 
 
+def create_compute_type_combo() -> QComboBox:
+    combo = QComboBox()
+    combo.addItem("float16", "float16")
+    combo.addItem("int8_float16", "int8_float16")
+    combo.addItem("int8", "int8")
+    return combo
+
+
 def create_source_language_combo() -> QComboBox:
     combo = QComboBox()
     combo.addItem("auto", "auto")
