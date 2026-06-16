@@ -45,6 +45,16 @@ class SubtitleAssembler:
         self._rolling_visible_text = ''
         self._rolling_committed_text = ''
         self._rolling_committed_last_speaker = ''
+        # End-of-stream finalize returns the longest clean merged snapshot seen
+        # (the last "full" window before the audio tails off). That snapshot is a
+        # real overlay frame the hot path already produced and emitted, so it
+        # recovers the trailing words that never reached the stable-promotion
+        # agreement count without dumping the raw partial-word buffer (which is
+        # character-interleaved across the overlapping windows that contributed
+        # it) and without re-running any cross-window merge that could resurrect
+        # the duplication classes 0003/0004 fixed.
+        self._finalize_snapshot_text = ''
+        self._finalize_snapshot_len = 0
         self._speaker_display_map: dict[str, str] = {}
         self._speaker_display_next_index = 0
         self._required_agreement_count = 3
@@ -126,7 +136,7 @@ class SubtitleAssembler:
             self._append_to_rolling_committed_text(moved_to_history)
             self._merge_incoming_words(incoming)
             self._promote_partial_to_stable()
-            self._prune_active_words(raw_start)
+            self._prune_active_words(raw_start, retention_seconds=segment_seconds)
         else:
             raw_start = elapsed
             moved_to_history = self._flush_stable_to_history(raw_start)
@@ -171,6 +181,10 @@ class SubtitleAssembler:
         diagnostics['final_normalize_seconds'] = time.perf_counter() - step_started_at
         diagnostics['merged_chars'] = int(len(merged))
         self._rolling_visible_text = merged
+        # Retain the longest clean merged snapshot for end-of-stream finalize.
+        if len(merged) > self._finalize_snapshot_len:
+            self._finalize_snapshot_len = len(merged)
+            self._finalize_snapshot_text = merged
         diagnostics['history_count_after'] = int(len(self._history_words))
         diagnostics['stable_count_after'] = int(len(self._stable_words))
         diagnostics['partial_count_after'] = int(len(self._partial_words))
@@ -326,11 +340,65 @@ class SubtitleAssembler:
             'prefix_count': int(prefix_count),
         }
 
-    def _prune_active_words(self, raw_start: float) -> None:
-        # Keep partial near current raw window; older unresolved words are dropped.
-        cutoff = raw_start - 1.0
+    def _prune_active_words(self, raw_start: float, *, retention_seconds: float = 1.0) -> None:
+        # Keep unresolved words within the active audio window. The old 1s
+        # cutoff could prune correct end-of-stream tail words before EOF
+        # finalize had a chance to commit them.
+        try:
+            retention = float(retention_seconds)
+        except Exception:
+            retention = 1.0
+        cutoff = raw_start - max(1.0, retention)
         self._partial_words = [w for w in self._partial_words if w.end >= cutoff]
         self._partial_words.sort(key=lambda w: (w.start, w.end))
+
+    def finalize(self) -> str:
+        # Flush still-unresolved words into the immutable history buffer so the
+        # full record stays complete for export/debug.
+        pending = list(self._stable_words) + list(self._partial_words)
+        finalized_word_count = len(pending)
+        if pending:
+            deduped = self._dedupe_words(pending)
+            if deduped:
+                self._append_history_words(deduped)
+        self._stable_words = []
+        self._partial_words = []
+        self._latest_partial_text = ''
+
+        # Return the longest clean merged snapshot, not the raw partial-word
+        # buffer. The partial buffer holds the same trailing phrase from several
+        # overlapping windows at slightly offset timestamps; rendering it
+        # character-interleaves the scripts (the bug class 0003/0004 fixed for
+        # the hot path). The snapshot already went through the full overlap
+        # ladder when it was the live window, so it stays clean and also carries
+        # any tail that the final tail-off windows dropped from the rolling view.
+        snapshot = self._finalize_snapshot_text
+        rolling = self._rolling_visible_text
+        candidate = snapshot if len(snapshot) >= len(rolling) else rolling
+        prev_committed = self._rolling_committed_text
+        final_text = self._normalize_output_text(candidate or self.get_history_text())
+        self._rolling_committed_text = final_text
+        self._rolling_visible_text = final_text
+        self._last_merge_diagnostics = {
+            'finalized': True,
+            'finalized_word_count': int(finalized_word_count),
+            'finalize_snapshot_chars': int(len(snapshot)),
+            'history_count_after': int(len(self._history_words)),
+            'stable_count_after': 0,
+            'partial_count_after': 0,
+            'history_dedupe': dict(self._last_history_dedupe_summary),
+            'merged_chars': int(len(final_text)),
+        }
+        if not final_text:
+            return ''
+        # Emit only when finalize actually changed state: either it flushed
+        # un-committed words, or the recovered snapshot differs from what was
+        # already committed. Repeated finalize() calls and no-op finalizes
+        # (everything already in history) stay silent.
+        if finalized_word_count <= 0 and final_text == prev_committed:
+            return ''
+        self._last_emitted_source_text = final_text
+        return final_text
 
     def mark_sentence_break(self) -> None:
         # Force current confirmed words into immutable history on sentence break.
