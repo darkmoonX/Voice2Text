@@ -53,12 +53,6 @@ class SpeakerProfileStore:
         self._candidates: list[dict[str, object]] = []
         self._next_index = 0
         self._next_candidate_index = 0
-        # Monotonic observation counter (one tick per match_or_create call). Used
-        # only as an in-memory recurrence proxy: a candidate seen across a wide
-        # tick span is a genuinely recurring speaker; one confined to a narrow
-        # span is a localized artifact (e.g. an overlap region that repeats only
-        # across a handful of consecutive overlapping windows).
-        self._observation_tick = 0
         self._load()
 
     def match_or_create(
@@ -71,7 +65,6 @@ class SpeakerProfileStore:
         candidate_min_seconds: float = 0.0,
         candidate_min_samples: int = 1,
         candidate_threshold: float | None = None,
-        promotion_min_tick_spread: int = 0,
     ) -> SpeakerMatchResult:
         normalized = _normalize_embedding(embedding)
         if normalized.size == 0:
@@ -82,8 +75,6 @@ class SpeakerProfileStore:
         label = str(observed_label or "").strip()
 
         with self._lock:
-            self._observation_tick += 1
-            observation_tick = int(self._observation_tick)
             best_index = -1
             best_similarity = -1.0
             for idx, profile in enumerate(self._profiles):
@@ -134,8 +125,6 @@ class SpeakerProfileStore:
                         else min_threshold
                     ),
                     best_profile_similarity=best_similarity,
-                    observation_tick=observation_tick,
-                    promotion_min_tick_spread=int(max(0, promotion_min_tick_spread)),
                 )
 
             return self._create_profile_locked(
@@ -338,8 +327,6 @@ class SpeakerProfileStore:
         candidate_min_samples: int,
         candidate_threshold: float,
         best_profile_similarity: float,
-        observation_tick: int = 0,
-        promotion_min_tick_spread: int = 0,
     ) -> SpeakerMatchResult:
         best_candidate_index = -1
         best_candidate_similarity = -1.0
@@ -367,24 +354,9 @@ class SpeakerProfileStore:
                 if label not in labels:
                     labels.append(label)
                 candidate["observed_labels"] = labels[-12:]
-            if observation_tick:
-                candidate["last_tick"] = int(observation_tick)
-                if not candidate.get("first_tick"):
-                    candidate["first_tick"] = int(observation_tick)
             total_seconds = float(candidate.get("total_seconds", 0.0) or 0.0)
             samples = int(candidate.get("samples", 0) or 0)
-            tick_spread = int(candidate.get("last_tick", 0) or 0) - int(candidate.get("first_tick", 0) or 0)
-            # A localized artifact (e.g. an overlap region repeated across a few
-            # consecutive overlapping windows) accumulates samples/seconds but stays
-            # confined to a narrow tick span; a genuinely recurring speaker is seen
-            # again later in the session. Gate promotion on recurrence so the former
-            # never matures into a spurious visible profile.
-            recurred = tick_spread >= int(max(0, promotion_min_tick_spread))
-            if (
-                total_seconds >= candidate_min_seconds
-                and samples >= max(1, int(candidate_min_samples))
-                and recurred
-            ):
+            if total_seconds >= candidate_min_seconds and samples >= max(1, int(candidate_min_samples)):
                 del self._candidates[best_candidate_index]
                 return self._create_profile_locked(
                     normalized=_normalize_embedding(np.asarray(candidate.get("centroid") or [], dtype=np.float32)),
@@ -425,8 +397,6 @@ class SpeakerProfileStore:
                 "samples": 1,
                 "total_seconds": total_seconds,
                 "observed_labels": [label] if label else [],
-                "first_tick": int(observation_tick),
-                "last_tick": int(observation_tick),
             }
         )
         return SpeakerMatchResult(
