@@ -493,7 +493,16 @@ class SpeakerIdentityEngine:
             candidate_min_samples=candidate_min_samples,
         )
         visible_alias_threshold = float(max(self._match_threshold, min(0.82, self._match_threshold + 0.04)))
-        candidate_threshold = float(max(0.0, self._match_threshold - 0.05))
+        # Widen candidate-bucket matching so a recurring speaker's windows coalesce
+        # into one candidate (instead of fragmenting across dozens of buckets that
+        # each individually never reach the promotion bar -- the failure that drops
+        # an infrequent real speaker entirely). Bounded so genuinely distinct
+        # speakers, whose clean centroids sit well below this, still split.
+        candidate_threshold = float(max(0.0, self._match_threshold - 0.12))
+        # Recurrence gate: for short rolling windows, a candidate must be observed
+        # across a tick span wider than one localized overlap cluster before it can
+        # promote to a visible profile. Long direct chunks keep immediate promotion.
+        promotion_min_tick_spread = int(candidate_min_samples * 3) if audio_seconds <= 15.0 else 0
 
         for (speaker, spans) in spans_by_speaker.items():
             clip = self._collect_speaker_clip(audio_f32, spans)
@@ -517,6 +526,7 @@ class SpeakerIdentityEngine:
                 candidate_min_seconds=candidate_min_seconds,
                 candidate_min_samples=candidate_min_samples,
                 candidate_threshold=candidate_threshold,
+                promotion_min_tick_spread=promotion_min_tick_spread,
             )
             if not matched.profile_id:
                 if matched.staged:
@@ -580,6 +590,7 @@ class SpeakerIdentityEngine:
         stats["candidate_min_seconds"] = float(candidate_min_seconds)
         stats["candidate_min_samples"] = int(candidate_min_samples)
         stats["candidate_threshold"] = float(candidate_threshold)
+        stats["promotion_min_tick_spread"] = int(promotion_min_tick_spread)
         stats["evidence_cap_seconds"] = float(evidence_cap_seconds)
         stats["visible_min_seconds"] = float(visible_min_seconds)
         stats["visible_min_samples"] = int(visible_min_samples)
