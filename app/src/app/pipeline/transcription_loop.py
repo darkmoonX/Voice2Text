@@ -17,6 +17,7 @@ from .gpu_telemetry import GpuTelemetryReporter
 from .segment_artifacts import SegmentArtifacts
 from .subtitle_assembler import SubtitleAssembler
 from .text_delta_logger import TextDeltaLogger
+from .timing_stats import TimingAggregator
 
 
 @dataclass
@@ -50,6 +51,8 @@ class TranscriptionLoopEngine:
         self._auto_lang_candidate = ""
         self._auto_lang_candidate_count = 0
         self._auto_lang_allowed = {"en", "zh", "ja", "ko", "de", "fr", "es", "it", "pt", "ru"}
+        self._timing_aggregator = TimingAggregator()
+        self._hop_seconds = 0.0
 
     def run(self, running: Event) -> None:
         capture = self._deps.get_capture()
@@ -62,6 +65,7 @@ class TranscriptionLoopEngine:
         stream_channels = int(getattr(capture, "channels", 1))
         segment_seconds = min(max(1.0, float(self._deps.config.segment_seconds)), 12.0)
         hop_seconds = min(max(0.1, float(self._deps.config.hop_seconds)), max(0.1, segment_seconds - 0.1))
+        self._hop_seconds = float(hop_seconds)
 
         self._deps.subtitle_assembler.set_language_context(self._deps.config.source_language)
         self._deps.subtitle_assembler.set_cjk_no_space_gap_seconds(
@@ -316,6 +320,7 @@ class TranscriptionLoopEngine:
                             elapsed_seconds=current_window_elapsed,
                             timing=timing,
                             has_text=True,
+                            transcription_meta=transcription_meta,
                         )
                         continue
 
@@ -335,6 +340,7 @@ class TranscriptionLoopEngine:
                         elapsed_seconds=current_window_elapsed,
                         timing=timing,
                         has_text=True,
+                        transcription_meta=transcription_meta,
                     )
                     if not source_out and (not translated_out):
                         continue
@@ -356,6 +362,30 @@ class TranscriptionLoopEngine:
                         self._mark_sentence_break()
         finally:
             self._finalize_stream()
+            self._emit_timing_summary()
+
+    def get_timing_summary(self) -> dict[str, object]:
+        """Aggregated per-stage timing + realtime factor for the session (harness/export)."""
+        return self._timing_aggregator.summary()
+
+    def _emit_timing_summary(self) -> None:
+        if self._timing_aggregator.window_count <= 0:
+            return
+        summary = self._timing_aggregator.summary()
+        dominant = str(summary.get("dominant_stage") or "")
+        stages = summary.get("stages") if isinstance(summary.get("stages"), dict) else {}
+        dominant_p50 = float(stages.get(dominant, {}).get("p50", 0.0)) if dominant else 0.0
+        window_total = summary.get("window_total") if isinstance(summary.get("window_total"), dict) else {}
+        self._deps.emit_status(
+            "[timing-summary] "
+            f"windows={int(summary.get('window_count', 0) or 0)}; "
+            f"realtime_factor={float(summary.get('realtime_factor', 0.0) or 0.0):.3f}x; "
+            f"window_total_p50={float(window_total.get('p50', 0.0) or 0.0):.4f}s; "
+            f"window_total_p95={float(window_total.get('p95', 0.0) or 0.0):.4f}s; "
+            f"window_total_max={float(window_total.get('max', 0.0) or 0.0):.4f}s; "
+            f"dominant={dominant}({dominant_p50:.4f}s p50); "
+            f"hop={float(self._hop_seconds):.3f}s"
+        )
 
     def _build_subtitle_payload(self, source_text: str, *, runtime_source_language_hint: str = "") -> tuple[str, str]:
         translator = self._deps.get_translator()
@@ -402,7 +432,15 @@ class TranscriptionLoopEngine:
         elapsed_seconds: float,
         timing: dict[str, float],
         has_text: bool,
+        transcription_meta: dict[str, object] | None = None,
     ) -> None:
+        # Aggregate every processed window regardless of debug mode so the
+        # end-of-session summary / realtime factor is always available.
+        self._timing_aggregator.add_window(
+            timing=timing,
+            hop_seconds=self._hop_seconds,
+            transcription_meta=transcription_meta,
+        )
         if not bool(getattr(self._deps.config, "debug_mode", False)):
             return
         self._deps.emit_status(
