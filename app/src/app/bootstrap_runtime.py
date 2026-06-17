@@ -334,15 +334,12 @@ def run_qt_app(cfg: RuntimeConfig) -> int:
     tray_holder: dict[str, Voice2TextTrayController] = {}
 
     def export_transcript_now(output_path: str, export_format: str, include_timestamps: bool, include_speaker: bool) -> str:
-        old_ts = bool(getattr(cfg, "transcript_export_include_timestamps", True))
-        old_speaker = bool(getattr(cfg, "transcript_export_include_speaker", True))
-        cfg.transcript_export_include_timestamps = bool(include_timestamps)
-        cfg.transcript_export_include_speaker = bool(include_speaker)
-        try:
-            return controller.export_transcript_now(output_path=output_path, export_format=export_format)
-        finally:
-            cfg.transcript_export_include_timestamps = old_ts
-            cfg.transcript_export_include_speaker = old_speaker
+        return controller.export_transcript_now(
+            output_path=output_path,
+            export_format=export_format,
+            include_timestamps=bool(include_timestamps),
+            include_speaker=bool(include_speaker),
+        )
 
     def import_audio_file(file_path: str) -> str:
         imported = controller.import_audio_file(file_path)

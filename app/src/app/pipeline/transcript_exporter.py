@@ -10,6 +10,19 @@ import threading
 from typing import Callable
 
 
+_FORMAT_SUFFIX: dict[str, str] = {
+    "display": ".txt",
+    "txt": ".txt",
+    "srt": ".srt",
+    "json": ".json",
+}
+
+
+def export_format_suffix(export_format: str) -> str:
+    """Canonical file suffix for an export-format key (`display`/`txt`/`srt`/`json`)."""
+    return _FORMAT_SUFFIX.get(str(export_format or "").strip().lower(), ".txt")
+
+
 @dataclass
 class TranscriptExportOptions:
     enabled: bool
@@ -131,6 +144,29 @@ class TranscriptExporterSession:
         with self._lock:
             self._finalized_paths = list(written)
         return written
+
+    def export_to(
+        self,
+        *,
+        output_path: str,
+        export_format: str,
+        include_timestamps: bool | None = None,
+        include_speaker: bool | None = None,
+    ) -> Path:
+        """Route a single manual export by format key.
+
+        `display` (or empty) writes the overlay text exactly as shown; `txt`/`srt`/`json`
+        render the timed/cue-based transcript through `export_single_file`.
+        """
+        fmt = str(export_format or "").strip().lower()
+        if fmt in {"", "display"}:
+            return self.export_display_text_file(output_path=output_path)
+        return self.export_single_file(
+            output_path=output_path,
+            format_hint=fmt,
+            include_timestamps=include_timestamps,
+            include_speaker=include_speaker,
+        )
 
     def export_single_file(
         self,

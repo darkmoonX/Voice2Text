@@ -28,6 +28,7 @@ from PySide6.QtWidgets import (
 
 from .capture import AudioDevice
 from .config import RuntimeConfig
+from .pipeline.transcript_exporter import export_format_suffix
 from .settings.i18n import SETTINGS_I18N, normalize_ui_language
 from .settings.mapping import SettingsPayloadInput, build_settings_updates
 from .settings.presenter import (
@@ -58,8 +59,12 @@ def _keep_above_overlay(dialog: QDialog) -> None:
 
 
 class TranscriptExportDialog(QDialog):
-    _FORMAT_ITEMS: tuple[tuple[str, str], ...] = (
-        ("txt", "Text (*.txt)"),
+    # (format key, English label, Chinese label) — `display` is the overlay text as shown.
+    _FORMAT_ITEMS: tuple[tuple[str, str, str], ...] = (
+        ("display", "Displayed text (.txt)", "畫面顯示文字 (.txt)"),
+        ("txt", "Timestamped text (.txt)", "時間戳文字 (.txt)"),
+        ("srt", "SubRip subtitle (.srt)", "SubRip 字幕 (.srt)"),
+        ("json", "JSON transcript (.json)", "JSON 逐字稿 (.json)"),
     )
 
     def __init__(
@@ -85,16 +90,30 @@ class TranscriptExportDialog(QDialog):
         self._auto_export_check.setChecked(bool(auto_export_enabled))
         form.addRow("自動匯出" if zh else "Auto export", self._auto_export_check)
 
-        self._format_label = QLabel("TXT")
-        form.addRow("格式" if zh else "Format", self._format_label)
+        self._format_combo = QComboBox()
+        for key, label_en, label_zh in self._FORMAT_ITEMS:
+            self._format_combo.addItem(label_zh if zh else label_en, key)
+        self._select_format(default_format)
+        form.addRow("格式" if zh else "Format", self._format_combo)
+
+        self._timestamps_check = QCheckBox("含時間戳" if zh else "Include timestamps")
+        self._timestamps_check.setChecked(bool(include_timestamps))
+        form.addRow("時間戳" if zh else "Timestamps", self._timestamps_check)
+
+        self._speaker_check = QCheckBox("含說話人" if zh else "Include speaker")
+        self._speaker_check.setChecked(bool(include_speaker))
+        form.addRow("說話人" if zh else "Speaker", self._speaker_check)
 
         description = QLabel(
-            "匯出目前主畫面顯示的字幕文字。時間軸/SRT/JSON 字幕檔匯出列為後續功能。"
+            "「畫面顯示文字」匯出主畫面目前看到的字幕；TXT/SRT/JSON 匯出含時間軸的逐字稿。"
             if zh
-            else "Exports the subtitle text currently shown in the main overlay. Timed SRT/JSON subtitle export is deferred."
+            else "“Displayed text” exports the overlay as shown; TXT/SRT/JSON export the timed transcript."
         )
         description.setWordWrap(True)
         form.addRow("", description)
+
+        self._format_combo.currentIndexChanged.connect(self._sync_option_enabled)
+        self._sync_option_enabled()
 
         root.addLayout(form)
 
@@ -103,21 +122,33 @@ class TranscriptExportDialog(QDialog):
         buttons.rejected.connect(self.reject)
         root.addWidget(buttons)
 
+    def _select_format(self, fmt: str) -> None:
+        target = str(fmt or "").strip().lower()
+        index = self._format_combo.findData(target)
+        self._format_combo.setCurrentIndex(index if index >= 0 else 0)
+
+    def _sync_option_enabled(self) -> None:
+        fmt = self.export_format
+        # SRT always carries timecodes; the displayed-text dump ignores both options.
+        self._timestamps_check.setEnabled(fmt in {"txt", "json"})
+        self._speaker_check.setEnabled(fmt in {"txt", "srt", "json"})
+
     @property
     def auto_export_enabled(self) -> bool:
         return self._auto_export_check.isChecked()
 
     @property
     def include_timestamps(self) -> bool:
-        return False
+        return self._timestamps_check.isChecked()
 
     @property
     def include_speaker(self) -> bool:
-        return True
+        return self._speaker_check.isChecked()
 
     @property
     def export_format(self) -> str:
-        return "txt"
+        data = self._format_combo.currentData()
+        return str(data or "display")
 
 
 class SettingsDialog(QDialog):
@@ -489,21 +520,21 @@ class SettingsDialog(QDialog):
         default_dir = str(getattr(self._config, "transcript_export_dir", "") or "").strip()
         if not default_dir:
             default_dir = str((Path(self._config.log_dir).resolve().parent / "exports"))
-        filters = "Text (*.txt)"
-        default_name = "transcript.txt"
+        fmt = self._transcript_export_default_format
+        suffix = export_format_suffix(fmt)
+        filters = self._export_save_filter(fmt)
+        default_name = f"transcript{suffix}"
         path, _selected_filter = QFileDialog.getSaveFileName(
             self,
             "Export Transcript",
             str(Path(default_dir) / default_name),
             filters,
-            "Text (*.txt)",
+            filters,
         )
         if not path:
             return
-        fmt = "txt"
-        suffix = Path(path).suffix.lower()
-        if suffix != ".txt":
-            path = str(Path(path).with_suffix(".txt"))
+        if Path(path).suffix.lower() != suffix:
+            path = str(Path(path).with_suffix(suffix))
         try:
             written = callback(
                 path,
@@ -748,6 +779,15 @@ class SettingsDialog(QDialog):
             lang=str(self._ui_language_combo.currentData() or self._lang),
             hop_gt_segment_message=self._t("hop_gt_segment"),
         )
+
+    @staticmethod
+    def _export_save_filter(export_format: str) -> str:
+        fmt = str(export_format or "").strip().lower()
+        if fmt == "srt":
+            return "SubRip subtitle (*.srt)"
+        if fmt == "json":
+            return "JSON transcript (*.json)"
+        return "Text (*.txt)"
 
     @staticmethod
     def _resolve_default_export_format(raw_formats: str) -> str:
