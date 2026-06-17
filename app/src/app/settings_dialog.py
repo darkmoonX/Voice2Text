@@ -31,6 +31,7 @@ from .config import RuntimeConfig
 from .pipeline.transcript_exporter import export_format_suffix
 from .settings.i18n import SETTINGS_I18N, normalize_ui_language
 from .settings.mapping import SettingsPayloadInput, build_settings_updates
+from .settings.presets import PRESET_NAMES, apply_preset, normalize_preset
 from .settings.presenter import (
     alignment_repos_for_language,
     app_names_from_config,
@@ -177,6 +178,7 @@ class SettingsDialog(QDialog):
         self._form_layouts: list[QFormLayout] = []
         self._last_stt_provider = "whisperx"
         self._ui_built = False
+        self._applying_preset = False
         self._selected_loopback_indices = self._init_loopback_indices()
         self._selected_app_names = self._init_app_names()
         self._lang = normalize_ui_language(config.ui_language)
@@ -201,8 +203,30 @@ class SettingsDialog(QDialog):
         self._stt_provider_combo = create_stt_provider_combo()
         self._stt_provider_combo.currentIndexChanged.connect(self._on_stt_provider_changed)
 
+        self._preset_combo = QComboBox()
+        self._preset_combo.addItem("（未套用）" if self._lang == "zh" else "(none)", "")
+        for _name in PRESET_NAMES:
+            self._preset_combo.addItem(_name, _name)
+        self._preset_combo.currentIndexChanged.connect(self._on_preset_changed)
+
+        self._model_size_combo = QComboBox()
+        self._model_size_combo.setEditable(True)
+        self._model_size_combo.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
+        for _m in ("tiny", "base", "small", "medium", "large-v2", "large-v3"):
+            self._model_size_combo.addItem(_m, _m)
+        self._model_size_combo.currentIndexChanged.connect(self._on_bundled_field_edited)
+        self._model_size_combo.editTextChanged.connect(self._on_bundled_field_edited)
+
+        self._beam_spin = QSpinBox()
+        self._beam_spin.setRange(1, 10)
+        self._beam_spin.valueChanged.connect(self._on_bundled_field_edited)
+
+        self._whisperx_speaker_profile_check = QCheckBox()
+        self._whisperx_speaker_profile_check.toggled.connect(self._on_bundled_field_edited)
+
         self._stt_variant_combo = create_stt_variant_combo()
         self._compute_type_combo = create_compute_type_combo()
+        self._compute_type_combo.currentIndexChanged.connect(self._on_bundled_field_edited)
 
         self._stt_model_path_edit = QLineEdit()
         self._stt_auto_download_check = QCheckBox(self._t("auto_download"))
@@ -210,6 +234,7 @@ class SettingsDialog(QDialog):
         self._whisperx_vad_check.addItem("silero-vad", "silero-vad")
         self._whisperx_vad_check.addItem("pyannote", "pyannote")
         self._whisperx_diarization_check = QCheckBox()
+        self._whisperx_diarization_check.toggled.connect(self._on_bundled_field_edited)
         self._whisperx_align_model_edit = QComboBox()
         self._whisperx_align_language_combo = create_whisperx_align_language_combo()
         self._whisperx_align_device_combo = create_whisperx_align_device_combo()
@@ -228,10 +253,12 @@ class SettingsDialog(QDialog):
         self._segment_spin.setDecimals(2)
         self._segment_spin.setRange(1.0, 12.0)
         self._segment_spin.setSingleStep(0.1)
+        self._segment_spin.valueChanged.connect(self._on_bundled_field_edited)
         self._hop_spin = QDoubleSpinBox()
         self._hop_spin.setDecimals(2)
         self._hop_spin.setRange(0.1, 6.0)
         self._hop_spin.setSingleStep(0.1)
+        self._hop_spin.valueChanged.connect(self._on_bundled_field_edited)
 
         self._merge_method_combo = QComboBox()
         self._merge_method_combo.addItem("stable-tail", "stable-tail")
@@ -308,8 +335,11 @@ class SettingsDialog(QDialog):
         source_row.addWidget(self._source_summary, 1)
         form_left.addRow(self._t("source"), source_row)
 
+        form_left.addRow(self._t("runtime_preset"), self._preset_combo)
+        form_left.addRow(self._t("model_size"), self._model_size_combo)
         form_left.addRow(self._t("stt_variant"), self._stt_variant_combo)
         form_left.addRow(self._t("compute_type"), self._compute_type_combo)
+        form_left.addRow(self._t("beam_size"), self._beam_spin)
         form_left.addRow(self._t("model_path"), self._stt_model_path_edit)
         form_left.addRow(self._t("auto_download"), self._stt_auto_download_check)
         form_left.addRow(self._t("whisperx_vad"), self._whisperx_vad_check)
@@ -320,6 +350,7 @@ class SettingsDialog(QDialog):
         form_left.addRow(self._t("whisperx_align_model"), self._whisperx_align_model_edit)
         form_left.addRow(self._t("whisperx_diar_model"), self._whisperx_diar_model_edit)
         form_left.addRow(self._t("whisperx_hf_token"), self._whisperx_hf_token_edit)
+        form_left.addRow(self._t("whisperx_speaker_profile"), self._whisperx_speaker_profile_check)
         form_left.addRow(self._t("whisperx_speaker_backend"), self._whisperx_speaker_backend_combo)
         form_left.addRow(self._t("stt_notes"), self._stt_hint)
 
@@ -396,10 +427,22 @@ class SettingsDialog(QDialog):
 
     def _sync_from_config(self, config: RuntimeConfig | None = None) -> None:
         cfg = config or self._config
+        # Programmatic fill must not trip the "manual edit clears the preset" handler.
+        self._applying_preset = True
+        try:
+            self._sync_from_config_inner(cfg)
+        finally:
+            self._applying_preset = False
+
+    def _sync_from_config_inner(self, cfg: RuntimeConfig) -> None:
         self._set_combo_data(self._ui_language_combo, cfg.ui_language)
         self._set_combo_data(self._mode_combo, cfg.source_mode)
         self._set_combo_data(self._stt_provider_combo, "whisperx")
+        self._set_combo_data(self._preset_combo, normalize_preset(str(getattr(cfg, "runtime_preset", "") or "")))
         self._set_combo_data(self._stt_variant_combo, cfg.stt_variant)
+        self._set_model_size(str(getattr(cfg, "model_size", "small") or "small"))
+        self._beam_spin.setValue(int(getattr(cfg, "whisper_beam_size", 5) or 5))
+        self._whisperx_speaker_profile_check.setChecked(bool(getattr(cfg, "whisperx_speaker_profile_enabled", True)))
         self._set_combo_data(self._compute_type_combo, str(getattr(cfg, "compute_type", "float16") or "float16"))
         self._stt_model_path_edit.setText(cfg.stt_model_path)
         self._stt_auto_download_check.setChecked(cfg.stt_auto_download)
@@ -443,6 +486,47 @@ class SettingsDialog(QDialog):
             getattr(cfg, "transcript_export_include_speaker", True)
         )
         self._transcript_export_default_format = self._resolve_default_export_format(self._transcript_export_formats)
+
+    def _set_model_size(self, value: str) -> None:
+        v = str(value or "small").strip() or "small"
+        idx = self._model_size_combo.findData(v)
+        if idx < 0:
+            idx = self._model_size_combo.findText(v)
+        if idx >= 0:
+            self._model_size_combo.setCurrentIndex(idx)
+        else:
+            self._model_size_combo.setEditText(v)
+
+    def _on_preset_changed(self) -> None:
+        if self._applying_preset:
+            return
+        name = str(self._preset_combo.currentData() or "")
+        if not name:
+            return
+        preview = RuntimeConfig()
+        apply_preset(preview, name)
+        self._applying_preset = True
+        try:
+            self._set_model_size(preview.model_size)
+            self._set_combo_data(self._compute_type_combo, preview.compute_type)
+            self._beam_spin.setValue(int(preview.whisper_beam_size or 5))
+            self._segment_spin.setValue(float(preview.segment_seconds))
+            self._hop_spin.setValue(float(preview.hop_seconds))
+            self._whisperx_diarization_check.setChecked(bool(preview.whisperx_enable_diarization))
+            self._whisperx_speaker_profile_check.setChecked(bool(preview.whisperx_speaker_profile_enabled))
+        finally:
+            self._applying_preset = False
+
+    def _on_bundled_field_edited(self, *args: object) -> None:
+        # A manual edit to any preset-bundled field means the config no longer
+        # matches a named preset; drop the preset label (without re-applying).
+        if self._applying_preset:
+            return
+        if not self._preset_combo.currentData():
+            return
+        self._preset_combo.blockSignals(True)
+        self._preset_combo.setCurrentIndex(0)
+        self._preset_combo.blockSignals(False)
 
     def _on_mode_changed(self) -> None:
         mode = self._mode_combo.currentData()
@@ -736,7 +820,11 @@ class SettingsDialog(QDialog):
             ui_language=str(self._ui_language_combo.currentData() or self._lang),
             source_mode=str(self._mode_combo.currentData()),
             stt_provider="whisperx",
+            runtime_preset=str(self._preset_combo.currentData() or ""),
             stt_variant=str(self._stt_variant_combo.currentData() or "auto"),
+            model_size=str(self._model_size_combo.currentText() or "small").strip() or "small",
+            whisper_beam_size=int(self._beam_spin.value()),
+            whisperx_speaker_profile_enabled=self._whisperx_speaker_profile_check.isChecked(),
             compute_type=str(self._compute_type_combo.currentData() or "float16"),
             stt_model_path=self._stt_model_path_edit.text(),
             stt_auto_download=self._stt_auto_download_check.isChecked(),

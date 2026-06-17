@@ -46,6 +46,12 @@ class SettingsPayloadInput:
     transcript_export_formats: str
     transcript_export_include_timestamps: bool
     transcript_export_include_speaker: bool
+    # Preset-bundled runtime knobs now editable from the dialog (round 0015 Phase C).
+    # Defaulted so older callers/tests that omit them keep working.
+    model_size: str = "small"
+    whisper_beam_size: int = 5
+    whisperx_speaker_profile_enabled: bool = True
+    runtime_preset: str = ""
 
 
 def build_settings_updates(payload: SettingsPayloadInput, *, lang: str, hop_gt_segment_message: str) -> dict[str, object]:
@@ -96,7 +102,11 @@ def build_settings_updates(payload: SettingsPayloadInput, *, lang: str, hop_gt_s
     return {
         'ui_language': lang,
         'stt_provider': stt_provider,
+        'runtime_preset': (payload.runtime_preset or '').strip(),
         'stt_variant': payload.stt_variant or 'auto',
+        'model_size': (payload.model_size or 'small').strip() or 'small',
+        'whisper_beam_size': max(1, int(payload.whisper_beam_size or 5)),
+        'whisperx_speaker_profile_enabled': bool(payload.whisperx_speaker_profile_enabled),
         'compute_type': compute_type,
         'stt_auto_download': bool(payload.stt_auto_download),
         'stt_model_path': stt_model_path,

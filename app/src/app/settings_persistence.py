@@ -10,7 +10,9 @@ _PERSIST_FILE_NAME = "runtime_settings.json"
 _PERSIST_KEYS = {
     "ui_language",
     "stt_provider",
+    "runtime_preset",
     "stt_variant",
+    "model_size",
     "compute_type",
     "stt_auto_download",
     "stt_model_path",
