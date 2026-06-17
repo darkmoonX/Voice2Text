@@ -91,6 +91,8 @@ def build_arg_parser(whisper_defaults: WhisperRuntimeParams) -> argparse.Argumen
     parser.add_argument("--transcript-export-no-timestamps", dest="transcript_export_include_timestamps", action="store_false", help="Export transcript without timestamps.")
     parser.add_argument("--transcript-export-no-speaker", dest="transcript_export_include_speaker", action="store_false", help="Export transcript without speaker labels.")
     parser.add_argument("--transcript-export-dir", default="", help="Transcript export output directory.")
+    parser.add_argument("--record-session", dest="session_record_enabled", action="store_true", help="Record the live session (exact PCM -> WAV + manifest) under recordings/ for deterministic replay. Ignored for --source-mode file.")
+    parser.add_argument("--replay-session", default="", help="Replay a recorded session dir (or its manifest.json): sets source_mode=file on the recorded WAV and restores the recorded STT config for deterministic repro.")
     parser.set_defaults(
         stt_auto_download=True,
         preprocess_enabled=True,
@@ -100,6 +102,7 @@ def build_arg_parser(whisper_defaults: WhisperRuntimeParams) -> argparse.Argumen
         whisperx_diarization=False,
         whisperx_speaker_profile=True,
         debug_mode=False,
+        session_record_enabled=False,
         transcript_export_enabled=False,
         transcript_export_include_timestamps=True,
         transcript_export_include_speaker=True,

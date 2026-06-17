@@ -23,6 +23,16 @@ def main(argv: list[str] | None = None) -> int:
     if args.list_app_sessions:
         return print_app_sessions()
     cfg = build_runtime_config(args)
+    if str(getattr(args, "replay_session", "") or "").strip():
+        from .capture.session_recorder import apply_replay_session
+
+        manifest = apply_replay_session(cfg, args.replay_session.strip())
+        print(
+            f"[replay-session] {cfg.source_file_path} "
+            f"(dur={manifest.get('duration_seconds')}s, chunks={manifest.get('chunk_count')}, "
+            f"model={cfg.model_size}, seg/hop={cfg.segment_seconds}/{cfg.hop_seconds})",
+            flush=True,
+        )
     if args.stt_health_check:
         reports = run_provider_health_check(cfg, scope=args.stt_health_check_scope)
         print(summarize_health_reports(reports))

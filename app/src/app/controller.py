@@ -175,7 +175,7 @@ class TranscriptionController(QObject):
             else:
                 self._emit_status(self._translator.state.message)
         try:
-            self._capture = build_capture_from_config(self._config, on_error=self._emit_error, on_status=self._emit_status)
+            self._capture = self._build_capture()
             self._capture.start()
         except Exception as exc:
             self._emit_error(f'Audio capture init failed: {exc}')
@@ -236,10 +236,34 @@ class TranscriptionController(QObject):
             return
 
 
+    def _build_capture(self) -> AudioCaptureBase:
+        capture = build_capture_from_config(self._config, on_error=self._emit_error, on_status=self._emit_status)
+        if not bool(getattr(self._config, "session_record_enabled", False)):
+            return capture
+        if str(getattr(self._config, "source_mode", "")).strip().lower() == "file":
+            return capture  # a file replay is already reproducible; don't re-record it
+        try:
+            from dataclasses import asdict, is_dataclass
+            from .capture.session_recorder import RecordingAudioCapture, default_recording_dir
+
+            base = Path(self._config.log_dir).resolve().parent
+            snapshot = asdict(self._config) if is_dataclass(self._config) else dict(vars(self._config))
+            recorder = RecordingAudioCapture(
+                capture,
+                out_dir=default_recording_dir(base),
+                config_snapshot=snapshot,
+                on_status=self._emit_status,
+            )
+            self._emit_status(f"Session recording -> {recorder.out_dir}")
+            return recorder
+        except Exception as exc:
+            self._emit_error(f"Session recording disabled (setup failed): {exc}")
+            return capture
+
     def _recover_capture_backend(self) -> bool:
         try:
             self._stop_capture_once()
-            self._capture = build_capture_from_config(self._config, on_error=self._emit_error, on_status=self._emit_status)
+            self._capture = self._build_capture()
             self._capture.start()
             self._emit_status(f'Capture recovered @ {self._capture.sample_rate} Hz, {self._capture.channels} ch')
             return True

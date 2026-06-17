@@ -105,6 +105,7 @@ def build_runtime_config(args: argparse.Namespace) -> RuntimeConfig:
         device_index=args.device_index,
         log_dir=resolve_log_dir(args.log_dir),
         debug_mode=bool(args.debug_mode),
+        session_record_enabled=bool(getattr(args, "session_record_enabled", False)),
         transcript_export_enabled=bool(args.transcript_export_enabled),
         transcript_export_formats=str(args.transcript_export_formats or "txt,srt,json"),
         transcript_export_include_timestamps=bool(args.transcript_export_include_timestamps),

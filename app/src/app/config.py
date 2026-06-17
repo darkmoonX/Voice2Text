@@ -95,6 +95,9 @@ class RuntimeConfig:
     device_index: Optional[int] = None
     log_dir: str = 'logs'
     debug_mode: bool = False
+    # Round 0020: record the live session (exact PCM -> WAV + manifest) for
+    # deterministic replay/bug-repro. Default off; ignored for source_mode=file.
+    session_record_enabled: bool = False
     transcript_export_enabled: bool = False
     transcript_export_formats: str = 'txt,srt,json'
     transcript_export_include_timestamps: bool = True
