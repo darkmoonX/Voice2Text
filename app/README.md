@@ -99,6 +99,22 @@ python main.py
 - Manual `Export Subtitle...` exports the most recent runtime interval: from the last runtime start to the latest pause/stop, or to the export moment if capture is still running.
   - exports are written on runtime stop.
 
+#### JSON export schema — confidence / stability fields
+
+The `json` export carries optional confidence/stability metrics derived from WhisperX alignment word scores
+(gated by `transcript_export_include_confidence`, default on; set off to get the pre-0021 byte-identical json).
+A token is counted *stable* when its alignment `score >= 0.60` and its duration is in `[0.02, 1.2]s` (mirrors the
+provider's `stability_ratio`). The fields:
+
+- **`summary.mean_confidence`** — mean alignment `score` over all ingested tokens (`0.0` when there are none).
+- **`summary.stable_token_ratio`** — stable tokens / total tokens.
+- **`cues[].confidence` / `min_score` / `stable_ratio`** — mean / minimum token score and stable fraction *within
+  that cue*. Present only on cues built from tokens; text/event-only fallback cues omit them.
+- **`events[].stability_ratio` / `stable_token_count`** — the per-window stability the provider reported for that
+  decode window (alongside the existing `token_count`).
+
+`txt` and `srt` are unaffected — they only render `text/speaker/start/end`, so the extra cue keys never reach them.
+
 ### Common Commands
 
 ```powershell

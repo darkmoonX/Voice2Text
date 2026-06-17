@@ -310,6 +310,7 @@ class TranscriptionController(QObject):
             include_speaker=bool(getattr(self._config, "transcript_export_include_speaker", True)),
             output_dir=output_dir,
             display_text_only=bool(getattr(self._config, "transcript_export_display_text_only", False)),
+            include_confidence=bool(getattr(self._config, "transcript_export_include_confidence", True)),
         )
         return TranscriptExporterSession(options, on_status=self._emit_status)
 

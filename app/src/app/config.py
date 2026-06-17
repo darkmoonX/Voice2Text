@@ -103,5 +103,6 @@ class RuntimeConfig:
     transcript_export_include_timestamps: bool = True
     transcript_export_include_speaker: bool = True
     transcript_export_display_text_only: bool = False
+    transcript_export_include_confidence: bool = True
     transcript_export_dir: str = ''
 

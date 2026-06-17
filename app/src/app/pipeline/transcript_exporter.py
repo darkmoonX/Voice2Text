@@ -23,6 +23,18 @@ def export_format_suffix(export_format: str) -> str:
     return _FORMAT_SUFFIX.get(str(export_format or "").strip().lower(), ".txt")
 
 
+# Stable-token rule mirrors `whisperx_provider` (score gate + plausible word duration). Kept in
+# sync deliberately so the exported `stable_ratio` matches the provider's `stability_ratio`.
+_STABLE_MIN_SCORE = 0.60
+_STABLE_MIN_DURATION = 0.02
+_STABLE_MAX_DURATION = 1.2
+
+
+def _is_stable_token(score: float, start: float, end: float) -> bool:
+    duration = float(end) - float(start)
+    return float(score) >= _STABLE_MIN_SCORE and _STABLE_MIN_DURATION <= duration <= _STABLE_MAX_DURATION
+
+
 @dataclass
 class TranscriptExportOptions:
     enabled: bool
@@ -31,6 +43,7 @@ class TranscriptExportOptions:
     include_speaker: bool
     output_dir: str
     display_text_only: bool = False
+    include_confidence: bool = True
 
 
 class TranscriptExporterSession:
@@ -59,23 +72,25 @@ class TranscriptExporterSession:
             timestamp = datetime.now().isoformat(timespec="milliseconds")
             safe_meta = dict(meta or {})
             elapsed = self._to_float(safe_meta.get("elapsed_seconds"), 0.0)
-            self._events.append(
-                {
-                    "timestamp": timestamp,
-                    "elapsed_seconds": float(elapsed),
-                    "raw_text": str(raw_text or ""),
-                    "source_text": str(source_text or ""),
-                    "translated_text": str(translated_text or ""),
-                    "snapshot_final": bool(safe_meta.get("snapshot_final", False)),
-                    "snapshot_total_duration_seconds": self._to_float(
-                        safe_meta.get("snapshot_total_duration_seconds"),
-                        0.0,
-                    ),
-                    "token_count": int(len(safe_meta.get("token_timestamps") or []))
-                    if isinstance(safe_meta.get("token_timestamps"), list)
-                    else 0,
-                }
-            )
+            event: dict[str, object] = {
+                "timestamp": timestamp,
+                "elapsed_seconds": float(elapsed),
+                "raw_text": str(raw_text or ""),
+                "source_text": str(source_text or ""),
+                "translated_text": str(translated_text or ""),
+                "snapshot_final": bool(safe_meta.get("snapshot_final", False)),
+                "snapshot_total_duration_seconds": self._to_float(
+                    safe_meta.get("snapshot_total_duration_seconds"),
+                    0.0,
+                ),
+                "token_count": int(len(safe_meta.get("token_timestamps") or []))
+                if isinstance(safe_meta.get("token_timestamps"), list)
+                else 0,
+            }
+            if self._options.include_confidence:
+                event["stability_ratio"] = self._to_float(safe_meta.get("stability_ratio"), -1.0)
+                event["stable_token_count"] = int(self._to_float(safe_meta.get("stable_token_count"), 0.0))
+            self._events.append(event)
             self._last_source = str(source_text or self._last_source)
             self._last_translated = str(translated_text or self._last_translated)
             self._ingest_tokens(safe_meta)
@@ -92,6 +107,7 @@ class TranscriptExporterSession:
             last_source = str(self._last_source)
             last_translated = str(self._last_translated)
             token_count = int(len(self._tokens))
+            confidence_summary = self._confidence_summary()
         if not cues and not last_source and not events_snapshot:
             return []
 
@@ -131,6 +147,7 @@ class TranscriptExporterSession:
                         "event_count": int(len(events_snapshot)),
                         "token_count": token_count,
                         "cue_count": int(len(cues)),
+                        **confidence_summary,
                     },
                     "final_source_text": last_source,
                     "final_translated_text": last_translated,
@@ -195,6 +212,7 @@ class TranscriptExporterSession:
             last_source = str(self._last_source)
             last_translated = str(self._last_translated)
             token_count = int(len(self._tokens))
+            confidence_summary = self._confidence_summary()
         if not cues and not last_source and not events_snapshot:
             raise RuntimeError("No transcript data available yet.")
 
@@ -224,6 +242,7 @@ class TranscriptExporterSession:
                     "event_count": int(len(events_snapshot)),
                     "token_count": token_count,
                     "cue_count": int(len(cues)),
+                    **confidence_summary,
                 },
                 "final_source_text": last_source,
                 "final_translated_text": last_translated,
@@ -280,6 +299,28 @@ class TranscriptExporterSession:
                     "speaker": speaker,
                     "score": self._to_float(row.get("score"), 0.0),
                 }
+
+    def _confidence_summary(self) -> dict[str, object]:
+        """Session-level confidence/stability over all ingested tokens (call under lock)."""
+        if not self._options.include_confidence:
+            return {}
+        tokens = list(self._tokens.values())
+        if not tokens:
+            return {"mean_confidence": 0.0, "stable_token_ratio": 0.0}
+        scores = [self._to_float(token.get("score"), 0.0) for token in tokens]
+        stable = sum(
+            1
+            for token in tokens
+            if _is_stable_token(
+                self._to_float(token.get("score"), 0.0),
+                self._to_float(token.get("start"), 0.0),
+                self._to_float(token.get("end"), 0.0),
+            )
+        )
+        return {
+            "mean_confidence": round(sum(scores) / float(len(scores)), 4),
+            "stable_token_ratio": round(stable / float(len(tokens)), 4),
+        }
 
     def _build_cues(self) -> list[dict[str, object]]:
         tokens = sorted(self._tokens.values(), key=lambda item: (float(item["start"]), float(item["end"])))
@@ -520,11 +561,36 @@ class TranscriptExporterSession:
                 speakers[spk] = speakers.get(spk, 0) + 1
             words.append(str(token.get("word") or "").strip())
         speaker = max(speakers.items(), key=lambda item: item[1])[0] if speakers else ""
-        return {
+        cue: dict[str, object] = {
             "start": float(bucket[0]["start"]),
             "end": float(bucket[-1]["end"]),
             "speaker": speaker,
             "text": self._join_words(words),
+        }
+        if self._options.include_confidence:
+            cue.update(self._cue_confidence(bucket))
+        return cue
+
+    @staticmethod
+    def _cue_confidence(bucket: list[dict[str, object]]) -> dict[str, object]:
+        """Aggregate token `score`s into per-cue confidence fields (json only)."""
+        scores: list[float] = []
+        stable = 0
+        for token in bucket:
+            score = TranscriptExporterSession._to_float(token.get("score"), 0.0)
+            scores.append(score)
+            if _is_stable_token(
+                score,
+                TranscriptExporterSession._to_float(token.get("start"), 0.0),
+                TranscriptExporterSession._to_float(token.get("end"), 0.0),
+            ):
+                stable += 1
+        if not scores:
+            return {}
+        return {
+            "confidence": round(sum(scores) / float(len(scores)), 4),
+            "min_score": round(min(scores), 4),
+            "stable_ratio": round(stable / float(len(scores)), 4),
         }
 
     def _render_txt(
