@@ -14,6 +14,7 @@ import urllib.request
 from ..model_paths import library_model_dir
 from .audio_utils import has_enough_signal, normalize_chinese_script, normalize_language_hint, pcm16_to_mono_float, resample
 from .model_download import download_hf_files_with_progress, download_hf_snapshot_with_progress, emit_progress, estimate_hf_files_total, format_download_progress
+from .profile_quality import ClipQualityConfig
 from .speaker_identity import SpeakerIdentityConfig, SpeakerIdentityEngine
 import re
 
@@ -48,6 +49,8 @@ class WhisperXTranscriber:
         speaker_profile_min_seconds: float = 0.8,
         speaker_profile_reconcile_threshold: float = 0.52,
         speaker_profile_store_path: str = "",
+        speaker_profile_quality_gate_enabled: bool = False,
+        speaker_profile_quality_min_confidence: float = 0.45,
         speaker_marker_style: str = "spk",
         speaker_pause_break_seconds: float = 1.8,
         auto_download: bool = True,
@@ -131,6 +134,10 @@ class WhisperXTranscriber:
             max(0.0, min(0.999, speaker_profile_reconcile_threshold))
         )
         self._speaker_profile_store_path = self._resolve_speaker_profile_store_path(speaker_profile_store_path)
+        self._speaker_profile_quality_gate_enabled = bool(speaker_profile_quality_gate_enabled)
+        self._speaker_profile_quality_min_confidence = float(
+            max(0.0, min(1.0, speaker_profile_quality_min_confidence))
+        )
         marker_style = str(speaker_marker_style or "").strip().lower()
         self._speaker_marker_style = "arrow" if marker_style in {"arrow", "arrows", ">>"} else "spk"
         self._speaker_pause_break_seconds = float(max(0.0, speaker_pause_break_seconds))
@@ -209,6 +216,10 @@ class WhisperXTranscriber:
                     speechbrain_model=self._speaker_speechbrain_model,
                     nemo_model=self._speaker_nemo_model,
                     on_status=self._emit,
+                    quality_gate=ClipQualityConfig(
+                        enabled=self._speaker_profile_quality_gate_enabled,
+                        min_confidence=self._speaker_profile_quality_min_confidence,
+                    ),
                 )
             )
         self._emit(f"WhisperX initialized: model={model_arg}, device={self._device}")

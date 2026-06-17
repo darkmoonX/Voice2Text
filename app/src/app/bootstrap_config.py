@@ -50,6 +50,7 @@ def build_runtime_config(args: argparse.Namespace) -> RuntimeConfig:
         whisperx_enable_vad=bool(args.whisperx_vad),
         whisperx_enable_diarization=bool(args.whisperx_diarization),
         whisperx_speaker_profile_enabled=bool(getattr(args, "whisperx_speaker_profile", True)),
+        whisperx_speaker_profile_quality_gate_enabled=bool(getattr(args, "whisperx_speaker_profile_quality_gate_enabled", False)),
         runtime_preset=str(getattr(args, "preset", "") or ""),
         whisperx_alignment_model=args.whisperx_alignment_model,
         whisperx_alignment_language=args.whisperx_alignment_language,

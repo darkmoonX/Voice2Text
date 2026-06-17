@@ -97,6 +97,8 @@ def _build_whisperx(config: RuntimeConfig, *, device_override: Optional[str], co
         speaker_profile_min_seconds=float(getattr(config, 'whisperx_speaker_profile_min_seconds', 0.8) or 0.8),
         speaker_profile_reconcile_threshold=float(getattr(config, 'whisperx_speaker_profile_reconcile_threshold', 0.52) or 0.52),
         speaker_profile_store_path=str(getattr(config, 'whisperx_speaker_profile_store_path', '') or ''),
+        speaker_profile_quality_gate_enabled=bool(getattr(config, 'whisperx_speaker_profile_quality_gate_enabled', False)),
+        speaker_profile_quality_min_confidence=float(getattr(config, 'whisperx_speaker_profile_quality_min_confidence', 0.45) or 0.45),
         speaker_marker_style=str(getattr(config, 'speaker_marker_style', 'spk') or 'spk'),
         speaker_pause_break_seconds=float(getattr(config, 'speaker_pause_break_seconds', 1.8)),
         auto_download=bool(config.stt_auto_download),

@@ -30,6 +30,7 @@ def build_arg_parser(whisper_defaults: WhisperRuntimeParams) -> argparse.Argumen
     parser.add_argument("--no-whisperx-diarization", dest="whisperx_diarization", action="store_false", help="Disable WhisperX diarization.")
     parser.add_argument("--whisperx-speaker-profile", dest="whisperx_speaker_profile", action="store_true", help="Enable cross-window speaker-profile identity.")
     parser.add_argument("--no-whisperx-speaker-profile", dest="whisperx_speaker_profile", action="store_false", help="Disable cross-window speaker-profile identity.")
+    parser.add_argument("--speaker-profile-quality-gate", dest="whisperx_speaker_profile_quality_gate_enabled", action="store_true", help="Gate the speaker-profile learn path: low-quality clips (gibberish/music/low-confidence) can still match an existing profile for display but never update/create a centroid.")
     parser.add_argument("--whisperx-alignment-model", default="", help="Optional WhisperX alignment model id/path.")
     parser.add_argument("--whisperx-alignment-language", choices=["auto", "follow-source", "en", "zh-hant", "zh-hans", "ja", "ko", "de", "fr", "es", "it", "pt", "ru"], default="auto", help="Alignment language override. auto=from ASR result, follow-source=use STT source language setting.")
     parser.add_argument("--whisperx-alignment-device", choices=["auto", "cpu", "cuda"], default="auto", help="Alignment device override. auto uses runtime heuristic.")

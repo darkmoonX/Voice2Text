@@ -32,6 +32,11 @@ class RuntimeConfig:
     whisperx_speaker_profile_min_seconds: float = 0.8
     whisperx_speaker_profile_reconcile_threshold: float = 0.52
     whisperx_speaker_profile_store_path: str = ''
+    # Round 0023 learn-path quality gate: when on, gibberish / music-tail / degenerate /
+    # low-confidence clips can still match an existing profile for display but never update or
+    # create a centroid. Default off until the harness A/B confirms it is CER-neutral.
+    whisperx_speaker_profile_quality_gate_enabled: bool = False
+    whisperx_speaker_profile_quality_min_confidence: float = 0.45
     speaker_marker_style: str = 'spk'
     speaker_pause_break_seconds: float = 1.8
     # Final display-script fold for the visible/exported subtitle: '' (off, keep

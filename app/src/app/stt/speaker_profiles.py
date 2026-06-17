@@ -65,6 +65,7 @@ class SpeakerProfileStore:
         candidate_min_seconds: float = 0.0,
         candidate_min_samples: int = 1,
         candidate_threshold: float | None = None,
+        allow_update: bool = True,
     ) -> SpeakerMatchResult:
         normalized = _normalize_embedding(embedding)
         if normalized.size == 0:
@@ -84,6 +85,19 @@ class SpeakerProfileStore:
                 if similarity > best_similarity:
                     best_similarity = similarity
                     best_index = idx
+
+            if not allow_update:
+                # Read-only quality-gate path: identify against an existing centroid for
+                # *display* only. Never average into a centroid, create a profile, or stage a
+                # candidate — so a low-quality clip cannot pollute the learned identities.
+                if best_index >= 0 and best_similarity >= min_threshold:
+                    profile = self._profiles[best_index]
+                    return SpeakerMatchResult(
+                        profile_id=str(profile.get("id") or ""),
+                        similarity=float(best_similarity),
+                        created=False,
+                    )
+                return SpeakerMatchResult(profile_id="", similarity=float(best_similarity), created=False)
 
             if best_index >= 0 and best_similarity >= min_threshold:
                 profile = self._profiles[best_index]

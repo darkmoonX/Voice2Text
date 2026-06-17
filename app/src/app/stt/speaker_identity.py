@@ -1,13 +1,14 @@
 """Modular speaker identity engine with pluggable embedding backends."""
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import math
 from pathlib import Path
 from typing import Callable
 
 import numpy as np
 
+from .profile_quality import ClipQualityConfig, evaluate_clip_quality
 from .speaker_profiles import SpeakerProfileStore
 
 
@@ -47,6 +48,7 @@ class SpeakerIdentityConfig:
     speechbrain_model: str
     nemo_model: str
     on_status: Callable[[str], None] | None = None
+    quality_gate: ClipQualityConfig = field(default_factory=ClipQualityConfig)
 
 
 class _BaseEmbeddingBackend:
@@ -348,6 +350,7 @@ class SpeakerIdentityEngine:
         self._match_threshold = float(max(0.0, min(0.999, config.match_threshold)))
         self._min_seconds = float(max(0.2, config.min_seconds))
         self._reconcile_threshold = float(max(0.0, min(0.999, config.reconcile_threshold)))
+        self._quality_gate = config.quality_gate or ClipQualityConfig()
         self._on_status = config.on_status
         self._last_stats: dict[str, object] = {}
         self._profile_store: SpeakerProfileStore | None = None
@@ -453,6 +456,10 @@ class SpeakerIdentityEngine:
             return segments
 
         spans_by_speaker: dict[str, list[tuple[float, float]]] = {}
+        # Per-speaker text + word scores, gathered from the same segments, feed the learn-path
+        # quality gate (round 0023). Only consumed when the gate is enabled.
+        text_by_speaker: dict[str, list[str]] = {}
+        scores_by_speaker: dict[str, list[float]] = {}
         for seg in segments:
             if not isinstance(seg, dict):
                 continue
@@ -467,6 +474,20 @@ class SpeakerIdentityEngine:
             if end <= start:
                 continue
             spans_by_speaker.setdefault(speaker, []).append((start, end))
+            if self._quality_gate.enabled:
+                seg_text = str(seg.get("text") or "").strip()
+                if seg_text:
+                    text_by_speaker.setdefault(speaker, []).append(seg_text)
+                for wd in (seg.get("words") or []):
+                    if not isinstance(wd, dict):
+                        continue
+                    raw_score = wd.get("score")
+                    if raw_score is None:
+                        continue
+                    try:
+                        scores_by_speaker.setdefault(speaker, []).append(float(raw_score))
+                    except (TypeError, ValueError):
+                        continue
         stats["local_speaker_count"] = int(len(spans_by_speaker))
         if not spans_by_speaker:
             stats["status"] = "skip_no_local_speaker"
@@ -482,6 +503,7 @@ class SpeakerIdentityEngine:
         skipped_no_profile_count = 0
         staged_count = 0
         promoted_count = 0
+        skipped_low_quality_count = 0
         audio_seconds = float(audio_f32.size) / 16000.0
         candidate_min_seconds, candidate_min_samples, evidence_cap_seconds = self._profile_evidence_policy(
             audio_seconds=audio_seconds,
@@ -509,6 +531,21 @@ class SpeakerIdentityEngine:
             if embedding is None:
                 skipped_no_embedding_count += 1
                 continue
+            # Learn-path quality gate (round 0023): a low-quality clip (gibberish / music tail /
+            # degenerate / low-confidence) may still *match* a mature profile for display, but must
+            # not create or average into a centroid. This stays strictly off the display-label
+            # path so the merge anchors — and thus the transcript/CER — are unchanged.
+            learn_allowed = True
+            if self._quality_gate.enabled:
+                quality = evaluate_clip_quality(
+                    text=" ".join(text_by_speaker.get(speaker, [])),
+                    word_scores=scores_by_speaker.get(speaker),
+                    duration_seconds=duration_seconds,
+                    config=self._quality_gate,
+                )
+                if not quality.ok:
+                    learn_allowed = False
+                    skipped_low_quality_count += 1
             matched = self._profile_store.match_or_create(
                 embedding=embedding,
                 threshold=self._match_threshold,
@@ -517,6 +554,7 @@ class SpeakerIdentityEngine:
                 candidate_min_seconds=candidate_min_seconds,
                 candidate_min_samples=candidate_min_samples,
                 candidate_threshold=candidate_threshold,
+                allow_update=learn_allowed,
             )
             if not matched.profile_id:
                 if matched.staged:
@@ -574,6 +612,7 @@ class SpeakerIdentityEngine:
         stats["skipped_short_count"] = int(skipped_short_count)
         stats["skipped_no_embedding_count"] = int(skipped_no_embedding_count)
         stats["skipped_no_profile_count"] = int(skipped_no_profile_count)
+        stats["skipped_low_quality_count"] = int(skipped_low_quality_count)
         stats["staged_candidate_count"] = int(staged_count)
         stats["promoted_candidate_count"] = int(promoted_count)
         stats["candidate_count"] = int(self._profile_store.candidate_count())
@@ -662,7 +701,9 @@ class SpeakerIdentityEngine:
                 f"{int(stats.get('visible_min_samples', 0) or 0)}x; "
                 f"visible_alias={stats.get('visible_alias_count', 0)}; "
                 f"evidence_cap={float(stats.get('evidence_cap_seconds', 0.0) or 0.0):.2f}s; "
-                f"skip_short={stats.get('skipped_short_count', 0)}; profile_total={stats.get('profile_count', 0)}"
+                f"skip_short={stats.get('skipped_short_count', 0)}; "
+                f"skip_lowq={stats.get('skipped_low_quality_count', 0)}; "
+                f"profile_total={stats.get('profile_count', 0)}"
             )
         return segments
 

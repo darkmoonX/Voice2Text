@@ -91,6 +91,7 @@ python main.py
 - Pre-STT VAD Gate has been removed. WhisperX internal VAD (`silero-vad` / `pyannote`) is the only speech gate.
 - Speaker-profile embedding backend is now selectable in Settings (`pyannote` / `speechbrain-ecapa` / `nemo-titanet`).
 - Advanced speaker-profile options remain config-driven: `whisperx_speaker_profile_enabled`, `whisperx_speaker_profile_model`, `whisperx_speaker_speechbrain_model`, `whisperx_speaker_nemo_model`, `whisperx_speaker_profile_match_threshold`, `whisperx_speaker_profile_min_seconds`, `whisperx_speaker_profile_store_path`.
+- Speaker-profile learn-path quality gate (`whisperx_speaker_profile_quality_gate_enabled`, default off; CLI `--speaker-profile-quality-gate`): when on, a low-quality speaker clip (empty / music-sound tag / `♪` / degenerate repetition / mean word-score below `whisperx_speaker_profile_quality_min_confidence`) can still match an existing profile for display but never updates or creates an embedding centroid, so gibberish and music tails do not pollute speaker identities. The displayed speaker label for a span is unaffected — only profile *learning* is gated.
 - Transcript export is available in Settings:
   - enable/disable export
   - formats (`txt,srt,json`)
