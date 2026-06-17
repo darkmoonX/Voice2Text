@@ -1085,7 +1085,19 @@ class SubtitleAssembler:
                 f'{self._rolling_committed_text}\n\n{marker} {moved_text}'
             )
         else:
-            self._rolling_committed_text = self._merge_by_exact_overlap(self._rolling_committed_text, moved_text)
+            base = self._rolling_committed_text
+            merged = self._merge_by_exact_overlap(base, moved_text)
+            # Collapse guard: a committed-building merge must never drop more than
+            # the incoming chunk's worth of prior committed text. The marker-leading
+            # merge path can over-match a new speaker's [spk_new] chunk against the
+            # previous speaker's committed tail and delete it (round 0019: committed
+            # 302->46 chars at a transition under aggressive assignment). When that
+            # happens, fall back to a plain append (no cross-boundary dedupe). The
+            # guard is inert for sane merges, so normal CER is unchanged.
+            if base and (len(base) - len(merged)) > len(moved_text):
+                sep = '' if base.endswith('\n') else '\n'
+                merged = self._normalize_output_text(f'{base}{sep}{moved_text}')
+            self._rolling_committed_text = merged
         self._last_overlap_summary = previous_summary
         self._rolling_committed_last_speaker = self._last_non_empty_speaker_label(words) or self._rolling_committed_last_speaker
         committed_end = max((float(w.end) for w in words), default=None)
