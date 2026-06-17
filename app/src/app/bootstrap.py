@@ -6,6 +6,7 @@ from pathlib import Path
 from .bootstrap_args import build_arg_parser, print_app_sessions, print_devices
 from .bootstrap_config import build_runtime_config, default_log_dir
 from .bootstrap_runtime import run_qt_app
+from .settings.presets import apply_preset_defaults
 from .stt import has_failed_reports, run_provider_health_check, summarize_health_reports
 from .whisper_config import load_whisper_runtime_params
 
@@ -15,6 +16,7 @@ def main(argv: list[str] | None = None) -> int:
     whisper_defaults = load_whisper_runtime_params(config_path)
     parser = build_arg_parser(whisper_defaults)
     parser.set_defaults(log_dir=default_log_dir())
+    apply_preset_defaults(parser, argv)
     args = parser.parse_args(argv)
     if args.list_devices:
         return print_devices()

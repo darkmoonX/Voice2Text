@@ -13,6 +13,7 @@ def build_arg_parser(whisper_defaults: WhisperRuntimeParams) -> argparse.Argumen
     parser.add_argument("--stt-variant", choices=["auto", "cpu", "gpu"], default="auto", help="Execution variant hint for providers.")
     parser.add_argument("--stt-auto-download", dest="stt_auto_download", action="store_true", help="Allow provider presets to auto-download missing model files.")
     parser.add_argument("--no-stt-auto-download", dest="stt_auto_download", action="store_false", help="Disable provider preset auto-download behavior.")
+    parser.add_argument("--preset", choices=["low-latency", "balanced", "high-accuracy"], default="", help="Runtime preset bundling model/compute/beam/seg-hop/alignment/diarization/speaker-profile. Explicit per-knob flags override it.")
     parser.add_argument("--model", default="small", help="Model name used by the selected STT provider.")
     parser.add_argument("--stt-model-path", default="", help="Optional model folder path for STT providers. Overrides --model when set.")
     parser.add_argument("--device", default="cuda", help="Whisper device: cuda or cpu")
@@ -27,6 +28,8 @@ def build_arg_parser(whisper_defaults: WhisperRuntimeParams) -> argparse.Argumen
     parser.add_argument("--no-whisperx-vad", dest="whisperx_vad", action="store_false", help="Disable WhisperX internal VAD in transcription.")
     parser.add_argument("--whisperx-diarization", dest="whisperx_diarization", action="store_true", help="Enable WhisperX diarization.")
     parser.add_argument("--no-whisperx-diarization", dest="whisperx_diarization", action="store_false", help="Disable WhisperX diarization.")
+    parser.add_argument("--whisperx-speaker-profile", dest="whisperx_speaker_profile", action="store_true", help="Enable cross-window speaker-profile identity.")
+    parser.add_argument("--no-whisperx-speaker-profile", dest="whisperx_speaker_profile", action="store_false", help="Disable cross-window speaker-profile identity.")
     parser.add_argument("--whisperx-alignment-model", default="", help="Optional WhisperX alignment model id/path.")
     parser.add_argument("--whisperx-alignment-language", choices=["auto", "follow-source", "en", "zh-hant", "zh-hans", "ja", "ko", "de", "fr", "es", "it", "pt", "ru"], default="auto", help="Alignment language override. auto=from ASR result, follow-source=use STT source language setting.")
     parser.add_argument("--whisperx-alignment-device", choices=["auto", "cpu", "cuda"], default="auto", help="Alignment device override. auto uses runtime heuristic.")
@@ -95,6 +98,7 @@ def build_arg_parser(whisper_defaults: WhisperRuntimeParams) -> argparse.Argumen
         whisperx_forced_alignment=True,
         whisperx_vad=False,
         whisperx_diarization=False,
+        whisperx_speaker_profile=True,
         debug_mode=False,
         transcript_export_enabled=False,
         transcript_export_include_timestamps=True,

@@ -45,6 +45,9 @@ class RuntimeConfig:
     # ~1.48); startup is unaffected (prefill fires the first window after ~hop).
     segment_seconds: float = 10.0
     hop_seconds: float = 2.0
+    # Active runtime preset name ('' = none). Presets seed the model/compute/beam/
+    # seg-hop/alignment/diarization/speaker-profile bundle; explicit knobs override.
+    runtime_preset: str = ''
     source_language: Optional[str] = None
     cjk_no_space_gap_seconds: float = 0.2
     source_mode: str = 'loopback'
