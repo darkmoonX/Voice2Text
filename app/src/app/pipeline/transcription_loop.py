@@ -356,7 +356,14 @@ class TranscriptionLoopEngine:
                             "meta": transcription_meta,
                         }
                     )
-                    self._deps.emit_subtitle_ready(source_out, translated_out)
+                    # Overlay shows the committed|raw boundary frame; export + the
+                    # delta logger above keep the clean source_out (display-only).
+                    overlay_source = source_out
+                    if source_out:
+                        overlay_frame = self._deps.subtitle_assembler.get_live_overlay_frame()
+                        if overlay_frame:
+                            overlay_source = overlay_frame
+                    self._deps.emit_subtitle_ready(overlay_source, translated_out)
 
                     if self._speech_hops * hop_seconds >= max(segment_seconds, hop_seconds * 2.0):
                         self._mark_sentence_break()

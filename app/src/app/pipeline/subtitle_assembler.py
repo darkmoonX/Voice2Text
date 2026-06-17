@@ -28,6 +28,10 @@ class SubtitleAssembler:
     _CJK_MAX_COMPACT_CHARS = 18
     _HISTORY_TAIL_DEDUPE_WORDS = 160
     _DEDUPE_BUCKET_SECONDS = 0.5
+    # Visual rule drawn between fully-committed history and the live raw window in
+    # the overlay-only frame (round 0017). Display-only: never enters word state,
+    # merge keys, the export-facing source text, or the CER comparison.
+    _LIVE_RAW_SEPARATOR = '┄' * 12
 
     def __init__(self) -> None:
         self._is_cjk_source = False
@@ -58,6 +62,10 @@ class SubtitleAssembler:
         # the duplication classes 0003/0004 fixed.
         self._finalize_snapshot_text = ''
         self._finalize_snapshot_len = 0
+        # Overlay-only decorated frame (committed history | separator | raw window
+        # with an immediate speaker marker). Recomputed each non-empty merge; read
+        # via get_live_overlay_frame(). Kept separate from the returned clean text.
+        self._last_overlay_frame = ''
         self._speaker_display_map: dict[str, str] = {}
         self._speaker_display_next_index = 0
         self._required_agreement_count = 3
@@ -231,6 +239,7 @@ class SubtitleAssembler:
             self._last_merge_diagnostics = diagnostics
             return ''
         self._last_emitted_source_text = merged
+        self._last_overlay_frame = self._compose_live_overlay_frame(merged, incoming)
         diagnostics['total_seconds'] = time.perf_counter() - total_started_at
         self._last_merge_diagnostics = diagnostics
         return self._project_display_script(merged)
@@ -450,6 +459,60 @@ class SubtitleAssembler:
 
     def get_partial_text(self) -> str:
         return self._latest_partial_text
+
+    def get_live_overlay_frame(self) -> str:
+        """Overlay-only source frame: committed history | separator | live raw window.
+
+        Display-only decoration of the most recent merge. The clean text returned by
+        merge_incremental_text (used for translation + transcript export) is never
+        decorated, so export/CER stay byte-identical.
+        """
+        return self._project_display_script(self._last_overlay_frame)
+
+    def _compose_live_overlay_frame(self, merged: str, incoming: list[_WordState]) -> str:
+        # Raw region text comes from the CLEAN deduped `merged` (never the raw word
+        # state, which is char-interleaved across overlapping windows). The split
+        # point is where committed history ends inside merged: exact prefix in the
+        # dominant paths, longest-common-prefix as a robust fallback when a marker
+        # re-anchor revised the committed tail.
+        committed = self._normalize_output_text(self._rolling_committed_text)
+        if not committed:
+            return merged  # nothing fully fixed yet -> all live
+        if merged.startswith(committed):
+            boundary = len(committed)
+        else:
+            boundary = len(self._common_prefix(merged, committed))
+        raw_region = merged[boundary:].strip()
+        if not raw_region:
+            return merged  # no live edge beyond committed -> no rule this frame
+        committed_part = merged[:boundary].rstrip() or committed
+        raw_region = self._prefix_immediate_speaker(raw_region, incoming)
+        return f'{committed_part}\n{self._LIVE_RAW_SEPARATOR}\n{raw_region}'
+
+    @staticmethod
+    def _common_prefix(a: str, b: str) -> str:
+        limit = min(len(a), len(b))
+        idx = 0
+        while idx < limit and a[idx] == b[idx]:
+            idx += 1
+        return a[:idx]
+
+    def _prefix_immediate_speaker(self, raw_region: str, incoming: list[_WordState]) -> str:
+        # One immediate (un-gated) marker for the live region: the most recent
+        # window word's raw diarization label. Flips the moment a new speaker takes
+        # the live edge, while committed history keeps its stable gated markers.
+        if not raw_region or self._starts_with_speaker_marker(raw_region):
+            return raw_region
+        speaker = ''
+        for word in sorted(incoming, key=lambda w: (w.start, w.end), reverse=True):
+            token = str(word.speaker or '').strip()
+            if token:
+                speaker = token
+                break
+        marker = self._speaker_label_to_marker(speaker) if speaker else ''
+        if not marker:
+            return raw_region
+        return f'{marker} {raw_region}'
 
 
     def get_history_text(self) -> str:
