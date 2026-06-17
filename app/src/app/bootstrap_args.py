@@ -13,7 +13,7 @@ def build_arg_parser(whisper_defaults: WhisperRuntimeParams) -> argparse.Argumen
     parser.add_argument("--stt-variant", choices=["auto", "cpu", "gpu"], default="auto", help="Execution variant hint for providers.")
     parser.add_argument("--stt-auto-download", dest="stt_auto_download", action="store_true", help="Allow provider presets to auto-download missing model files.")
     parser.add_argument("--no-stt-auto-download", dest="stt_auto_download", action="store_false", help="Disable provider preset auto-download behavior.")
-    parser.add_argument("--preset", choices=["low-latency", "balanced", "high-accuracy"], default="", help="Runtime preset bundling model/compute/beam/seg-hop/alignment/diarization/speaker-profile. Explicit per-knob flags override it.")
+    parser.add_argument("--preset", choices=["balanced", "high-accuracy"], default="", help="Runtime preset bundling model/compute/beam/seg-hop/alignment/diarization/speaker-profile. balanced=live default; high-accuracy=large-v2 (best quality, not live-realtime). Explicit per-knob flags override it.")
     parser.add_argument("--model", default="small", help="Model name used by the selected STT provider.")
     parser.add_argument("--stt-model-path", default="", help="Optional model folder path for STT providers. Overrides --model when set.")
     parser.add_argument("--device", default="cuda", help="Whisper device: cuda or cpu")

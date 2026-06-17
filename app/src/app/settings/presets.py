@@ -12,20 +12,17 @@ from __future__ import annotations
 
 import argparse
 
-PRESET_NAMES: tuple[str, ...] = ("low-latency", "balanced", "high-accuracy")
+# round-0015 Phase B dropped the `low-latency` preset: on hard CJK every "faster"
+# lever backfires through whisper's temperature-fallback retries -- a smaller model,
+# int8_float16, and beam 1 all measured SLOWER (more retries), and shrinking seg/hop
+# to the overlap-3 floor drops ~20% of words. The only real headroom lever is a
+# larger hop, which trades completeness, so there is no faster-AND-acceptable point
+# to ship. `balanced` is already near-optimal for live; `high-accuracy` is a
+# quality/offline mode (rtf ~2.1x, does NOT sustain live realtime).
+PRESET_NAMES: tuple[str, ...] = ("balanced", "high-accuracy")
 
 # Canonical bundles in RuntimeConfig field-name space.
 PRESETS: dict[str, dict[str, object]] = {
-    "low-latency": {
-        "model_size": "small",
-        "compute_type": "int8_float16",
-        "whisper_beam_size": 1,
-        "segment_seconds": 6.0,
-        "hop_seconds": 2.0,  # overlap 3.0 == agreement-count floor
-        "whisperx_enable_forced_alignment": False,
-        "whisperx_enable_diarization": False,
-        "whisperx_speaker_profile_enabled": False,
-    },
     "balanced": {
         "model_size": "medium",
         "compute_type": "float16",
@@ -37,6 +34,9 @@ PRESETS: dict[str, dict[str, object]] = {
         "whisperx_speaker_profile_enabled": True,
     },
     "high-accuracy": {
+        # Best quality (large-v2, CER 0.136 vs balanced 0.147) but rtf ~2.1x: it
+        # does NOT sustain live realtime -- intended for imported-file processing
+        # or users who accept lag.
         "model_size": "large-v2",
         "compute_type": "float16",
         "whisper_beam_size": 5,
@@ -67,8 +67,7 @@ def normalize_preset(name: str | None) -> str:
     token = str(name or "").strip().lower().replace("_", "-")
     if token in PRESETS:
         return token
-    aliases = {"low": "low-latency", "fast": "low-latency", "latency": "low-latency",
-               "accurate": "high-accuracy", "accuracy": "high-accuracy", "quality": "high-accuracy",
+    aliases = {"accurate": "high-accuracy", "accuracy": "high-accuracy", "quality": "high-accuracy",
                "default": "balanced", "balance": "balanced"}
     return aliases.get(token, "")
 
