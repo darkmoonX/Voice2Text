@@ -40,8 +40,11 @@ class RuntimeConfig:
     cpu_fallback_on_cuda_error: bool = True
     cuda_compat_source_dll: str = 'D:\\CUDA\\bin\\x64\\cublas64_13.dll'
     ffmpeg_dll_dir: str = 'D:\\FFmpeg\\ffmpeg-7.1.1-full_build-shared\\bin'
-    segment_seconds: float = 6.0
-    hop_seconds: float = 1.5
+    # Measured best operating point (round 0014 Phase B): seg 10 / hop 2 (overlap 5)
+    # gives the lowest CER and keeps up in realtime (rtf ~0.93 vs the old 6/1.5's
+    # ~1.48); startup is unaffected (prefill fires the first window after ~hop).
+    segment_seconds: float = 10.0
+    hop_seconds: float = 2.0
     source_language: Optional[str] = None
     cjk_no_space_gap_seconds: float = 0.2
     source_mode: str = 'loopback'
