@@ -32,7 +32,9 @@ PRESETS: dict[str, dict[str, object]] = {
         "stt_variant": "cpu",
         "model_size": "small",
         "compute_type": "int8",
-        "whisper_beam_size": 1,
+        # beam 3 is the cheap sweet spot on CPU: vs beam 1 it costs only ~6% rtf (the model forward
+        # pass dominates, not beam search) for a small accuracy gain. Override with --beam-size.
+        "whisper_beam_size": 3,
         "segment_seconds": 10.0,
         "hop_seconds": 2.0,
         "whisperx_enable_forced_alignment": False,
