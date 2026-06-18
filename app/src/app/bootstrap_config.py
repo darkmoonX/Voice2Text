@@ -105,6 +105,7 @@ def build_runtime_config(args: argparse.Namespace) -> RuntimeConfig:
         translation_from=args.from_lang,
         translation_to=args.to_lang,
         translation_backend=str(getattr(args, "translation_backend", "argos") or "argos"),
+        translation_nllb_auto_convert=bool(getattr(args, "translation_nllb_auto_convert", True)),
         translation_queue_max=int(getattr(args, "translation_queue_max", 0) or 0),
         translation_request_timeout_seconds=float(getattr(args, "translation_timeout", 8.0) or 8.0),
         translation_max_retries=int(getattr(args, "translation_max_retries", 0) or 0),

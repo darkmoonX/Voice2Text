@@ -107,6 +107,7 @@ class RuntimeConfig:
     translation_nllb_model_path: str = ''
     translation_nllb_model_repo: str = 'facebook/nllb-200-distilled-600M'
     translation_nllb_auto_download: bool = True
+    translation_nllb_auto_convert: bool = True
     translation_nllb_device: str = 'cpu'
     translation_nllb_compute_type: str = 'int8'
     # Engine policy. queue_max <= 0 keeps the engine in inline-passthrough mode (byte-identical

@@ -8,7 +8,9 @@ from __future__ import annotations
 
 import importlib
 import importlib.util
+import shutil
 import threading
+import time
 from pathlib import Path
 from typing import Callable, Optional
 
@@ -28,6 +30,27 @@ _MODEL_ALLOW_PATTERNS = [
     "tokenizer_config.json",
     "special_tokens_map.json",
     "*.model",
+]
+_PYTORCH_MODEL_ALLOW_PATTERNS = [
+    "config.json",
+    "pytorch_model.bin",
+    "pytorch_model-*.bin",
+    "model.safetensors",
+    "model-*.safetensors",
+    "shared_vocabulary.json",
+    "sentencepiece.bpe.model",
+    "tokenizer.json",
+    "tokenizer_config.json",
+    "special_tokens_map.json",
+    "*.model",
+    "generation_config.json",
+]
+_TOKENIZER_COPY_FILES = [
+    "sentencepiece.bpe.model",
+    "tokenizer.json",
+    "tokenizer_config.json",
+    "special_tokens_map.json",
+    "shared_vocabulary.json",
 ]
 
 _SOURCE_FLORES = {
@@ -67,6 +90,7 @@ class NllbTranslator:
         model_dir: str | Path | None = None,
         model_repo: str = DEFAULT_NLLB_MODEL_REPO,
         auto_download: bool = True,
+        auto_convert: bool = True,
         device: str = "cpu",
         compute_type: str = "int8",
         beam_size: int = 4,
@@ -79,6 +103,7 @@ class NllbTranslator:
         self._model_dir = Path(model_dir) if model_dir else library_model_dir("translation") / "nllb" / DEFAULT_NLLB_MODEL_DIR
         self._model_repo = str(model_repo or DEFAULT_NLLB_MODEL_REPO).strip() or DEFAULT_NLLB_MODEL_REPO
         self._auto_download = bool(auto_download)
+        self._auto_convert = bool(auto_convert)
         self._device = "cuda" if str(device or "").strip().lower() == "cuda" else "cpu"
         self._compute_type = (compute_type or "int8").strip().lower() or "int8"
         self._beam_size = max(1, int(beam_size or 4))
@@ -117,6 +142,7 @@ class NllbTranslator:
             model_dir=str(getattr(config, "translation_nllb_model_path", "") or "").strip() or None,
             model_repo=str(getattr(config, "translation_nllb_model_repo", DEFAULT_NLLB_MODEL_REPO) or DEFAULT_NLLB_MODEL_REPO),
             auto_download=bool(getattr(config, "translation_nllb_auto_download", True)),
+            auto_convert=bool(getattr(config, "translation_nllb_auto_convert", True)),
             device=str(getattr(config, "translation_nllb_device", "cpu") or "cpu"),
             compute_type=str(getattr(config, "translation_nllb_compute_type", "int8") or "int8"),
             on_status=on_status,
@@ -194,9 +220,10 @@ class NllbTranslator:
         try:
             self._prepare_model_dir()
             if not self._is_ct2_model_ready(self._model_dir):
+                suffix = "auto-convert is off" if not self._auto_convert else "auto-convert did not produce a ready model"
                 self._state = TranslationState(
                     False,
-                    f"NLLB model is not a ready CTranslate2 model: {self._model_dir}",
+                    f"NLLB model is not a ready CTranslate2 model: {self._model_dir} ({suffix})",
                 )
                 return
             ctranslate2 = importlib.import_module("ctranslate2")
@@ -227,6 +254,8 @@ class NllbTranslator:
             self._emit(f"[download] nllb cache hit: {self._model_dir}")
             return
         if not self._auto_download:
+            if self._auto_convert:
+                self._convert_pytorch_to_ct2()
             return
         self._emit(f"[download] nllb preparing: {self._model_repo}")
         download_hf_files_with_progress(
@@ -237,10 +266,80 @@ class NllbTranslator:
             provider="nllb",
             model_name=self._model_repo,
         )
+        if self._is_ct2_model_ready(self._model_dir):
+            return
+        if self._auto_convert:
+            self._convert_pytorch_to_ct2()
+
+    def _convert_pytorch_to_ct2(self) -> None:
+        if not self._auto_convert:
+            return
+        started = time.monotonic()
+        self._emit(f"[convert] nllb: converting {self._model_repo} -> CT2 int8 ...")
+        source = self._prepare_pytorch_conversion_source()
+        # Only an intermediate cache we downloaded ourselves is safe to delete afterwards;
+        # a user-supplied local PyTorch path must be left untouched.
+        downloaded_source = source == self._raw_pytorch_cache_dir()
+        tmp_dir = self._model_dir.with_name(self._model_dir.name + ".tmp-convert")
+        if tmp_dir.exists():
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+        tmp_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            ctranslate2 = importlib.import_module("ctranslate2")
+            converter_cls = ctranslate2.converters.TransformersConverter
+            # `copy_files` is a TransformersConverter *constructor* arg in CTranslate2, not a
+            # `.convert()` arg; pass the tokenizer files that exist alongside the source model.
+            converter = converter_cls(
+                str(source),
+                copy_files=[name for name in _TOKENIZER_COPY_FILES if (Path(source) / name).exists()],
+            )
+            converter.convert(
+                str(tmp_dir),
+                quantization="int8",
+                force=True,
+            )
+            if not self._is_ct2_model_ready(tmp_dir):
+                raise RuntimeError(f"conversion finished but CT2 output is incomplete: {tmp_dir}")
+            if self._model_dir.exists():
+                shutil.rmtree(self._model_dir, ignore_errors=True)
+            shutil.move(str(tmp_dir), str(self._model_dir))
+            elapsed = time.monotonic() - started
+            self._emit(f"[convert] nllb: conversion done in {elapsed:.1f}s")
+        except Exception:
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+            raise
+        if downloaded_source:
+            # Reclaim the ~2.4GB transient PyTorch download now that the CT2 model is in place.
+            shutil.rmtree(source, ignore_errors=True)
+            self._emit(f"[convert] nllb: removed intermediate PyTorch cache: {source}")
+
+    def _prepare_pytorch_conversion_source(self) -> Path:
+        candidate = Path(self._model_repo)
+        if candidate.exists():
+            return candidate
+        raw_dir = self._raw_pytorch_cache_dir()
+        raw_dir.mkdir(parents=True, exist_ok=True)
+        download_hf_files_with_progress(
+            repo_id=self._model_repo,
+            output_dir=str(raw_dir),
+            allow_patterns=_PYTORCH_MODEL_ALLOW_PATTERNS,
+            progress_callback=self._on_status,
+            provider="nllb",
+            model_name=f"{self._model_repo}:pytorch",
+        )
+        return raw_dir
+
+    def _raw_pytorch_cache_dir(self) -> Path:
+        return self._model_dir.parent / "_pytorch" / self._slugify_repo_id(self._model_repo)
 
     @staticmethod
     def _is_ct2_model_ready(path: Path) -> bool:
         return bool((path / "config.json").exists() and (path / "model.bin").exists())
+
+    @staticmethod
+    def _slugify_repo_id(value: str) -> str:
+        token = str(value or "").strip().replace("\\", "/").strip("/")
+        return token.replace("/", "__").replace(":", "_") or "model"
 
     def _emit(self, message: str) -> None:
         emit_progress(self._on_status, message)

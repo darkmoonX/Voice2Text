@@ -402,10 +402,15 @@ selected backend so a slow/hanging backend can never stall the subtitle loop.
     status. No cloud translation service is used.
   An unknown name degrades to `argos` with a warning.
 - **NLLB model/dependencies** — install `requirements-translation-extra.txt` for `transformers`/`sentencepiece`.
-  The default cache path is `app/src/models/translation/nllb/`. The recommended model is a CTranslate2 int8
-  conversion of `facebook/nllb-200-distilled-600M` (roughly 600MB). First-run download/status messages use
-  byte/MB totals; if a downloaded folder is not a ready CTranslate2 model (`config.json` + `model.bin`), the backend
-  stays disabled and subtitles fall back to source-only.
+  The default cache path is `app/src/models/translation/nllb/`. On first use, the backend can download the
+  configured PyTorch NLLB model (`facebook/nllb-200-distilled-600M`, roughly 2.4GB) and convert it once into a
+  local CTranslate2 int8 folder (roughly 600MB). The intermediate PyTorch download is **removed after a successful
+  conversion** (only when the backend downloaded it; a user-supplied local source path is left untouched), so the
+  ~2.4GB is transient. Disable auto-conversion with `--no-translation-nllb-auto-convert` when you want to provide a
+  pre-converted CT2 model path/repo yourself.
+  Download/status messages use byte/MB totals; the local conversion step emits `[convert] nllb: ...` stage markers
+  instead of fake percentages. If conversion/download fails, the backend stays disabled and subtitles fall back to
+  source-only.
 - **Mixed-language routing** — when STT source language is `auto`, the display language hint still uses the stable
   session lock, but translation now routes each window through a corroborated detected source language when the
   text script and stability/token counts agree. Short/noisy windows or script mismatches fall back to the session
