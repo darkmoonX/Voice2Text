@@ -54,6 +54,13 @@ def create_translation_language_combo() -> QComboBox:
     return combo
 
 
+def create_translation_backend_combo() -> QComboBox:
+    combo = QComboBox()
+    combo.addItem("Argos", "argos")
+    combo.addItem("NLLB (offline, CPU)", "nllb")
+    return combo
+
+
 def create_whisperx_align_language_combo() -> QComboBox:
     combo = QComboBox()
     combo.addItem("auto", "auto")

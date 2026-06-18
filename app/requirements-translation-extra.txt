@@ -1,0 +1,7 @@
+# Optional offline translation backend dependencies.
+# NLLB inference uses CTranslate2. The project already receives ctranslate2
+# through faster-whisper, but keeping it explicit here makes the translation
+# extra self-contained for CPU-only installations.
+ctranslate2>=4.4.0
+transformers>=4.41.0
+sentencepiece>=0.2.0

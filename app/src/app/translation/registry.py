@@ -9,12 +9,13 @@ from __future__ import annotations
 
 from typing import Callable, Optional
 
-from .base import TranslationBackend, TranslationState
 from .argos_backend import ArgosTranslator
+from .base import TranslationBackend, TranslationState
+from .nllb_backend import NllbTranslator
 
 
-# Backend names recognized by the registry. Only "argos" is implemented; the others are placeholders.
-KNOWN_BACKENDS = ("argos", "llm", "cloud")
+# Backend names recognized by the registry. "llm"/"cloud" are placeholders.
+KNOWN_BACKENDS = ("argos", "nllb", "llm", "cloud")
 _NOT_IMPLEMENTED = ("llm", "cloud")
 
 
@@ -62,6 +63,9 @@ def build_backend(
 
     if token in ("", "argos"):
         return ArgosTranslator(enabled=enabled, source_code=source, target_code=target)
+
+    if token == "nllb":
+        return NllbTranslator.from_config(config, on_status=on_status)
 
     if token in _NOT_IMPLEMENTED:
         return UnavailableBackend(

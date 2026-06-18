@@ -7,7 +7,7 @@ Windows live subtitle overlay runtime (Python main process + C++ capture bridge)
 - UI: `PySide6`
 - Capture: Python capture adapters + C++ bridge (`WASAPI loopback`, `Application Loopback Capture`)
 - STT provider: `whisperx` only. Legacy persisted names such as `whisper` / `faster-whisper` are normalized to `whisperx` for compatibility.
-- Optional translation: `Argos Translate`
+- Optional translation: `Argos Translate` or offline NLLB (`CTranslate2` + `transformers`)
 
 ## Runtime Structure
 
@@ -56,6 +56,12 @@ Optional WhisperX diarization / speaker-identity dependencies:
 
 ```powershell
 pip install -r requirements-stt-extra.txt
+```
+
+Optional offline NLLB translation dependencies:
+
+```powershell
+pip install -r requirements-translation-extra.txt
 ```
 
 ## Build Native Capture Bridge
@@ -383,14 +389,30 @@ Settings window behavior:
 - Runtime performs one-time CUDA context warmup before first diarization forward call to reduce first-call `cublasLt` fallback warning noise.
 - Validation (2026-05-26): foreground 70s probe successfully initialized diarization and observed speaker-turn marker output after access grant + cache/auth fixes.
 
-## Translation Backends (round 0026)
+## Translation Backends (round 0026/0030)
 
 Translation is pluggable and runs through a `TranslationEngine` (`app/src/app/translation/`) that wraps the
 selected backend so a slow/hanging backend can never stall the subtitle loop.
 
-- **Backend selection** — `--translation-backend {argos,llm,cloud}` (default `argos`). Only `argos` is
-  implemented; `llm`/`cloud` are reserved registry slots that resolve to a disabled stub with a clear
-  "not yet implemented" status (no network code ships yet). An unknown name degrades to `argos` with a warning.
+- **Backend selection** — `--translation-backend {argos,nllb,llm,cloud}` (default `argos`).
+  - `argos`: light offline backend using per-source/target Argos models.
+  - `nllb`: offline multilingual backend using a local CTranslate2 NLLB model. It is CPU + int8 by default and
+    only uses CUDA if explicitly configured via `translation_nllb_device='cuda'`.
+  - `llm`/`cloud`: reserved registry slots that resolve to a disabled stub with a clear "not yet implemented"
+    status. No cloud translation service is used.
+  An unknown name degrades to `argos` with a warning.
+- **NLLB model/dependencies** — install `requirements-translation-extra.txt` for `transformers`/`sentencepiece`.
+  The default cache path is `app/src/models/translation/nllb/`. The recommended model is a CTranslate2 int8
+  conversion of `facebook/nllb-200-distilled-600M` (roughly 600MB). First-run download/status messages use
+  byte/MB totals; if a downloaded folder is not a ready CTranslate2 model (`config.json` + `model.bin`), the backend
+  stays disabled and subtitles fall back to source-only.
+- **Mixed-language routing** — when STT source language is `auto`, the display language hint still uses the stable
+  session lock, but translation now routes each window through a corroborated detected source language when the
+  text script and stability/token counts agree. Short/noisy windows or script mismatches fall back to the session
+  lock, so subtitle source text remains unchanged while genuine code-switch translation improves.
+- **Recommended NLLB policy** — because NLLB is CPU-heavy, use a non-zero translation queue for live sessions, for
+  example `--translation-queue-max 4 --translation-timeout 8.0`. The default remains `--translation-queue-max 0`
+  for back-compatible inline behavior.
 - **Off-thread policy** — by default the engine is in **inline passthrough** mode (`--translation-queue-max 0`),
   byte-identical to the historical direct Argos call. Set `--translation-queue-max N` (> 0) to move translation
   onto a bounded background worker with:

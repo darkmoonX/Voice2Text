@@ -36,6 +36,7 @@ class SettingsPayloadInput:
     preprocess_enabled: bool
     preprocess_modules: str
     translation_enabled: bool
+    translation_backend: str
     bilingual_style: str
     font_size: int
     overlay_opacity: float
@@ -138,6 +139,7 @@ def build_settings_updates(payload: SettingsPayloadInput, *, lang: str, hop_gt_s
         'preprocess_enabled': bool(payload.preprocess_enabled),
         'preprocess_modules': payload.preprocess_modules.strip() or 'auto',
         'translation_enabled': bool(payload.translation_enabled),
+        'translation_backend': _normalize_translation_backend(payload.translation_backend),
         'translation_from': translation_from,
         'translation_to': payload.translation_to,
         'bilingual_style': payload.bilingual_style,
@@ -154,3 +156,9 @@ def build_settings_updates(payload: SettingsPayloadInput, *, lang: str, hop_gt_s
         'transcript_export_include_speaker': bool(payload.transcript_export_include_speaker),
     }
 
+
+def _normalize_translation_backend(value: str) -> str:
+    token = str(value or "argos").strip().lower()
+    if token in {"argos", "nllb", "llm", "cloud"}:
+        return token
+    return "argos"

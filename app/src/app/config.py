@@ -101,9 +101,14 @@ class RuntimeConfig:
     translation_enabled: bool = False
     translation_from: str = 'auto'
     translation_to: str = 'zh'
-    # Round 0026 pluggable translation backend + off-thread engine policy.
-    # backend: 'argos' (only implemented); 'llm'/'cloud' are reserved (disabled stubs).
+    # Round 0026/0030 pluggable translation backend + off-thread engine policy.
+    # backend: 'argos' (default) or 'nllb'; 'llm'/'cloud' are reserved (disabled stubs).
     translation_backend: str = 'argos'
+    translation_nllb_model_path: str = ''
+    translation_nllb_model_repo: str = 'facebook/nllb-200-distilled-600M'
+    translation_nllb_auto_download: bool = True
+    translation_nllb_device: str = 'cpu'
+    translation_nllb_compute_type: str = 'int8'
     # Engine policy. queue_max <= 0 keeps the engine in inline-passthrough mode (byte-identical
     # to the historical direct backend call); > 0 moves translation onto a bounded background
     # worker with a per-request timeout + bounded retry so a slow backend never stalls the loop.

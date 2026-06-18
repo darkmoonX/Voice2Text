@@ -46,6 +46,7 @@ from .settings.widgets import (
     create_source_language_combo,
     create_stt_provider_combo,
     create_stt_variant_combo,
+    create_translation_backend_combo,
     create_whisperx_align_device_combo,
     create_whisperx_align_guard_combo,
     create_whisperx_diarization_device_combo,
@@ -282,6 +283,9 @@ class SettingsDialog(QDialog):
         self._bilingual_combo = QComboBox()
         self._bilingual_combo.addItem("stacked", "stacked")
         self._bilingual_combo.addItem("translation-only", "translation-only")
+        self._translation_backend_combo = create_translation_backend_combo()
+        self._translation_backend_hint = QLabel(self._t("translation_backend_hint"))
+        self._translation_backend_hint.setWordWrap(True)
         self._translation_language_combo = create_translation_language_combo()
 
         self._font_size_spin = QSpinBox()
@@ -381,6 +385,8 @@ class SettingsDialog(QDialog):
         translation_label_layout.addWidget(self._translation_enabled_check)
         translation_label_layout.addStretch(1)
         form_right.addRow(translation_label, self._bilingual_combo)
+        form_right.addRow(self._t("translation_backend"), self._translation_backend_combo)
+        form_right.addRow("", self._translation_backend_hint)
         form_right.addRow(self._t("translation_target"), self._translation_language_combo)
 
         form_right.addRow(self._t("font_size"), self._font_size_spin)
@@ -480,6 +486,7 @@ class SettingsDialog(QDialog):
         self._translation_enabled_check.setChecked(cfg.translation_enabled)
         style = cfg.bilingual_style if cfg.bilingual_style != "inline" else "stacked"
         self._set_combo_data(self._bilingual_combo, style)
+        self._set_combo_data(self._translation_backend_combo, str(getattr(cfg, "translation_backend", "argos") or "argos"))
         self._set_combo_data(self._translation_language_combo, cfg.translation_to)
         source_language = normalize_source_language(cfg.source_language)
         self._set_combo_data(self._source_language_combo, source_language)
@@ -797,6 +804,8 @@ class SettingsDialog(QDialog):
     def _on_translation_toggle(self) -> None:
         enabled = self._translation_enabled_check.isChecked()
         self._bilingual_combo.setEnabled(enabled)
+        self._translation_backend_combo.setEnabled(enabled)
+        self._translation_backend_hint.setEnabled(enabled)
         self._translation_language_combo.setEnabled(enabled)
         self._translated_color_btn.setEnabled(enabled)
 
@@ -826,6 +835,7 @@ class SettingsDialog(QDialog):
             self._source_language_combo: "Source language hint for STT input.",
             self._translation_enabled_check: "Enable live translation.",
             self._bilingual_combo: "Subtitle style: stacked bilingual or translation-only.",
+            self._translation_backend_combo: "Translation backend: Argos is lighter; NLLB is offline multilingual and CPU-first.",
             self._translation_language_combo: "Translation target language.",
             self._font_size_spin: "Subtitle font size.",
             self._opacity_slider: "Overlay opacity.",
@@ -894,6 +904,7 @@ class SettingsDialog(QDialog):
             preprocess_enabled=self._preprocess_enabled_check.isChecked(),
             preprocess_modules="auto",
             translation_enabled=self._translation_enabled_check.isChecked(),
+            translation_backend=str(self._translation_backend_combo.currentData() or "argos"),
             bilingual_style=str(self._bilingual_combo.currentData()),
             font_size=int(self._font_size_spin.value()),
             overlay_opacity=float(self._opacity_slider.value()) / 100.0,
@@ -969,7 +980,6 @@ class SettingsDialog(QDialog):
     def _set_combo_data(combo: QComboBox, value: str) -> None:
         idx = combo.findData(value)
         combo.setCurrentIndex(max(0, idx))
-
 
 
 

@@ -14,6 +14,7 @@ from ..stt.preprocessing import AudioPreprocessingPipeline
 from ..translation import TranslationEngine
 from .audio_windowing import aligned_window_sizes
 from .gpu_telemetry import GpuTelemetryReporter
+from .language_routing import route_source_language
 from .segment_artifacts import SegmentArtifacts
 from .subtitle_assembler import SubtitleAssembler
 from .text_delta_logger import TextDeltaLogger
@@ -325,10 +326,15 @@ class TranscriptionLoopEngine:
                         continue
 
                     self._speech_hops += 1
+                    translation_source_language = self._runtime_translation_source_language_hint(
+                        transcription_meta=transcription_meta,
+                        text=source_rolling,
+                    )
+                    transcription_meta["runtime_translation_source_language"] = str(translation_source_language or "")
                     stage_started_at = time.monotonic()
                     (source_out, translated_out) = self._build_subtitle_payload(
                         source_rolling,
-                        runtime_source_language_hint=str(transcription_meta.get("runtime_auto_source_language") or ""),
+                        runtime_source_language_hint=str(translation_source_language or ""),
                     )
                     timing["subtitle_payload_seconds"] = time.monotonic() - stage_started_at
                     timing["window_total_seconds"] = time.monotonic() - window_started_at
@@ -570,6 +576,22 @@ class TranscriptionLoopEngine:
         if token:
             return token
         return str(self._auto_lang_locked or "")
+
+    def _runtime_translation_source_language_hint(
+        self,
+        *,
+        transcription_meta: dict[str, object],
+        text: str,
+    ) -> str | None:
+        return route_source_language(
+            explicit_source_language=self._deps.config.source_language,
+            locked_source_language=self._auto_lang_locked,
+            detected_language=transcription_meta.get("detected_language"),
+            stability_ratio=transcription_meta.get("stability_ratio"),
+            token_count=transcription_meta.get("token_count"),
+            text=text,
+            allowed_languages=self._auto_lang_allowed,
+        )
 
     @staticmethod
     def _normalize_language_token(value: object) -> str:
