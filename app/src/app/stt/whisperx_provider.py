@@ -425,7 +425,15 @@ class WhisperXTranscriber:
                 if isinstance(seg, dict)
                 else None
             )
-            for wd in (seg.get("words") or []):
+            seg_words = seg.get("words") or []
+            if not seg_words and not self._enable_forced_alignment and isinstance(seg, dict):
+                # Round 0024: with forced alignment off there are no word-level timestamps, so the
+                # subtitle assembler's timestamp-driven dedup would be bypassed and overlapping windows
+                # would duplicate. Synthesize word timestamps by distributing the segment text across the
+                # segment's (absolute-audio) [start, end]; the same utterance in two overlapping windows
+                # then lands at the same absolute time, so the existing word-state dedup collapses it.
+                seg_words = self._synthesize_segment_word_timestamps(seg)
+            for wd in seg_words:
                 try:
                     start = float(wd.get("start"))
                     end = float(wd.get("end"))
@@ -474,6 +482,10 @@ class WhisperXTranscriber:
             "stability_ratio": float(len(stable) / max(1, len(token_meta))) if token_meta else 1.0,
             "token_count": int(len(token_meta)),
             "stable_token_count": int(len(stable)),
+            # Explicit signal for the subtitle assembler: with forced alignment off there are no word
+            # token timestamps, so it must dedup overlapping windows by fuzzy text overlap (round 0024)
+            # rather than the timestamp-driven word-state path.
+            "alignment_enabled": bool(self._enable_forced_alignment),
             # Keep the full token set. Realtime windows (segment_seconds) produce far fewer than
             # this, but a single long-audio transcribe() call (e.g. compare direct full-file pass)
             # can emit thousands; an earlier 512-token cap silently truncated those exports to the
@@ -1854,6 +1866,45 @@ class WhisperXTranscriber:
                     return max(counts.items(), key=lambda pair: pair[1])[0]
             return None
         return self._resolve_segment_speaker(segment, prefer_profile=False)
+
+    @staticmethod
+    def _synthesize_segment_word_timestamps(segment: dict) -> list[dict[str, object]]:
+        """Build pseudo word-timestamps for an unaligned segment (round 0024).
+
+        Distributes the segment text uniformly across the segment's [start, end] (window-relative, but
+        a fixed absolute-audio span once the assembler adds `elapsed`). CJK text is split per character;
+        otherwise per whitespace word. Score is 1.0 so the words clear the assembler's stability gate.
+        Returns [] when the segment lacks usable text/timing.
+        """
+        text = str(segment.get("text") or "").strip()
+        if not text:
+            return []
+        try:
+            start = float(segment.get("start"))
+            end = float(segment.get("end"))
+        except (TypeError, ValueError):
+            return []
+        if not (end > start):
+            return []
+        if re.search(r"[㐀-鿿぀-ヿ가-힯]", text):
+            units = [ch for ch in text if not ch.isspace()]
+        else:
+            units = text.split()
+        if not units:
+            return []
+        span = (end - start) / float(len(units))
+        rows: list[dict[str, object]] = []
+        for index, unit in enumerate(units):
+            word_start = start + index * span
+            rows.append(
+                {
+                    "word": unit,
+                    "start": float(word_start),
+                    "end": float(word_start + span),
+                    "score": 1.0,
+                }
+            )
+        return rows
 
     @staticmethod
     def _resolve_segment_speaker(segment: dict, *, prefer_profile: bool = True) -> str | None:
