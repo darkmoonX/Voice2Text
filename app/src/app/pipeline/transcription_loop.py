@@ -11,7 +11,7 @@ from ..config import RuntimeConfig
 from ..stt import STTTranscriber
 from ..stt.registry import normalize_stt_provider
 from ..stt.preprocessing import AudioPreprocessingPipeline
-from ..translator import ArgosTranslator
+from ..translation import TranslationEngine
 from .audio_windowing import aligned_window_sizes
 from .gpu_telemetry import GpuTelemetryReporter
 from .segment_artifacts import SegmentArtifacts
@@ -30,7 +30,7 @@ class TranscriptionLoopDeps:
     get_capture: Callable[[], object | None]
     get_transcriber: Callable[[], STTTranscriber | None]
     get_preprocess_pipeline: Callable[[], AudioPreprocessingPipeline | None]
-    get_translator: Callable[[], ArgosTranslator | None]
+    get_translator: Callable[[], TranslationEngine | None]
     recover_capture_backend: Callable[[], bool]
     recover_from_runtime_transcription_error: Callable[[str], bool]
     emit_status: Callable[[str], None]

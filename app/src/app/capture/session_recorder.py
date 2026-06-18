@@ -14,13 +14,23 @@ import wave
 from ..audio_capture import AudioCaptureBase, AudioChunk
 
 _SENSITIVE_CONFIG_KEYS = {"whisperx_hf_token"}
+# Substrings that mark a key as a credential to redact (future translation/cloud backends may add
+# `translation_*_api_key` / `*_token` / `*_secret` fields — they are redacted automatically).
+_SENSITIVE_KEY_MARKERS = ("token", "api_key", "apikey", "secret", "password", "passwd")
+
+
+def _is_sensitive_key(key: str) -> bool:
+    if key in _SENSITIVE_CONFIG_KEYS:
+        return True
+    lowered = str(key).lower()
+    return any(marker in lowered for marker in _SENSITIVE_KEY_MARKERS)
 
 
 def redact_config_snapshot(snapshot: dict | None) -> dict:
-    """Copy a config snapshot with sensitive values redacted (e.g. HF token)."""
+    """Copy a config snapshot with sensitive values redacted (HF token, API keys, secrets)."""
     out: dict = {}
     for (key, value) in dict(snapshot or {}).items():
-        if key in _SENSITIVE_CONFIG_KEYS:
+        if _is_sensitive_key(key):
             out[key] = "<redacted>" if str(value or "").strip() else ""
         else:
             out[key] = value

@@ -97,6 +97,16 @@ class RuntimeConfig:
     translation_enabled: bool = False
     translation_from: str = 'auto'
     translation_to: str = 'zh'
+    # Round 0026 pluggable translation backend + off-thread engine policy.
+    # backend: 'argos' (only implemented); 'llm'/'cloud' are reserved (disabled stubs).
+    translation_backend: str = 'argos'
+    # Engine policy. queue_max <= 0 keeps the engine in inline-passthrough mode (byte-identical
+    # to the historical direct backend call); > 0 moves translation onto a bounded background
+    # worker with a per-request timeout + bounded retry so a slow backend never stalls the loop.
+    translation_queue_max: int = 0
+    translation_request_timeout_seconds: float = 8.0
+    translation_max_retries: int = 0
+    translation_retry_backoff_seconds: float = 0.25
     bilingual_style: str = 'stacked'
     device_index: Optional[int] = None
     log_dir: str = 'logs'

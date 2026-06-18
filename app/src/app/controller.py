@@ -19,7 +19,7 @@ from .pipeline.transcription_loop import TranscriptionLoopDeps, TranscriptionLoo
 from .status_routing import should_surface_overlay_status
 from .stt import STTTranscriber, create_stt_transcriber, normalize_stt_provider
 from .stt.preprocessing import AudioPreprocessingPipeline, create_audio_preprocessing_pipeline
-from .translator import ArgosTranslator
+from .translation import TranslationEngine, build_translation_engine
 
 class TranscriptionController(QObject):
     """Runtime worker that receives audio chunks, invokes STT, and emits UI-facing signals."""
@@ -39,7 +39,7 @@ class TranscriptionController(QObject):
         self._capture_lock = threading.Lock()
         self._transcriber: STTTranscriber | None = None
         self._preprocess_pipeline: AudioPreprocessingPipeline | None = None
-        self._translator: ArgosTranslator | None = None
+        self._translator: TranslationEngine | None = None
         self._bootstrap_thread: threading.Thread | None = None
         self._worker: threading.Thread | None = None
         self._running = threading.Event()
@@ -148,7 +148,7 @@ class TranscriptionController(QObject):
             if not self._running.is_set():
                 self._bootstrap_failed.emit(epoch, '')
                 return
-            translator = ArgosTranslator(enabled=self._config.translation_enabled, source_code=self._config.translation_from, target_code=self._config.translation_to)
+            translator = build_translation_engine(self._config, on_status=self._emit_status)
             if not self._running.is_set():
                 return
             self._bootstrap_ready.emit(epoch, transcriber, translator)
@@ -162,7 +162,7 @@ class TranscriptionController(QObject):
             return
         self._transcriber = transcriber
         self._preprocess_pipeline = create_audio_preprocessing_pipeline(self._config)
-        self._translator = translator if isinstance(translator, ArgosTranslator) else None
+        self._translator = translator if isinstance(translator, TranslationEngine) else None
         if self._preprocess_pipeline.stage_names:
             configured = ', '.join(self._preprocess_pipeline.stage_names)
             active = ', '.join(self._preprocess_pipeline.active_stage_names) or 'none'

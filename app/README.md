@@ -356,6 +356,26 @@ Settings window behavior:
 - Runtime performs one-time CUDA context warmup before first diarization forward call to reduce first-call `cublasLt` fallback warning noise.
 - Validation (2026-05-26): foreground 70s probe successfully initialized diarization and observed speaker-turn marker output after access grant + cache/auth fixes.
 
+## Translation Backends (round 0026)
+
+Translation is pluggable and runs through a `TranslationEngine` (`app/src/app/translation/`) that wraps the
+selected backend so a slow/hanging backend can never stall the subtitle loop.
+
+- **Backend selection** — `--translation-backend {argos,llm,cloud}` (default `argos`). Only `argos` is
+  implemented; `llm`/`cloud` are reserved registry slots that resolve to a disabled stub with a clear
+  "not yet implemented" status (no network code ships yet). An unknown name degrades to `argos` with a warning.
+- **Off-thread policy** — by default the engine is in **inline passthrough** mode (`--translation-queue-max 0`),
+  byte-identical to the historical direct Argos call. Set `--translation-queue-max N` (> 0) to move translation
+  onto a bounded background worker with:
+  - `--translation-timeout <seconds>` — per-request timeout; on timeout the subtitle emits source-only and the
+    loop moves on (never blocked beyond the timeout).
+  - `--translation-max-retries <n>` — bounded retry with backoff for a failed request.
+  - a **drop-oldest** queue: when full, the oldest pending request is discarded (translation is best-effort).
+- **No-translation mode** remains a working fallback; disabling translation or using a disabled backend yields
+  source-only subtitles unchanged.
+- **Credential redaction** — `redact_config_snapshot` (used by the crash bundle / session manifest) redacts any
+  key containing `token` / `api_key` / `secret` / `password`, so future cloud/LLM credentials never reach a bundle.
+
 ## Startup Import Behavior
 
 - CLI/bootstrap argument parsing does not import heavy STT runtimes (`torch`, `ctranslate2`) anymore.
