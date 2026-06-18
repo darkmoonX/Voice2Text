@@ -309,6 +309,14 @@ CUDA/GPU telemetry in debug mode:
   - PyTorch process memory: `alloc`, `reserved`, `max_alloc`, `total`
   - Device-level usage from `nvidia-smi`: `util`, `mem_util`, `vram used/total`
 
+Session-end observability summaries (round 0029):
+
+- On stop/EOF the loop emits, in addition to the per-window timings:
+  - `[timing-summary]` — session window count, `realtime_factor` (`mean(window_total)/hop`; > 1.0 = falling behind), `window_total` p50/p95/max, and the dominant stage.
+  - `[timing-stages]` — the **full per-stage breakdown** (`name=p50/p95/max s (n=N)`) for every window and WhisperX provider sub-stage (`transcribe`, `wx_asr`, `wx_align`, `wx_diarization`, `wx_speaker_profile`, `merge`, ...), sorted by p50 descending, so the dominant cost is visible without re-instrumenting.
+  - `[gpu-telemetry-summary]` — VRAM-used and GPU-util p50/p95/max plus peak torch `max_alloc`, aggregated from the periodic `[gpu-telemetry]` ticks. Only emitted when samples were collected (i.e. a `--debug-mode` CUDA session); silent no-op otherwise.
+- These are log-only diagnostics (suppressed from the overlay) and do not change subtitle/translation behavior.
+
 Debug window log visibility:
 
 - Main overlay now only shows curated important statuses (startup/capture/runtime-critical/downloading), while noisy diagnostics stay in logs.

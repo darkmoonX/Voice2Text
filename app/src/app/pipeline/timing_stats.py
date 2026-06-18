@@ -52,6 +52,31 @@ def percentile(values: list[float], q: float) -> float:
     return ordered[int(lo)] * (hi - rank) + ordered[int(hi)] * (rank - lo)
 
 
+def format_stage_breakdown(stages: dict) -> str:
+    """Render a `summary()["stages"]` dict as `name=p50/p95/max s (n=N)` fields, sorted by p50 desc.
+
+    Returns an empty string when there are no stages, so callers can skip the emit.
+    """
+    if not isinstance(stages, dict) or not stages:
+        return ""
+    ordered = sorted(
+        stages.items(),
+        key=lambda kv: float((kv[1] or {}).get("p50", 0.0) or 0.0),
+        reverse=True,
+    )
+    fields: list[str] = []
+    for name, stat in ordered:
+        stat = stat or {}
+        fields.append(
+            f"{name}="
+            f"{float(stat.get('p50', 0.0) or 0.0):.4f}/"
+            f"{float(stat.get('p95', 0.0) or 0.0):.4f}/"
+            f"{float(stat.get('max', 0.0) or 0.0):.4f}s "
+            f"(n={int(stat.get('n', 0) or 0)})"
+        )
+    return "; ".join(fields)
+
+
 class TimingAggregator:
     def __init__(self) -> None:
         self._stages: dict[str, list[float]] = {}

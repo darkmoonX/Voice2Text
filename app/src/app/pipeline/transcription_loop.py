@@ -17,7 +17,7 @@ from .gpu_telemetry import GpuTelemetryReporter
 from .segment_artifacts import SegmentArtifacts
 from .subtitle_assembler import SubtitleAssembler
 from .text_delta_logger import TextDeltaLogger
-from .timing_stats import TimingAggregator
+from .timing_stats import TimingAggregator, format_stage_breakdown
 
 
 @dataclass
@@ -370,6 +370,7 @@ class TranscriptionLoopEngine:
         finally:
             self._finalize_stream()
             self._emit_timing_summary()
+            self._deps.gpu_telemetry.emit_summary(self._deps.emit_status)
 
     def get_timing_summary(self) -> dict[str, object]:
         """Aggregated per-stage timing + realtime factor for the session (harness/export)."""
@@ -393,6 +394,9 @@ class TranscriptionLoopEngine:
             f"dominant={dominant}({dominant_p50:.4f}s p50); "
             f"hop={float(self._hop_seconds):.3f}s"
         )
+        breakdown = format_stage_breakdown(stages)
+        if breakdown:
+            self._deps.emit_status("[timing-stages] " + breakdown)
 
     def _build_subtitle_payload(self, source_text: str, *, runtime_source_language_hint: str = "") -> tuple[str, str]:
         translator = self._deps.get_translator()
