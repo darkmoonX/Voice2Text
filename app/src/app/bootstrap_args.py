@@ -38,6 +38,7 @@ def build_arg_parser(whisper_defaults: WhisperRuntimeParams) -> argparse.Argumen
     parser.add_argument("--whisperx-diarization-device", choices=["auto", "cpu", "cuda"], default="auto", help="Diarization device override. auto follows ASR device by default.")
     parser.add_argument("--whisperx-diarization-model", default="pyannote/speaker-diarization-3.1", help="WhisperX diarization model id.")
     parser.add_argument("--whisperx-hf-token", default="", help="Hugging Face token for WhisperX diarization model download/access.")
+    parser.add_argument("--crash-bundle", action="store_true", help="Write a redacted diagnostics zip (recent logs/traces/settings + environment report) to crash_bundles/ and exit.")
     parser.add_argument("--stt-health-check", action="store_true", help="Run STT provider health checks and exit.")
     parser.add_argument("--stt-health-check-scope", choices=["all", "active"], default="all", help="Health-check scope when --stt-health-check is enabled.")
     parser.add_argument("--no-cpu-fallback", action="store_true", help="Disable automatic CPU fallback when CUDA initialization fails.")

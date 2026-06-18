@@ -33,6 +33,12 @@ def main(argv: list[str] | None = None) -> int:
             f"model={cfg.model_size}, seg/hop={cfg.segment_seconds}/{cfg.hop_seconds})",
             flush=True,
         )
+    if getattr(args, "crash_bundle", False):
+        from .crash_bundle import create_crash_bundle
+
+        path = create_crash_bundle(cfg, reason="manual --crash-bundle")
+        print(f"[crash-bundle] {path}", flush=True)
+        return 0
     if args.stt_health_check:
         reports = run_provider_health_check(cfg, scope=args.stt_health_check_scope)
         print(summarize_health_reports(reports))
