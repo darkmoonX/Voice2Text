@@ -17,6 +17,46 @@ from ..model_paths import library_model_dir
 # per-language wav2vec2 alignment assets in their HF/torch/cache/custom layouts.
 _ALIGN_SUBDIRS = ("hf", "torch", "cache", "custom")
 
+# HuggingFace-hub / kenlm internal folders that are NOT models of their own — never list them as
+# entries (they showed up as bogus `.no_exist` / `blobs` / `refs` / `snapshots` / `language_model` rows).
+_INTERNAL_DIR_NAMES = {"blobs", "refs", "snapshots", ".no_exist", ".cache", ".locks", "language_model"}
+_WEIGHT_SUFFIXES = (".bin", ".pt", ".pth", ".ckpt", ".safetensors", ".onnx", ".h5", ".msgpack")
+
+
+def _is_internal_dir(name: str) -> bool:
+    return name in _INTERNAL_DIR_NAMES or name.startswith(".")
+
+
+def _is_hf_hub_dir(directory: Path) -> bool:
+    return directory.name.startswith("models--")
+
+
+def _pretty_hub_name(name: str) -> str:
+    return name[len("models--"):].replace("--", "/") if name.startswith("models--") else name
+
+
+def _is_model_dir(directory: Path) -> bool:
+    """A directory that *directly* holds model files (config.json or a weights file)."""
+    try:
+        for child in directory.iterdir():
+            if not child.is_file():
+                continue
+            if child.name == "config.json" or child.name.lower().endswith(_WEIGHT_SUFFIXES):
+                return True
+    except OSError:
+        return False
+    return False
+
+
+def _model_dir_size(directory: Path) -> int:
+    """Size of a model folder, counting only `blobs/` for HF-hub dirs so symlinked/copied
+    `snapshots/` are not double-counted."""
+    if _is_hf_hub_dir(directory):
+        blobs = directory / "blobs"
+        if blobs.is_dir():
+            return _dir_size_bytes(blobs)
+    return _dir_size_bytes(directory)
+
 
 def whisperx_cache_root() -> Path:
     """The WhisperX model/alignment cache root (`app/src/models/whisperx`)."""
@@ -47,20 +87,6 @@ def _dir_size_bytes(path: Path) -> int:
     except OSError:
         return total
     return total
-
-
-def _dir_ready(path: Path) -> bool:
-    """A cache dir is 'ready' when it holds at least one non-empty file."""
-    try:
-        for child in path.rglob("*"):
-            try:
-                if child.is_file() and child.stat().st_size > 0:
-                    return True
-            except OSError:
-                continue
-    except OSError:
-        return False
-    return False
 
 
 @dataclass
@@ -109,60 +135,62 @@ class ModelCacheScan:
         }
 
 
-def _scan_model_dirs(parent: Path, *, kind: str, lang: str = "") -> list[ModelCacheEntry]:
-    entries: list[ModelCacheEntry] = []
-    if not parent.is_dir():
-        return entries
-    for child in sorted(parent.iterdir(), key=lambda p: p.name.lower()):
-        if not child.is_dir():
-            continue
-        entries.append(
-            ModelCacheEntry(
-                kind=kind,
-                name=child.name,
-                lang=lang,
-                path=str(child.resolve()),
-                size_bytes=_dir_size_bytes(child),
-                ready=_dir_ready(child),
-            )
-        )
-    return entries
+def _make_entry(directory: Path, *, kind: str, lang: str, name: str | None = None) -> ModelCacheEntry:
+    size = _model_dir_size(directory)
+    return ModelCacheEntry(
+        kind=kind,
+        name=name if name is not None else directory.name,
+        lang=lang,
+        path=str(directory.resolve()),
+        size_bytes=size,
+        ready=size > 0,
+    )
 
 
 def scan_model_cache(root: str | Path | None = None) -> ModelCacheScan:
-    """Enumerate cached base (`stt`) + alignment (`align/<bucket>/<lang>`) model folders with sizes/readiness."""
+    """Enumerate cached base (`stt`) + alignment model folders with sizes/readiness.
+
+    Detects *model* folders (those directly holding `config.json`/weights, or HuggingFace `models--*`
+    hub dirs) and skips hub/kenlm internals (`blobs`/`refs`/`snapshots`/`.no_exist`/`.cache`/
+    `language_model`). HF-hub sizes count `blobs/` only so symlinked `snapshots/` are not double-counted.
+    """
     base = Path(root).resolve() if root is not None else whisperx_cache_root().resolve()
     scan = ModelCacheScan(root=str(base))
     if not base.is_dir():
         return scan
 
-    # Base ASR models under stt/<model>.
-    scan.entries.extend(_scan_model_dirs(base / "stt", kind="stt"))
+    # Base ASR models: every immediate child dir under stt/ (listed even if empty, so a partial
+    # download is visible as not-ready).
+    stt_dir = base / "stt"
+    if stt_dir.is_dir():
+        for child in sorted(stt_dir.iterdir(), key=lambda p: p.name.lower()):
+            if child.is_dir() and not _is_internal_dir(child.name):
+                scan.entries.append(_make_entry(child, kind="stt", lang=""))
 
-    # Alignment assets under align/<bucket>/<lang>/<model> (lang layer may be absent in some buckets).
     align_root = base / "align"
     for bucket in _ALIGN_SUBDIRS:
         bucket_dir = align_root / bucket
         if not bucket_dir.is_dir():
             continue
-        for lang_dir in sorted(bucket_dir.iterdir(), key=lambda p: p.name.lower()):
-            if not lang_dir.is_dir():
+        for child in sorted(bucket_dir.iterdir(), key=lambda p: p.name.lower()):
+            if not child.is_dir() or _is_internal_dir(child.name):
                 continue
-            model_children = [c for c in lang_dir.iterdir() if c.is_dir()]
-            if model_children:
-                scan.entries.extend(_scan_model_dirs(lang_dir, kind="align", lang=lang_dir.name))
+            if _is_hf_hub_dir(child):
+                scan.entries.append(_make_entry(child, kind="align", lang="", name=_pretty_hub_name(child.name)))
+            elif _is_model_dir(child):
+                # A flat lang dir whose model files sit at its root (may also have a language_model/ subdir,
+                # which is counted in its size, not listed separately).
+                scan.entries.append(_make_entry(child, kind="align", lang=child.name))
             else:
-                # Flat lang dir holding the model files directly.
-                scan.entries.append(
-                    ModelCacheEntry(
-                        kind="align",
-                        name=lang_dir.name,
-                        lang=lang_dir.name,
-                        path=str(lang_dir.resolve()),
-                        size_bytes=_dir_size_bytes(lang_dir),
-                        ready=_dir_ready(lang_dir),
-                    )
-                )
+                # A container lang dir: list its model subdirs, skip internals/junk.
+                lang = child.name
+                for sub in sorted(child.iterdir(), key=lambda p: p.name.lower()):
+                    if not sub.is_dir() or _is_internal_dir(sub.name):
+                        continue
+                    if _is_hf_hub_dir(sub):
+                        scan.entries.append(_make_entry(sub, kind="align", lang=lang, name=_pretty_hub_name(sub.name)))
+                    elif _is_model_dir(sub):
+                        scan.entries.append(_make_entry(sub, kind="align", lang=lang))
     return scan
 
 
