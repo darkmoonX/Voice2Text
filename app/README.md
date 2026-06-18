@@ -116,6 +116,17 @@ provider's `stability_ratio`). The fields:
 
 `txt` and `srt` are unaffected — they only render `text/speaker/start/end`, so the extra cue keys never reach them.
 
+#### Pre-run health check + model/alignment cache
+
+`python main.py --stt-health-check` runs structured, actionable checks and exits (scope via
+`--stt-health-check-scope active|all`). Beyond the existing model/flag detail lines it now reports
+`check[ok|warn] <id>` rows for **CUDA/cuBLAS, FFmpeg, HuggingFace token, the C++ capture bridge, and the
+model/alignment cache**, each with a `fix` hint when not ok (the HF token is reported presence-only — never
+echoed). The cache check uses `stt/model_cache.py`, a headless scanner of `models/whisperx/` (`stt/<model>` +
+`align/<bucket>/<lang>/<model>`) that reports per-folder size + readiness, totals (`cache_summary`), and a
+root-guarded `delete_cache_entry`. (A Qt wizard + cache-manager dialog on top of these is the round-0022 Phase B
+follow-up.)
+
 ### Common Commands
 
 ```powershell
