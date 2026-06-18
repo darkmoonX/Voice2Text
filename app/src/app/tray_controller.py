@@ -14,6 +14,8 @@ _I18N = {
         "show": "顯示",
         "minimize": "最小化",
         "settings": "設定",
+        "health": "執行環境健檢…",
+        "cache": "模型 / 快取管理…",
         "exit": "離開",
         "applied": "設定已套用。",
     },
@@ -21,6 +23,8 @@ _I18N = {
         "show": "Show",
         "minimize": "Minimize",
         "settings": "Settings",
+        "health": "Runtime health check…",
+        "cache": "Model / cache manager…",
         "exit": "Exit",
         "applied": "Settings applied.",
     },
@@ -71,15 +75,21 @@ class Voice2TextTrayController(QObject):
         show_action = QAction(self._t("show"), menu)
         minimize_action = QAction(self._t("minimize"), menu)
         settings_action = QAction(self._t("settings"), menu)
+        health_action = QAction(self._t("health"), menu)
+        cache_action = QAction(self._t("cache"), menu)
         exit_action = QAction(self._t("exit"), menu)
         show_action.triggered.connect(self.show_overlay)
         minimize_action.triggered.connect(self.hide_overlay)
         settings_action.triggered.connect(self.open_settings)
+        health_action.triggered.connect(self.open_health_check)
+        cache_action.triggered.connect(self.open_cache_manager)
         exit_action.triggered.connect(QApplication.quit)
         menu.addAction(show_action)
         menu.addAction(minimize_action)
         menu.addSeparator()
         menu.addAction(settings_action)
+        menu.addAction(health_action)
+        menu.addAction(cache_action)
         menu.addSeparator()
         menu.addAction(exit_action)
         return menu
@@ -111,6 +121,16 @@ class Voice2TextTrayController(QObject):
         if self._lang() != old_lang:
             self.refresh_locale()
         self._tray.showMessage("Voice2Text", self._t("applied"), QSystemTrayIcon.MessageIcon.Information, 1800)
+
+    def open_health_check(self) -> None:
+        from .diagnostics_dialogs import HealthCheckDialog
+
+        HealthCheckDialog(self._config, parent=None).exec()
+
+    def open_cache_manager(self) -> None:
+        from .diagnostics_dialogs import ModelCacheDialog
+
+        ModelCacheDialog(self._config, parent=None).exec()
 
     def _on_tray_activated(self, reason: QSystemTrayIcon.ActivationReason) -> None:
         if reason == QSystemTrayIcon.ActivationReason.Trigger:
