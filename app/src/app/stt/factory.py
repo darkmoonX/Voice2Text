@@ -85,6 +85,7 @@ def _build_whisperx(config: RuntimeConfig, *, device_override: Optional[str], co
         alignment_model=str(getattr(config, 'whisperx_alignment_model', '') or ''),
         alignment_language=str(getattr(config, 'whisperx_alignment_language', 'auto') or 'auto'),
         alignment_device=str(getattr(config, 'whisperx_alignment_device', 'auto') or 'auto'),
+        align_guard=str(getattr(config, 'whisperx_align_guard', 'safe') or 'safe'),
         diarization_device=str(getattr(config, 'whisperx_diarization_device', 'auto') or 'auto'),
         source_language_hint=str(getattr(config, 'source_language', '') or ''),
         diarization_model=str(getattr(config, 'whisperx_diarization_model', 'pyannote/speaker-diarization-3.1') or 'pyannote/speaker-diarization-3.1'),

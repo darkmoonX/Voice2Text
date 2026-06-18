@@ -37,6 +37,7 @@ class WhisperXTranscriber:
         alignment_model: str = "",
         alignment_language: str = "auto",
         alignment_device: str = "auto",
+        align_guard: str = "safe",
         diarization_device: str = "auto",
         source_language_hint: str | None = None,
         diarization_model: str = "pyannote/speaker-diarization-3.1",
@@ -114,6 +115,7 @@ class WhisperXTranscriber:
         self._alignment_model = (alignment_model or "").strip()
         self._alignment_language = (alignment_language or 'auto').strip().lower()
         self._alignment_device_setting = (alignment_device or "auto").strip().lower()
+        self._align_guard = self._normalize_align_guard(align_guard)
         self._diarization_device_setting = (diarization_device or "auto").strip().lower()
         (normalized_source_lang, _) = normalize_language_hint(source_language_hint)
         self._source_language_hint = normalized_source_lang
@@ -2464,25 +2466,46 @@ class WhisperXTranscriber:
         )
         return "cpu"
 
+    @staticmethod
+    def _normalize_align_guard(value: str | None) -> str:
+        """Normalize the alignment-guard setting to `safe` | `unsafe-cuda` (default `safe`)."""
+        token = str(value or "safe").strip().lower().replace("_", "-")
+        if token in {"unsafe-cuda", "unsafe", "cuda"}:
+            return "unsafe-cuda"
+        return "safe"
+
     def _apply_alignment_device_safety_policy(self, resolved: str) -> str:
-        """Apply platform-specific guardrails to avoid known WhisperX alignment crashes."""
+        """Apply platform-specific guardrails to avoid known WhisperX alignment crashes.
+
+        Priority: (1) the explicit `whisperx_align_guard` setting, (2) the back-compat env var
+        `VOICE2TEXT_WHISPERX_ALLOW_UNSAFE_CUDA_ALIGN`, (3) the safe default (downgrade CUDA->CPU on
+        Windows). Only relevant when alignment resolved to CUDA on Windows; elsewhere it is a no-op.
+        """
         token = (resolved or "").strip().lower()
         if token != "cuda":
             return token or "cpu"
         if os.name != "nt":
             return token
-        allow_unsafe = str(os.environ.get("VOICE2TEXT_WHISPERX_ALLOW_UNSAFE_CUDA_ALIGN", "")).strip().lower() in {
+        guard = getattr(self, "_align_guard", "safe")
+        env_allow = str(os.environ.get("VOICE2TEXT_WHISPERX_ALLOW_UNSAFE_CUDA_ALIGN", "")).strip().lower() in {
             "1",
             "true",
             "yes",
             "on",
         }
-        if allow_unsafe:
+        if guard == "unsafe-cuda":
+            self._emit(
+                "WARNING: WhisperX alignment guard set to 'unsafe-cuda' (whisperx_align_guard); keeping CUDA "
+                "alignment despite the known torchaudio/wav2vec2 access-violation risk on Windows. Revert to "
+                "'safe' if alignment crashes."
+            )
+            return token
+        if env_allow:
             self._emit("WhisperX alignment CUDA safety guard bypassed by VOICE2TEXT_WHISPERX_ALLOW_UNSAFE_CUDA_ALIGN=1.")
             return token
         self._emit(
             "WhisperX alignment device downgraded to CPU on Windows due known CUDA align access-violation risk. "
-            "Set VOICE2TEXT_WHISPERX_ALLOW_UNSAFE_CUDA_ALIGN=1 to force CUDA alignment."
+            "Set whisperx_align_guard=unsafe-cuda (or VOICE2TEXT_WHISPERX_ALLOW_UNSAFE_CUDA_ALIGN=1) to force CUDA alignment."
         )
         return "cpu"
 

@@ -24,6 +24,7 @@ _PERSIST_KEYS = {
     "whisperx_alignment_model",
     "whisperx_alignment_language",
     "whisperx_alignment_device",
+    "whisperx_align_guard",
     "whisperx_diarization_device",
     "whisperx_diarization_model",
     "whisperx_hf_token",

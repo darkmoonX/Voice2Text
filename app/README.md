@@ -335,6 +335,7 @@ Settings window behavior:
 - Alignment device can now be configured in `Settings -> WhisperX Alignment device` and is applied immediately (runtime restart is automatic).
 - CLI override is also available: `--whisperx-alignment-device {auto|cpu|cuda}`.
 - Windows safety guard: when alignment resolves to `cuda`, runtime now downgrades to `cpu` by default on Windows to avoid known `torchaudio/wav2vec2` access-violation crashes. Override only for diagnostics:
+  - **Runtime switch (round 0028):** `whisperx_align_guard` config / `--whisperx-align-guard {safe,unsafe-cuda}` CLI / settings-dialog control. Default `safe` is byte-identical to the previous downgrade behavior. `unsafe-cuda` keeps CUDA alignment on Windows and emits a loud one-line warning in the runtime log; the settings dialog shows an inline warning and a one-click **Revert to safe** button. The guard is consulted first; the env var below stays as a back-compat override; on non-Windows the guard is a no-op.
   - `VOICE2TEXT_WHISPERX_ALLOW_UNSAFE_CUDA_ALIGN=1`
 - Environment variable fallback is still supported when config is `auto`:
   - `VOICE2TEXT_WHISPERX_ALIGN_DEVICE=auto` (default heuristic): when ASR uses CUDA and model is `large*`, alignment runs on CPU to reduce VRAM pressure.

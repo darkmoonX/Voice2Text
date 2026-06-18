@@ -21,6 +21,7 @@ class SettingsPayloadInput:
     whisperx_alignment_model: str
     whisperx_alignment_language: str
     whisperx_alignment_device: str
+    whisperx_align_guard: str
     whisperx_diarization_device: str
     whisperx_diarization_model: str
     whisperx_hf_token: str
@@ -85,6 +86,9 @@ def build_settings_updates(payload: SettingsPayloadInput, *, lang: str, hop_gt_s
     alignment_device = (payload.whisperx_alignment_device or "auto").strip().lower()
     if alignment_device not in {"auto", "cpu", "cuda"}:
         alignment_device = "auto"
+    align_guard = (payload.whisperx_align_guard or "safe").strip().lower().replace("_", "-")
+    if align_guard not in {"safe", "unsafe-cuda"}:
+        align_guard = "safe"
     diarization_device = (payload.whisperx_diarization_device or "auto").strip().lower()
     if diarization_device not in {"auto", "cpu", "cuda"}:
         diarization_device = "auto"
@@ -118,6 +122,7 @@ def build_settings_updates(payload: SettingsPayloadInput, *, lang: str, hop_gt_s
         'whisperx_alignment_model': payload.whisperx_alignment_model.strip(),
         'whisperx_alignment_language': payload.whisperx_alignment_language.strip() or 'auto',
         'whisperx_alignment_device': alignment_device,
+        'whisperx_align_guard': align_guard,
         'whisperx_diarization_device': diarization_device,
         'whisperx_diarization_model': payload.whisperx_diarization_model.strip() or 'pyannote/speaker-diarization-3.1',
         'whisperx_hf_token': payload.whisperx_hf_token.strip(),

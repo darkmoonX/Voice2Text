@@ -88,6 +88,13 @@ def create_whisperx_diarization_device_combo() -> QComboBox:
     return combo
 
 
+def create_whisperx_align_guard_combo() -> QComboBox:
+    combo = QComboBox()
+    combo.addItem("safe", "safe")
+    combo.addItem("unsafe-cuda", "unsafe-cuda")
+    return combo
+
+
 def create_whisperx_speaker_backend_combo() -> QComboBox:
     combo = QComboBox()
     combo.addItem("pyannote", "pyannote")

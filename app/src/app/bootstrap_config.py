@@ -56,6 +56,7 @@ def build_runtime_config(args: argparse.Namespace) -> RuntimeConfig:
         whisperx_alignment_model=args.whisperx_alignment_model,
         whisperx_alignment_language=args.whisperx_alignment_language,
         whisperx_alignment_device=args.whisperx_alignment_device,
+        whisperx_align_guard=str(getattr(args, "whisperx_align_guard", "safe") or "safe"),
         whisperx_diarization_device=args.whisperx_diarization_device,
         whisperx_diarization_model=args.whisperx_diarization_model,
         whisperx_hf_token=args.whisperx_hf_token,

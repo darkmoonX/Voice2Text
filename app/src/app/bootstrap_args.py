@@ -35,6 +35,7 @@ def build_arg_parser(whisper_defaults: WhisperRuntimeParams) -> argparse.Argumen
     parser.add_argument("--whisperx-alignment-model", default="", help="Optional WhisperX alignment model id/path.")
     parser.add_argument("--whisperx-alignment-language", choices=["auto", "follow-source", "en", "zh-hant", "zh-hans", "ja", "ko", "de", "fr", "es", "it", "pt", "ru"], default="auto", help="Alignment language override. auto=from ASR result, follow-source=use STT source language setting.")
     parser.add_argument("--whisperx-alignment-device", choices=["auto", "cpu", "cuda"], default="auto", help="Alignment device override. auto uses runtime heuristic.")
+    parser.add_argument("--whisperx-align-guard", choices=["safe", "unsafe-cuda"], default="safe", help="Alignment CUDA safety guard. safe (default) downgrades CUDA alignment to CPU on Windows (known crash); unsafe-cuda forces CUDA with a warning (diagnostics only).")
     parser.add_argument("--whisperx-diarization-device", choices=["auto", "cpu", "cuda"], default="auto", help="Diarization device override. auto follows ASR device by default.")
     parser.add_argument("--whisperx-diarization-model", default="pyannote/speaker-diarization-3.1", help="WhisperX diarization model id.")
     parser.add_argument("--whisperx-hf-token", default="", help="Hugging Face token for WhisperX diarization model download/access.")

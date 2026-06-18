@@ -47,6 +47,7 @@ from .settings.widgets import (
     create_stt_provider_combo,
     create_stt_variant_combo,
     create_whisperx_align_device_combo,
+    create_whisperx_align_guard_combo,
     create_whisperx_diarization_device_combo,
     create_whisperx_speaker_backend_combo,
     create_translation_language_combo,
@@ -238,6 +239,13 @@ class SettingsDialog(QDialog):
         self._whisperx_align_model_edit = QComboBox()
         self._whisperx_align_language_combo = create_whisperx_align_language_combo()
         self._whisperx_align_device_combo = create_whisperx_align_device_combo()
+        self._whisperx_align_guard_combo = create_whisperx_align_guard_combo()
+        self._whisperx_align_guard_combo.currentIndexChanged.connect(self._on_align_guard_changed)
+        self._whisperx_align_guard_warning = QLabel()
+        self._whisperx_align_guard_warning.setWordWrap(True)
+        self._whisperx_align_guard_warning.setStyleSheet("color: #D9534F;")
+        self._whisperx_align_guard_revert_btn = QPushButton()
+        self._whisperx_align_guard_revert_btn.clicked.connect(self._on_align_guard_revert)
         self._whisperx_diar_device_combo = create_whisperx_diarization_device_combo()
         self._whisperx_align_model_edit.setEditable(True)
         self._whisperx_align_model_edit.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
@@ -346,6 +354,11 @@ class SettingsDialog(QDialog):
         form_left.addRow(self._t("whisperx_diarization"), self._whisperx_diarization_check)
         form_left.addRow(self._t("whisperx_align_language"), self._whisperx_align_language_combo)
         form_left.addRow(self._t("whisperx_align_device"), self._whisperx_align_device_combo)
+        align_guard_row = QHBoxLayout()
+        align_guard_row.addWidget(self._whisperx_align_guard_combo, 1)
+        align_guard_row.addWidget(self._whisperx_align_guard_revert_btn)
+        form_left.addRow(self._t("whisperx_align_guard"), align_guard_row)
+        form_left.addRow("", self._whisperx_align_guard_warning)
         form_left.addRow("WhisperX Diarization device", self._whisperx_diar_device_combo)
         form_left.addRow(self._t("whisperx_align_model"), self._whisperx_align_model_edit)
         form_left.addRow(self._t("whisperx_diar_model"), self._whisperx_diar_model_edit)
@@ -450,6 +463,8 @@ class SettingsDialog(QDialog):
         self._whisperx_diarization_check.setChecked(cfg.whisperx_enable_diarization)
         self._set_combo_data(self._whisperx_align_language_combo, str(getattr(cfg, 'whisperx_alignment_language', 'auto') or 'auto'))
         self._set_combo_data(self._whisperx_align_device_combo, str(getattr(cfg, 'whisperx_alignment_device', 'auto') or 'auto'))
+        self._set_combo_data(self._whisperx_align_guard_combo, str(getattr(cfg, 'whisperx_align_guard', 'safe') or 'safe'))
+        self._update_align_guard_state()
         self._set_combo_data(self._whisperx_diar_device_combo, str(getattr(cfg, 'whisperx_diarization_device', 'auto') or 'auto'))
         self._set_alignment_model_value(cfg.whisperx_alignment_model)
         self._whisperx_diar_model_edit.setText(cfg.whisperx_diarization_model)
@@ -765,6 +780,20 @@ class SettingsDialog(QDialog):
         self._refresh_available_sources()
         return self._build_app_entries()
 
+    def _on_align_guard_changed(self) -> None:
+        self._update_align_guard_state()
+
+    def _on_align_guard_revert(self) -> None:
+        self._set_combo_data(self._whisperx_align_guard_combo, "safe")
+        self._update_align_guard_state()
+
+    def _update_align_guard_state(self) -> None:
+        is_unsafe = str(self._whisperx_align_guard_combo.currentData() or "safe") == "unsafe-cuda"
+        self._whisperx_align_guard_warning.setText(self._t("whisperx_align_guard_warning") if is_unsafe else "")
+        self._whisperx_align_guard_warning.setVisible(is_unsafe)
+        self._whisperx_align_guard_revert_btn.setText(self._t("whisperx_align_guard_revert"))
+        self._whisperx_align_guard_revert_btn.setEnabled(is_unsafe)
+
     def _on_translation_toggle(self) -> None:
         enabled = self._translation_enabled_check.isChecked()
         self._bilingual_combo.setEnabled(enabled)
@@ -783,6 +812,8 @@ class SettingsDialog(QDialog):
             self._whisperx_diarization_check: "Enable diarization (speaker separation, heavier).",
             self._whisperx_align_language_combo: "Alignment language: auto (ASR detected), follow-source (STT source language), or explicit language.",
             self._whisperx_align_device_combo: "Alignment device: auto (smart choice), cpu (lower VRAM), cuda (faster but higher VRAM).",
+            self._whisperx_align_guard_combo: "Alignment CUDA safety guard. safe=downgrade CUDA alignment to CPU on Windows (default, avoids torchaudio/wav2vec2 crashes). unsafe-cuda=keep CUDA alignment (diagnostics only; may crash).",
+            self._whisperx_align_guard_revert_btn: "Revert the alignment guard back to the safe default.",
             self._whisperx_diar_device_combo: "Diarization device: auto follows ASR device, cpu lowers VRAM pressure, cuda improves throughput.",
             self._whisperx_align_model_edit: "Alignment model. Empty=auto; choose suggestion or type HF repo id.",
             self._whisperx_diar_model_edit: "Diarization model id.",
@@ -848,6 +879,7 @@ class SettingsDialog(QDialog):
             whisperx_alignment_model=self._whisperx_align_model_edit.currentText(),
             whisperx_alignment_language=str(self._whisperx_align_language_combo.currentData() or 'auto'),
             whisperx_alignment_device=str(self._whisperx_align_device_combo.currentData() or 'auto'),
+            whisperx_align_guard=str(self._whisperx_align_guard_combo.currentData() or 'safe'),
             whisperx_diarization_device=str(self._whisperx_diar_device_combo.currentData() or 'auto'),
             whisperx_diarization_model=self._whisperx_diar_model_edit.text(),
             whisperx_hf_token=self._whisperx_hf_token_edit.text(),
