@@ -519,6 +519,22 @@ class WhisperXTranscriber:
                 f"{int(self._speaker_switch_pending_count)}/"
                 f"{float(self._speaker_switch_pending_duration_seconds):.2f}s"
             )
+            if self._trace_enabled:
+                # Round 0027: per-window separation of the three speaker label sources so divergence
+                # (raw diarization vs profile identity vs the rendered/visible marker) is debuggable.
+                visible_labels = sorted(set(re.findall(r"\[(spk_\d+)\]", text, flags=re.IGNORECASE)))
+                raw_labels = sorted(
+                    {str(t.get("local_speaker") or "").strip() for t in token_meta if str(t.get("local_speaker") or "").strip()}
+                )
+                profile_labels = sorted(
+                    {str(t.get("profile_speaker") or "").strip() for t in token_meta if str(t.get("profile_speaker") or "").strip()}
+                )
+                self._emit(
+                    "[speaker-labels] "
+                    f"visible={','.join(visible_labels) or 'n/a'}; "
+                    f"raw={','.join(raw_labels) or 'n/a'}; "
+                    f"profile={','.join(profile_labels) or 'n/a'}"
+                )
         if zh_script is not None:
             stage_started_at = time.perf_counter()
             text = normalize_chinese_script(text, zh_script)

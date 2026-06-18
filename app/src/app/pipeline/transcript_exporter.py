@@ -287,9 +287,16 @@ class TranscriptExporterSession:
             end = self._to_float(row.get("absolute_end"), self._to_float(row.get("end"), -1.0))
             if start < 0.0 or end <= start:
                 continue
+            # Three distinct label sources kept separate (round 0027):
+            #  - effective `speaker` (profile-preferred) = the rendered/exported marker (unchanged).
+            #  - `profile_speaker` = cross-window centroid identity.
+            #  - `raw_speaker`     = the local per-window diarization label (`local_speaker`).
             speaker = self._normalize_export_speaker(
                 str(row.get("profile_speaker") or row.get("speaker") or "").strip()
             )
+            profile_speaker = self._normalize_export_speaker(str(row.get("profile_speaker") or "").strip())
+            raw_speaker = self._normalize_export_speaker(str(row.get("local_speaker") or "").strip())
+            # Key stays on the effective speaker so dedup behavior is unchanged.
             key = (int(round(start * 1000.0)), int(round(end * 1000.0)), word, speaker)
             if key not in self._tokens:
                 self._tokens[key] = {
@@ -297,6 +304,8 @@ class TranscriptExporterSession:
                     "end": float(end),
                     "word": word,
                     "speaker": speaker,
+                    "profile_speaker": profile_speaker,
+                    "raw_speaker": raw_speaker,
                     "score": self._to_float(row.get("score"), 0.0),
                 }
 
@@ -567,9 +576,27 @@ class TranscriptExporterSession:
             "speaker": speaker,
             "text": self._join_words(words),
         }
+        # Round 0027: surface the three label sources separately (json only; additive). `speaker`
+        # remains the effective/rendered marker used by SRT/TXT; these are observability fields.
+        if self._options.include_speaker:
+            cue["visible_speaker"] = speaker
+            cue["profile_speaker"] = self._dominant_label(bucket, "profile_speaker")
+            cue["raw_speaker"] = self._dominant_label(bucket, "raw_speaker")
         if self._options.include_confidence:
             cue.update(self._cue_confidence(bucket))
         return cue
+
+    @staticmethod
+    def _dominant_label(bucket: list[dict[str, object]], field: str) -> str:
+        """Most common non-empty value of `field` across the bucket's tokens ('' if none)."""
+        counts: dict[str, int] = {}
+        for token in bucket:
+            value = str(token.get(field) or "").strip()
+            if value:
+                counts[value] = counts.get(value, 0) + 1
+        if not counts:
+            return ""
+        return max(counts.items(), key=lambda item: item[1])[0]
 
     @staticmethod
     def _cue_confidence(bucket: list[dict[str, object]]) -> dict[str, object]:

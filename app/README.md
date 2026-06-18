@@ -116,6 +116,24 @@ provider's `stability_ratio`). The fields:
 
 `txt` and `srt` are unaffected — they only render `text/speaker/start/end`, so the extra cue keys never reach them.
 
+#### JSON export schema — separated speaker labels (round 0027)
+
+A subtitle line has three distinct speaker labels that are normally conflated; the `json` export keeps them
+separate per cue (gated by `transcript_export_include_speaker`, default on) so a debug/export diff shows where
+they agree and diverge:
+
+- **`cues[].speaker`** — the *effective* label (profile-preferred), exactly what the SRT/TXT marker renders
+  (unchanged).
+- **`cues[].visible_speaker`** — the rendered `[spk_xxx]` marker for that cue (equals `speaker` in the export
+  view; surfaced explicitly so the field set is self-describing).
+- **`cues[].profile_speaker`** — the cross-window speaker-profile (centroid) identity, dominant within the cue.
+- **`cues[].raw_speaker`** — the local per-window diarization label (`local_speaker`), dominant within the cue.
+
+These are observability fields only: the effective `speaker`, the dedup key, SRT/TXT text, and the live overlay
+are byte-identical (additive, metric-neutral). In `--debug-mode`/trace runs the provider also emits a per-window
+`[speaker-labels] visible=… raw=… profile=…` line so live divergence (e.g. a marker lagging one segment, or a
+raw label the profile remapped) is visible in the log.
+
 #### Pre-run health check + model/alignment cache
 
 `python main.py --stt-health-check` runs structured, actionable checks and exits (scope via
