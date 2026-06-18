@@ -26,6 +26,7 @@ class WhisperXTranscriber:
         *,
         device: str = "cuda",
         compute_type: str = "float16",
+        cpu_threads: int = 0,
         beam_size: int = 5,
         batch_size: int = 4,
         enable_phoneme_asr: bool = True,
@@ -95,6 +96,7 @@ class WhisperXTranscriber:
         self._model_ref = (model_ref or "small").strip() or "small"
         self._device = "cpu" if device.strip().lower().startswith("cpu") else "cuda"
         self._compute_type = (compute_type or "float16").strip()
+        self._cpu_threads = int(max(0, cpu_threads))
         self._beam_size = max(1, int(beam_size))
         self._batch_size = max(1, int(batch_size))
         self._enable_phoneme_asr = bool(enable_phoneme_asr)
@@ -161,16 +163,17 @@ class WhisperXTranscriber:
         self._cleanup_alignment_partial_cache()
 
         model_arg = self._resolve_stt_model_arg(self._model_ref)
-        self._model = self._load_model_with_compat(
-            model_arg,
-            {
-                "compute_type": self._compute_type,
-                "language": self._source_language_hint,
-                "vad_method": self._resolve_whisperx_vad_method(self._vad_method),
-                "download_root": str(self._model_root / "stt"),
-                "asr_options": self._build_asr_options(),
-            },
-        )
+        load_kwargs: dict[str, object] = {
+            "compute_type": self._compute_type,
+            "language": self._source_language_hint,
+            "vad_method": self._resolve_whisperx_vad_method(self._vad_method),
+            "download_root": str(self._model_root / "stt"),
+            "asr_options": self._build_asr_options(),
+        }
+        if self._cpu_threads > 0:
+            # CTranslate2 CPU thread count (dropped gracefully by _load_model_with_compat on older whisperx).
+            load_kwargs["threads"] = int(self._cpu_threads)
+        self._model = self._load_model_with_compat(model_arg, load_kwargs)
 
         self._align_cache: dict[str, tuple[object, object]] = {}
         self._diarization_pipeline = None

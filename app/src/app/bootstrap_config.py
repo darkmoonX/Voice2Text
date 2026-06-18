@@ -41,6 +41,7 @@ def build_runtime_config(args: argparse.Namespace) -> RuntimeConfig:
         model_size=args.model,
         model_device=args.device,
         compute_type=args.compute_type,
+        cpu_threads=int(getattr(args, "cpu_threads", 0) or 0),
         stt_provider="whisperx",
         stt_variant=args.stt_variant,
         stt_auto_download=args.stt_auto_download,

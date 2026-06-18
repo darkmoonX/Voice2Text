@@ -127,6 +127,24 @@ echoed). The cache check uses `stt/model_cache.py`, a headless scanner of `model
 root-guarded `delete_cache_entry`. (A Qt wizard + cache-manager dialog on top of these is the round-0022 Phase B
 follow-up.)
 
+#### CPU / no-GPU realtime (the `cpu` preset)
+
+On a machine without CUDA, run live subtitles with `--preset cpu` (also selectable in Settings as `cpu`). It
+bundles the levers that keep the pipeline realtime on CPU: `stt_variant=cpu`, `model=small`, `compute_type=int8`,
+`beam_size=1`, diarization/speaker-profile off, and **forced alignment off** — alignment is the dominant CPU cost
+(~8× slower) and unaffordable live. Because the rolling-window de-duplication is normally driven by word
+timestamps (which alignment produces), the provider **synthesizes per-word timestamps from each segment's span**
+when alignment is off (round 0024), so overlapping windows still de-duplicate instead of piling up repeated text.
+
+Trade-offs: no word-level timestamps, so exported SRT/JSON has segment-level (not precise per-word) timing and no
+speaker word-attribution; best for non-CJK speech (CJK leans harder on the dropped accuracy levers). Tune CPU
+parallelism with `--cpu-threads N` (0 = CTranslate2 default); raise it on multi-core CPUs.
+
+```powershell
+python main.py --preset cpu                  # non-CUDA realtime
+python main.py --preset cpu --cpu-threads 8  # use more CPU cores
+```
+
 ### Common Commands
 
 ```powershell

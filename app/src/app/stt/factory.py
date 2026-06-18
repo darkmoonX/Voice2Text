@@ -74,6 +74,7 @@ def _build_whisperx(config: RuntimeConfig, *, device_override: Optional[str], co
         model_ref=model_ref,
         device=device,
         compute_type=compute_type,
+        cpu_threads=int(getattr(config, 'cpu_threads', 0) or 0),
         beam_size=max(1, int(config.whisper_beam_size or 5)),
         batch_size=max(1, int(getattr(config, 'whisper_batch_size', 4) or 4)),
         enable_phoneme_asr=bool(getattr(config, 'whisperx_enable_phoneme_asr', True)),

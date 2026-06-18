@@ -8,6 +8,7 @@ class RuntimeConfig:
     model_size: str = 'small'
     model_device: str = 'cuda'
     compute_type: str = 'float16'
+    cpu_threads: int = 0
     stt_provider: str = 'whisperx'
     stt_variant: str = 'auto'
     stt_auto_download: bool = True

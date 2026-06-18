@@ -507,6 +507,7 @@ class SettingsDialog(QDialog):
         apply_preset(preview, name)
         self._applying_preset = True
         try:
+            self._set_combo_data(self._stt_variant_combo, preview.stt_variant)
             self._set_model_size(preview.model_size)
             self._set_combo_data(self._compute_type_combo, preview.compute_type)
             self._beam_spin.setValue(int(preview.whisper_beam_size or 5))
@@ -516,6 +517,15 @@ class SettingsDialog(QDialog):
             self._whisperx_speaker_profile_check.setChecked(bool(preview.whisperx_speaker_profile_enabled))
         finally:
             self._applying_preset = False
+
+    def _preset_forced_alignment(self) -> bool:
+        """Forced-alignment value to persist: the active preset's setting, else on (no dedicated widget)."""
+        name = str(self._preset_combo.currentData() or "")
+        if not name:
+            return True
+        preview = RuntimeConfig()
+        apply_preset(preview, name)
+        return bool(getattr(preview, "whisperx_enable_forced_alignment", True))
 
     def _on_bundled_field_edited(self, *args: object) -> None:
         # A manual edit to any preset-bundled field means the config no longer
@@ -829,7 +839,9 @@ class SettingsDialog(QDialog):
             stt_model_path=self._stt_model_path_edit.text(),
             stt_auto_download=self._stt_auto_download_check.isChecked(),
             whisperx_enable_phoneme_asr=True,
-            whisperx_enable_forced_alignment=True,
+            # Forced alignment has no dedicated widget; derive it from the active preset so the `cpu`
+            # preset (alignment off for non-CUDA realtime) actually persists. Defaults to on otherwise.
+            whisperx_enable_forced_alignment=self._preset_forced_alignment(),
             whisperx_enable_vad=True,
             whisperx_vad_method=str(self._whisperx_vad_check.currentData() or "silero-vad"),
             whisperx_enable_diarization=self._whisperx_diarization_check.isChecked(),

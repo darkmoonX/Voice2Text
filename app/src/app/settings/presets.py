@@ -5,8 +5,8 @@ beam / segment-hop / alignment / diarization / speaker-profile. Any explicit
 per-knob flag (CLI) or persisted setting still wins over the preset.
 
 `balanced` reproduces the shipped default (round 0014 measured operating point);
-`low-latency` / `high-accuracy` are the two new points (validated on the harness
-in round 0015 Phase B).
+`high-accuracy` is the quality/offline point (round 0015 Phase B); `cpu` is the
+non-CUDA realtime point (round 0024 — alignment off + synthesized word timestamps).
 """
 from __future__ import annotations
 
@@ -19,10 +19,26 @@ import argparse
 # larger hop, which trades completeness, so there is no faster-AND-acceptable point
 # to ship. `balanced` is already near-optimal for live; `high-accuracy` is a
 # quality/offline mode (rtf ~2.1x, does NOT sustain live realtime).
-PRESET_NAMES: tuple[str, ...] = ("balanced", "high-accuracy")
+PRESET_NAMES: tuple[str, ...] = ("balanced", "high-accuracy", "cpu")
 
 # Canonical bundles in RuntimeConfig field-name space.
 PRESETS: dict[str, dict[str, object]] = {
+    "cpu": {
+        # Round 0024: realtime subtitles on a non-CUDA / CPU-only machine. Forced alignment is the CPU
+        # cost killer (~8x), so it is OFF; the provider synthesizes word timestamps from segment spans so
+        # the rolling merge still de-duplicates overlapping windows. int8 + beam 1 + small keep rtf < 1 on
+        # CPU. Trade-off: no word-level timestamps (no precise SRT word timing / speaker word-attribution);
+        # best for non-CJK speech. Forces the CPU execution variant so it does not try CUDA.
+        "stt_variant": "cpu",
+        "model_size": "small",
+        "compute_type": "int8",
+        "whisper_beam_size": 1,
+        "segment_seconds": 10.0,
+        "hop_seconds": 2.0,
+        "whisperx_enable_forced_alignment": False,
+        "whisperx_enable_diarization": False,
+        "whisperx_speaker_profile_enabled": False,
+    },
     "balanced": {
         "model_size": "medium",
         "compute_type": "float16",
@@ -51,6 +67,7 @@ PRESETS: dict[str, dict[str, object]] = {
 # RuntimeConfig field -> argparse dest, so a preset can seed parser defaults
 # (which explicit flags then override). Every bundled field is CLI-expressible.
 _FIELD_TO_ARG_DEST: dict[str, str] = {
+    "stt_variant": "stt_variant",
     "model_size": "model",
     "compute_type": "compute_type",
     "whisper_beam_size": "beam_size",
