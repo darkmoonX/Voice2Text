@@ -457,7 +457,7 @@ Settings window behavior:
 
 ## Translation Backends (round 0026/0030)
 
-Translation is pluggable and runs through a `TranslationEngine` (`app/src/app/translation/`) that wraps the
+Translation is pluggable and runs through a `TranslationEngine` (`app/src/voice2text/translation/`) that wraps the
 selected backend so a slow/hanging backend can never stall the subtitle loop.
 
 - **Backend selection** — `--translation-backend {argos,nllb,llm,cloud}` (default `argos`).

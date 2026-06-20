@@ -131,7 +131,7 @@ class SubtitleAssembler:
         """Fold the final output to one display script (char-level, no vocab change)."""
         if not text or not self._display_script:
             return text
-        from app.stt.audio_utils import unify_chinese_script
+        from voice2text.stt.audio_utils import unify_chinese_script
         return unify_chinese_script(text, self._display_script)
 
     def merge_incremental_text(self, text: str, *, overlap_merge_method: str, segment_seconds: float, hop_seconds: float, transcription_meta: dict[str, object] | None = None) -> str:
@@ -587,7 +587,7 @@ class SubtitleAssembler:
         if not key:
             return ''
         try:
-            from app.stt.audio_utils import normalize_chinese_script
+            from voice2text.stt.audio_utils import normalize_chinese_script
 
             return normalize_chinese_script(key, 'hans')
         except Exception:
@@ -1428,7 +1428,7 @@ class SubtitleAssembler:
         compact_chars: list[str] = []
         positions: list[int] = []
         try:
-            from app.stt.audio_utils import normalize_chinese_script
+            from voice2text.stt.audio_utils import normalize_chinese_script
         except Exception:
             normalize_chinese_script = None
 
@@ -1530,7 +1530,7 @@ class SubtitleAssembler:
         if not compact:
             return ''
         try:
-            from app.stt.audio_utils import normalize_chinese_script
+            from voice2text.stt.audio_utils import normalize_chinese_script
 
             return normalize_chinese_script(compact, 'hans')
         except Exception:

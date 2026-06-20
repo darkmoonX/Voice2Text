@@ -1,6 +1,6 @@
 """Back-compat re-export shim.
 
-The Argos adapter and translation-state type moved to the `app.translation` package in round 0026
+The Argos adapter and translation-state type moved to the `voice2text.translation` package in round 0026
 (pluggable backends + off-thread engine). Existing imports `from .translator import ArgosTranslator`
 keep working through these re-exports — no caller churn.
 """

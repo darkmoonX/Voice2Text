@@ -1,6 +1,6 @@
 """Argos Translate adapter for optional bilingual subtitle output.
 
-Moved out of `app/src/app/translator.py` in round 0026 (that module is now a back-compat re-export
+Moved out of `app/src/voice2text/translator.py` in round 0026 (that module is now a back-compat re-export
 shim). Behavior is unchanged — this is the same adapter, now implementing the `TranslationBackend`
 protocol so it can sit behind the registry + engine alongside future LLM/cloud backends.
 """

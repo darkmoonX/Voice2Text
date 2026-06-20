@@ -69,7 +69,7 @@ cd app\native\audio_bridge
 ## Runtime Integration
 
 Python side resolver:
-- `app/src/app/capture/cpp_backend.py`
+- `app/src/voice2text/capture/cpp_backend.py`
 
 Resolution priority:
 1. `VOICE2TEXT_CPP_CAPTURE_BRIDGE` env override
