@@ -469,7 +469,16 @@ class SettingsDialog(QDialog):
             self._set_model_size(str(getattr(cfg, "stt_whispercpp_model_size", "") or getattr(cfg, "model_size", "medium") or "medium"))
             self._stt_model_path_edit.setText(str(getattr(cfg, "stt_whispercpp_model_path", "") or getattr(cfg, "stt_model_path", "") or ""))
         else:
-            self._stt_model_path_edit.setText(cfg.stt_model_path)
+            # WhisperX: the model is selected via the size dropdown; the path field is an
+            # optional local-file override. Migrate legacy settings where a bare model alias
+            # was persisted in stt_model_path (which silently overrode the dropdown via
+            # factory `stt_model_path or model_size`) back into the dropdown.
+            legacy_model = str(cfg.stt_model_path or "")
+            if legacy_model and not is_path_like(legacy_model):
+                self._set_model_size(legacy_model)
+                self._stt_model_path_edit.setText("")
+            else:
+                self._stt_model_path_edit.setText(legacy_model)
         self._stt_auto_download_check.setChecked(cfg.stt_auto_download)
         self._set_combo_data(self._whisperx_vad_check, str(getattr(cfg, "whisperx_vad_method", "silero-vad") or "silero-vad"))
         self._whisperx_diarization_check.setChecked(cfg.whisperx_enable_diarization)
@@ -757,11 +766,12 @@ class SettingsDialog(QDialog):
         if is_path_like(current):
             return
         default_value = default_stt_model(provider)
-        if provider == "whispercpp":
-            self._set_model_size(default_value)
-            self._stt_model_path_edit.setText("")
-        else:
-            self._stt_model_path_edit.setText(default_value)
+        # Both providers use the size dropdown as the model selector and keep the path
+        # field as an optional local-file override (cleared on provider switch). Previously
+        # WhisperX dumped the model name into the path field, so the dropdown silently did
+        # nothing — selecting a model then required hand-editing the path.
+        self._set_model_size(default_value)
+        self._stt_model_path_edit.setText("")
 
     def _open_source_selection(self) -> None:
         self._refresh_available_sources()
