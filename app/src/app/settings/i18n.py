@@ -66,6 +66,7 @@ SETTINGS_I18N: dict[str, dict[str, str]] = {
         'hop_gt_segment': 'Hop 秒數不能大於 segment 秒數。',
         'pick_color': '選擇顏色',
         'provider_hint_whisperx': 'WhisperX：Alignment model 留空會依語言自動選擇，或填入 HF repo id 以強制指定 aligner。',
+        'provider_hint_whispercpp': 'whisper.cpp Vulkan：預設使用 resident whisper-server 供即時字幕；medium 為推薦 live 模型（即時且跨窗穩定）。large-v2 為高精度款，但跨窗轉錄不穩會造成重複，建議僅用於離線/檔案重播，不建議 live；large-v3 不建議使用（較慢且易幻覺）。不支援 diarization / speaker labels / forced alignment。',
     },
     'en': {
         'select_all': 'Select all',
@@ -131,6 +132,7 @@ SETTINGS_I18N: dict[str, dict[str, str]] = {
         'hop_gt_segment': 'Hop seconds cannot exceed segment seconds.',
         'pick_color': 'Select color',
         'provider_hint_whisperx': 'WhisperX: leave Alignment model empty for per-language auto selection, or provide an HF repo id to force a specific aligner.',
+        'provider_hint_whispercpp': 'whisper.cpp Vulkan: resident whisper-server by default for live subtitles; medium is the recommended live model (realtime and cross-window stable). large-v2 is higher-accuracy but its cross-window transcription is unstable and duplicates, so it is recommended for offline/file-replay only, not live; large-v3 is discouraged (slower and hallucination-prone). No diarization, speaker labels, or forced alignment.',
     },
 }
 

@@ -9,7 +9,7 @@ from .whisper_config import WhisperRuntimeParams
 
 def build_arg_parser(whisper_defaults: WhisperRuntimeParams) -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Live rolling subtitle overlay from Windows audio sources.")
-    parser.add_argument("--stt-provider", choices=["whisperx"], default="whisperx", help="STT backend provider. Only WhisperX is supported.")
+    parser.add_argument("--stt-provider", choices=["whisperx", "whispercpp"], default="whisperx", help="STT backend provider. whisperx remains the default; whispercpp uses a bundled whisper.cpp Vulkan CLI without diarization.")
     parser.add_argument("--stt-variant", choices=["auto", "cpu", "gpu"], default="auto", help="Execution variant hint for providers.")
     parser.add_argument("--stt-auto-download", dest="stt_auto_download", action="store_true", help="Allow provider presets to auto-download missing model files.")
     parser.add_argument("--no-stt-auto-download", dest="stt_auto_download", action="store_false", help="Disable provider preset auto-download behavior.")
@@ -17,6 +17,21 @@ def build_arg_parser(whisper_defaults: WhisperRuntimeParams) -> argparse.Argumen
     parser.add_argument("--cpu-threads", dest="cpu_threads", type=int, default=0, help="CPU thread count for the CTranslate2 ASR model (0 = library default). Raise on multi-core CPUs for the cpu preset.")
     parser.add_argument("--model", default="small", help="Model name used by the selected STT provider.")
     parser.add_argument("--stt-model-path", default="", help="Optional model folder path for STT providers. Overrides --model when set.")
+    parser.add_argument("--whispercpp-model-size", default="medium", help="whisper.cpp ggml model size, e.g. small, medium, large-v3. Used when --stt-provider=whispercpp and no model path is set.")
+    parser.add_argument("--whispercpp-model-path", default="", help="Optional ggml model .bin path or directory for the whisper.cpp backend.")
+    parser.add_argument("--whispercpp-binary-path", default="", help="Optional whisper-cli executable path for the whisper.cpp backend. VOICE2TEXT_WHISPERCPP_BIN also works.")
+    parser.add_argument("--whispercpp-server-path", default="", help="Optional whisper-server executable path for resident whisper.cpp mode. VOICE2TEXT_WHISPERCPP_SERVER_BIN also works.")
+    parser.add_argument("--whispercpp-mode", choices=["server", "subprocess"], default="server", help="whisper.cpp execution mode. server keeps the model resident for live use; subprocess is the 0032 offline fallback.")
+    parser.add_argument("--whispercpp-server-vad", dest="whispercpp_server_vad", action="store_true", help="Enable whisper-server VAD. Off by default because current whisper-server can crash on 0-speech VAD windows.")
+    parser.add_argument("--no-whispercpp-server-vad", dest="whispercpp_server_vad", action="store_false", help="Disable whisper-server VAD when using --whispercpp-mode server.")
+    parser.add_argument("--whispercpp-vad-model-path", default="", help="Optional whisper.cpp Silero VAD ggml model path. VOICE2TEXT_WHISPERCPP_VAD_MODEL also works.")
+    parser.add_argument("--whispercpp-vad-model", default="ggml-silero-v5.1.2.bin", help="whisper.cpp VAD model filename used under app/src/models/whispercpp when no explicit VAD model path is set.")
+    parser.add_argument("--whispercpp-server-max-len", type=int, default=0, help="Optional whisper-server max segment length. 0 leaves whisper.cpp default.")
+    parser.add_argument("--whispercpp-request-timeout", type=float, default=30.0, help="whisper-server /inference request timeout in seconds.")
+    parser.add_argument("--whispercpp-no-speech-threshold", type=float, default=0.85, help="Drop whisper.cpp server segments with no_speech_prob at or above this value.")
+    parser.add_argument("--whispercpp-avg-logprob-min", type=float, default=-1.2, help="Drop whisper.cpp server segments with avg_logprob below this value.")
+    parser.add_argument("--whispercpp-repetition-similarity", type=float, default=0.92, help="Drop consecutive whisper.cpp server segments whose normalized text similarity is at or above this value.")
+    parser.add_argument("--whispercpp-boilerplate-phrases", default="请不吝点赞|訂閱|订阅|轉發|转发|打賞|打赏", help="Pipe-separated whisper.cpp hallucination boilerplate phrases to drop in server mode.")
     parser.add_argument("--device", default="cuda", help="Whisper device: cuda or cpu")
     parser.add_argument("--compute-type", choices=["float16", "int8_float16", "int8"], default="float16", help="Whisper compute type. float16 preserves accuracy; int8_float16/int8 can reduce GPU/CPU load with possible accuracy cost.")
     parser.add_argument("--batch-size", type=int, default=4, help="WhisperX decode batch size.")
@@ -117,6 +132,7 @@ def build_arg_parser(whisper_defaults: WhisperRuntimeParams) -> argparse.Argumen
         transcript_export_include_timestamps=True,
         transcript_export_include_speaker=True,
         translation_nllb_auto_convert=True,
+        whispercpp_server_vad=False,
     )
     return parser
 

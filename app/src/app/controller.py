@@ -91,7 +91,7 @@ class TranscriptionController(QObject):
         if worker is None or not worker.is_alive():
             self._worker = None
         self._stop_capture_once()
-        self._transcriber = None
+        self._shutdown_transcriber_once()
         self._preprocess_pipeline = None
         self._translator = None
         self._subtitle_assembler.reset()
@@ -142,10 +142,12 @@ class TranscriptionController(QObject):
         try:
             transcriber = self._create_transcriber_with_fallback()
             if transcriber is None or not self._running.is_set():
+                self._shutdown_transcriber_object(transcriber)
                 self._bootstrap_failed.emit(epoch, '')
                 return
             self._warmup_transcriber_instance(transcriber)
             if not self._running.is_set():
+                self._shutdown_transcriber_object(transcriber)
                 self._bootstrap_failed.emit(epoch, '')
                 return
             translator = build_translation_engine(self._config, on_status=self._emit_status)
@@ -180,7 +182,7 @@ class TranscriptionController(QObject):
         except Exception as exc:
             self._emit_error(f'Audio capture init failed: {exc}')
             self._capture = None
-            self._transcriber = None
+            self._shutdown_transcriber_once()
             self._preprocess_pipeline = None
             self._translator = None
             self._running.clear()
@@ -188,7 +190,7 @@ class TranscriptionController(QObject):
             return
         if not self._running.is_set():
             self._stop_capture_once()
-            self._transcriber = None
+            self._shutdown_transcriber_once()
             self._preprocess_pipeline = None
             self._translator = None
             return
@@ -212,7 +214,7 @@ class TranscriptionController(QObject):
             self._emit_error(f'Run loop crashed: {exc}')
         finally:
             self._stop_capture_once()
-            self._transcriber = None
+            self._shutdown_transcriber_once()
             self._preprocess_pipeline = None
             self._translator = None
             if epoch == self._runtime_epoch:
@@ -234,6 +236,24 @@ class TranscriptionController(QObject):
             capture.stop()
         except Exception:
             return
+
+    def _shutdown_transcriber_once(self) -> None:
+        transcriber = self._transcriber
+        self._transcriber = None
+        self._shutdown_transcriber_object(transcriber)
+
+    def _shutdown_transcriber_object(self, transcriber: object | None) -> None:
+        if transcriber is None:
+            return
+        shutdown = getattr(transcriber, "shutdown", None)
+        if not callable(shutdown):
+            shutdown = getattr(transcriber, "close", None)
+        if not callable(shutdown):
+            return
+        try:
+            shutdown()
+        except Exception as exc:
+            self._emit_error(f"STT transcriber shutdown failed: {exc}")
 
 
     def _build_capture(self) -> AudioCaptureBase:
@@ -390,11 +410,14 @@ class TranscriptionController(QObject):
         warmup_scope = 'VAD/cache pre-init'
         if bool(getattr(self._config, 'whisperx_enable_diarization', False)):
             warmup_scope = 'VAD/cache/diarization pre-init'
-        self._emit_status(f'WhisperX warmup started ({warmup_scope}).')
+        self._emit_status(f'STT warmup started ({provider}; {warmup_scope}).')
         try:
             prewarm_fn = getattr(transcriber, 'prewarm', None)
             if callable(prewarm_fn):
                 prewarm_fn(self._config.source_language)
+                if provider == "whispercpp":
+                    self._emit_status('STT warmup completed.')
+                    return
             if not self._running.is_set():
                 return
             sample_rate = 16000
@@ -407,9 +430,9 @@ class TranscriptionController(QObject):
                 language=self._config.source_language,
                 channel_mode=self._config.source_channel_mode,
             )
-            self._emit_status('WhisperX warmup completed.')
+            self._emit_status('STT warmup completed.')
         except Exception as exc:
-            self._emit_error(f'WhisperX warmup failed: {exc}')
+            self._emit_error(f'STT warmup failed: {exc}')
 
     def _build_stt_transcriber(self, *, device_override: str | None=None, compute_type_override: str | None=None) -> STTTranscriber:
         """Construct provider-specific STT transcriber using current RuntimeConfig."""
@@ -469,9 +492,6 @@ class TranscriptionController(QObject):
     def _emit_error(self, message: str) -> None:
         self._logger.error(message)
         self.error_message.emit(message)
-
-
-
 
 
 

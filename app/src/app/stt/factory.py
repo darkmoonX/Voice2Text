@@ -51,11 +51,84 @@ def _emit_progress(progress_callback: Callable[[str], None] | None, message: str
         progress_callback(message)
 
 def create_stt_transcriber(config: RuntimeConfig, *, device_override: Optional[str]=None, compute_type_override: Optional[str]=None, progress_callback: Callable[[str], None] | None=None) -> STTTranscriber:
-    """Build the WhisperX STT engine instance used by the controller."""
+    """Build the configured STT engine instance used by the controller."""
     provider = normalize_stt_provider(config.stt_provider)
-    if provider != 'whisperx':
-        raise ValueError(f'Unsupported STT provider: {provider}')
-    return _build_whisperx(config, device_override=device_override, compute_type_override=compute_type_override, progress_callback=progress_callback)
+    if provider == 'whispercpp':
+        return _build_whispercpp(config, device_override=device_override, progress_callback=progress_callback)
+    if provider == 'whisperx':
+        return _build_whisperx(config, device_override=device_override, compute_type_override=compute_type_override, progress_callback=progress_callback)
+    raise ValueError(f'Unsupported STT provider: {provider}')
+
+
+def _build_whispercpp(config: RuntimeConfig, *, device_override: Optional[str], progress_callback: Callable[[str], None] | None) -> STTTranscriber:
+    from .whispercpp_provider import WhisperCppTranscriber
+    from .whispercpp_runtime import (
+        resolve_whispercpp_binary,
+        resolve_whispercpp_device,
+        resolve_whispercpp_model,
+        resolve_whispercpp_server_binary,
+        resolve_whispercpp_vad_model,
+    )
+
+    binary_path = resolve_whispercpp_binary(config)
+    model_path = resolve_whispercpp_model(config, progress_callback=progress_callback)
+    device = resolve_whispercpp_device(config, device_override=device_override)
+    if device == "vulkan":
+        _emit_progress(progress_callback, "whisper.cpp backend selected: Vulkan GPU path.")
+    else:
+        _emit_progress(progress_callback, "whisper.cpp backend selected: CPU path (-ng).")
+    fallback = WhisperCppTranscriber(
+        binary_path=binary_path,
+        model_path=model_path,
+        device=device,
+        cpu_threads=int(getattr(config, 'cpu_threads', 0) or 0),
+        beam_size=max(1, int(config.whisper_beam_size or 5)),
+        progress_callback=progress_callback,
+    )
+    mode = str(getattr(config, "stt_whispercpp_mode", "server") or "server").strip().lower()
+    if mode == "subprocess":
+        _emit_progress(progress_callback, "whisper.cpp mode: subprocess fallback path.")
+        return fallback
+    try:
+        from .whispercpp_server import WhisperCppQualityGate, WhisperCppServerManager, WhisperCppServerTranscriber
+
+        server_path = resolve_whispercpp_server_binary(config)
+        use_vad = bool(getattr(config, "stt_whispercpp_server_vad", False))
+        vad_model_path = resolve_whispercpp_vad_model(config, progress_callback=progress_callback) if use_vad else None
+        phrases = tuple(
+            token.strip()
+            for token in str(getattr(config, "stt_whispercpp_boilerplate_phrases", "") or "").split("|")
+            if token.strip()
+        )
+        manager = WhisperCppServerManager(
+            server_path=server_path,
+            model_path=model_path,
+            device=device,
+            cpu_threads=int(getattr(config, 'cpu_threads', 0) or 0),
+            beam_size=max(1, int(config.whisper_beam_size or 5)),
+            language=str(getattr(config, "source_language", "") or "auto"),
+            use_vad=use_vad,
+            vad_model_path=vad_model_path,
+            max_len=int(getattr(config, "stt_whispercpp_server_max_len", 0) or 0),
+            request_timeout_seconds=float(getattr(config, "stt_whispercpp_request_timeout_seconds", 30.0) or 30.0),
+            progress_callback=progress_callback,
+        )
+        gate = WhisperCppQualityGate(
+            no_speech_threshold=float(getattr(config, "stt_whispercpp_no_speech_threshold", 0.85) or 0.85),
+            avg_logprob_min=float(getattr(config, "stt_whispercpp_avg_logprob_min", -1.2) or -1.2),
+            repetition_similarity=float(getattr(config, "stt_whispercpp_repetition_similarity", 0.92) or 0.92),
+            boilerplate_phrases=phrases or WhisperCppQualityGate().boilerplate_phrases,
+        )
+        _emit_progress(progress_callback, "whisper.cpp mode: resident whisper-server (live).")
+        return WhisperCppServerTranscriber(
+            manager=manager,
+            fallback_transcriber=fallback,
+            quality_gate=gate,
+            progress_callback=progress_callback,
+        )
+    except Exception as exc:
+        _emit_progress(progress_callback, f"whisper.cpp server mode unavailable; using subprocess fallback: {exc}")
+        return fallback
 
 
 def _build_whisperx(config: RuntimeConfig, *, device_override: Optional[str], compute_type_override: Optional[str], progress_callback: Callable[[str], None] | None) -> STTTranscriber:

@@ -14,7 +14,9 @@ def allowed_compute_types() -> list[str]:
 
 
 def default_stt_model(provider: str) -> str:
-    normalize_stt_provider(provider)
+    normalized = normalize_stt_provider(provider)
+    if normalized == 'whispercpp':
+        return 'medium'
     return 'small'
 
 

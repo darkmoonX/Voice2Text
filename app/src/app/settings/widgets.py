@@ -15,6 +15,7 @@ def create_mode_combo() -> QComboBox:
 def create_stt_provider_combo() -> QComboBox:
     combo = QComboBox()
     combo.addItem("WhisperX", "whisperx")
+    combo.addItem("whisper.cpp Vulkan", "whispercpp")
     return combo
 
 

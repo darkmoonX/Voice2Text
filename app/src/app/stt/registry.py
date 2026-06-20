@@ -21,6 +21,12 @@ STT_PROVIDER_SPECS: tuple[STTProviderSpec, ...] = (
         supports_gpu_variant=True,
         supports_source_language_hint=True,
     ),
+    STTProviderSpec(
+        provider='whispercpp',
+        aliases=('whispercpp', 'whisper-cpp', 'whisper_cpp', 'whisper.cpp'),
+        supports_gpu_variant=True,
+        supports_source_language_hint=True,
+    ),
 )
 
 

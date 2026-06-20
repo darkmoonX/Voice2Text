@@ -347,6 +347,7 @@ class SettingsDialog(QDialog):
         source_row.addWidget(self._source_summary, 1)
         form_left.addRow(self._t("source"), source_row)
 
+        form_left.addRow(self._t("stt_provider"), self._stt_provider_combo)
         form_left.addRow(self._t("runtime_preset"), self._preset_combo)
         form_left.addRow(self._t("model_size"), self._model_size_combo)
         form_left.addRow(self._t("stt_variant"), self._stt_variant_combo)
@@ -456,14 +457,19 @@ class SettingsDialog(QDialog):
     def _sync_from_config_inner(self, cfg: RuntimeConfig) -> None:
         self._set_combo_data(self._ui_language_combo, cfg.ui_language)
         self._set_combo_data(self._mode_combo, cfg.source_mode)
-        self._set_combo_data(self._stt_provider_combo, "whisperx")
+        self._set_combo_data(self._stt_provider_combo, str(getattr(cfg, "stt_provider", "whisperx") or "whisperx"))
         self._set_combo_data(self._preset_combo, normalize_preset(str(getattr(cfg, "runtime_preset", "") or "")))
         self._set_combo_data(self._stt_variant_combo, cfg.stt_variant)
         self._set_model_size(str(getattr(cfg, "model_size", "small") or "small"))
         self._beam_spin.setValue(int(getattr(cfg, "whisper_beam_size", 5) or 5))
         self._whisperx_speaker_profile_check.setChecked(bool(getattr(cfg, "whisperx_speaker_profile_enabled", True)))
         self._set_combo_data(self._compute_type_combo, str(getattr(cfg, "compute_type", "float16") or "float16"))
-        self._stt_model_path_edit.setText(cfg.stt_model_path)
+        provider = str(getattr(cfg, "stt_provider", "whisperx") or "whisperx").strip().lower()
+        if provider == "whispercpp":
+            self._set_model_size(str(getattr(cfg, "stt_whispercpp_model_size", "") or getattr(cfg, "model_size", "medium") or "medium"))
+            self._stt_model_path_edit.setText(str(getattr(cfg, "stt_whispercpp_model_path", "") or getattr(cfg, "stt_model_path", "") or ""))
+        else:
+            self._stt_model_path_edit.setText(cfg.stt_model_path)
         self._stt_auto_download_check.setChecked(cfg.stt_auto_download)
         self._set_combo_data(self._whisperx_vad_check, str(getattr(cfg, "whisperx_vad_method", "silero-vad") or "silero-vad"))
         self._whisperx_diarization_check.setChecked(cfg.whisperx_enable_diarization)
@@ -582,8 +588,8 @@ class SettingsDialog(QDialog):
             self._source_summary.setText(f'{self._t("apps_selected")} {", ".join(self._selected_app_names)}')
 
     def _on_stt_provider_changed(self) -> None:
-        """Sync fixed WhisperX fields."""
-        provider = "whisperx"
+        """Sync provider-specific controls and hints."""
+        provider = str(self._stt_provider_combo.currentData() or "whisperx").strip() or "whisperx"
         previous_provider = self._last_stt_provider
         self._last_stt_provider = provider
         self._configure_stt_variant(provider)
@@ -593,9 +599,30 @@ class SettingsDialog(QDialog):
         self._stt_model_path_edit.setEnabled(True)
         self._stt_auto_download_check.setEnabled(True)
 
-        self._refresh_alignment_model_suggestions()
-        self._whisperx_align_model_edit.setToolTip("留空=自動依語言選擇；選清單或填 HF repo id=固定使用指定模型")
-        self._stt_hint.setText(self._t("provider_hint_whisperx"))
+        is_whispercpp = provider == "whispercpp"
+        for field in (
+            self._whisperx_vad_check,
+            self._whisperx_diarization_check,
+            self._whisperx_align_language_combo,
+            self._whisperx_align_device_combo,
+            self._whisperx_align_guard_combo,
+            self._whisperx_align_guard_revert_btn,
+            self._whisperx_diar_device_combo,
+            self._whisperx_align_model_edit,
+            self._whisperx_diar_model_edit,
+            self._whisperx_hf_token_edit,
+            self._whisperx_speaker_profile_check,
+            self._whisperx_speaker_backend_combo,
+        ):
+            field.setEnabled(not is_whispercpp)
+        if is_whispercpp:
+            self._stt_hint.setText(self._t("provider_hint_whispercpp"))
+            self._whisperx_align_guard_warning.setVisible(False)
+        else:
+            self._refresh_alignment_model_suggestions()
+            self._whisperx_align_model_edit.setToolTip("留空=自動依語言選擇；選清單或填 HF repo id=固定使用指定模型")
+            self._stt_hint.setText(self._t("provider_hint_whisperx"))
+            self._update_align_guard_state()
 
     def _configure_stt_variant(self, provider: str) -> None:
         current = str(self._stt_variant_combo.currentData() or "auto")
@@ -730,7 +757,11 @@ class SettingsDialog(QDialog):
         if is_path_like(current):
             return
         default_value = default_stt_model(provider)
-        self._stt_model_path_edit.setText(default_value)
+        if provider == "whispercpp":
+            self._set_model_size(default_value)
+            self._stt_model_path_edit.setText("")
+        else:
+            self._stt_model_path_edit.setText(default_value)
 
     def _open_source_selection(self) -> None:
         self._refresh_available_sources()
@@ -813,7 +844,7 @@ class SettingsDialog(QDialog):
         tips = {
             self._mode_combo: "Choose audio source mode: loopback, microphone, or selected app sessions.",
             self._select_source_btn: "Open source picker to choose capture devices or app sessions.",
-            self._stt_provider_combo: "WhisperX is the only supported speech-to-text engine.",
+            self._stt_provider_combo: "Speech-to-text backend. WhisperX is default; whisper.cpp uses resident whisper-server for live Vulkan ASR and has no diarization/speaker labels.",
             self._stt_variant_combo: "Execution preference (Auto/CPU/GPU).",
             self._stt_model_path_edit: "Model alias or local path; defaults are used when empty.",
             self._stt_auto_download_check: "Auto-download missing models.",
@@ -870,7 +901,7 @@ class SettingsDialog(QDialog):
         payload = SettingsPayloadInput(
             ui_language=str(self._ui_language_combo.currentData() or self._lang),
             source_mode=str(self._mode_combo.currentData()),
-            stt_provider="whisperx",
+            stt_provider=str(self._stt_provider_combo.currentData() or "whisperx"),
             runtime_preset=str(self._preset_combo.currentData() or ""),
             stt_variant=str(self._stt_variant_combo.currentData() or "auto"),
             model_size=str(self._model_size_combo.currentText() or "small").strip() or "small",
@@ -980,10 +1011,6 @@ class SettingsDialog(QDialog):
     def _set_combo_data(combo: QComboBox, value: str) -> None:
         idx = combo.findData(value)
         combo.setCurrentIndex(max(0, idx))
-
-
-
-
 
 
 

@@ -3,6 +3,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from ..stt.registry import normalize_stt_provider
+
 
 @dataclass
 class SettingsPayloadInput:
@@ -57,8 +59,9 @@ class SettingsPayloadInput:
 
 
 def build_settings_updates(payload: SettingsPayloadInput, *, lang: str, hop_gt_segment_message: str) -> dict[str, object]:
-    stt_provider = 'whisperx'
+    stt_provider = normalize_stt_provider(payload.stt_provider)
     stt_model_path = payload.stt_model_path.strip()
+    whispercpp_model_path = stt_model_path if (stt_provider == 'whispercpp' and _is_whispercpp_model_path(stt_model_path)) else ''
 
     source_lang_data = payload.source_language
     if source_lang_data == 'auto':
@@ -110,6 +113,8 @@ def build_settings_updates(payload: SettingsPayloadInput, *, lang: str, hop_gt_s
         'runtime_preset': (payload.runtime_preset or '').strip(),
         'stt_variant': payload.stt_variant or 'auto',
         'model_size': (payload.model_size or 'small').strip() or 'small',
+        'stt_whispercpp_model_size': (payload.model_size or 'medium').strip() or 'medium',
+        'stt_whispercpp_model_path': whispercpp_model_path,
         'whisper_beam_size': max(1, int(payload.whisper_beam_size or 5)),
         'whisperx_speaker_profile_enabled': bool(payload.whisperx_speaker_profile_enabled),
         'compute_type': compute_type,
@@ -162,3 +167,10 @@ def _normalize_translation_backend(value: str) -> str:
     if token in {"argos", "nllb", "llm", "cloud"}:
         return token
     return "argos"
+
+
+def _is_whispercpp_model_path(value: str) -> bool:
+    token = str(value or "").strip()
+    if not token:
+        return False
+    return token.lower().endswith(".bin") or any((ch in token for ch in ('/', '\\'))) or token.startswith('.')

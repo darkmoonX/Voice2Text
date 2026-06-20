@@ -210,6 +210,61 @@ def _check_whisperx(config: RuntimeConfig) -> ProviderHealthReport:
     report.ok = not report.issues
     return report
 
+
+def _check_whispercpp(config: RuntimeConfig) -> ProviderHealthReport:
+    report = ProviderHealthReport(provider='whispercpp', ok=True)
+    try:
+        from .whispercpp_runtime import (
+            ggml_model_filename,
+            whispercpp_model_dir,
+            resolve_whispercpp_binary,
+            resolve_whispercpp_server_binary,
+            resolve_whispercpp_vad_model,
+        )
+    except Exception as exc:
+        report.issues.append(f'whisper.cpp resolver unavailable: {exc}')
+        report.ok = False
+        return report
+    model_size = str(getattr(config, 'stt_whispercpp_model_size', '') or getattr(config, 'model_size', 'medium') or 'medium')
+    report.details['model_ref'] = str(getattr(config, 'stt_whispercpp_model_path', '') or ggml_model_filename(model_size))
+    report.details['mode'] = str(getattr(config, 'stt_whispercpp_mode', 'server') or 'server')
+    report.details['diarization'] = 'unsupported'
+    report.details['alignment'] = 'segment-synth'
+    try:
+        report.details['binary'] = str(resolve_whispercpp_binary(config))
+    except Exception as exc:
+        report.issues.append(str(exc))
+    if str(getattr(config, 'stt_whispercpp_mode', 'server') or 'server').strip().lower() != 'subprocess':
+        try:
+            report.details['server_binary'] = str(resolve_whispercpp_server_binary(config))
+        except Exception as exc:
+            report.issues.append(str(exc))
+        if bool(getattr(config, 'stt_whispercpp_server_vad', False)):
+            try:
+                report.details['vad_model_path'] = str(resolve_whispercpp_vad_model(config, progress_callback=None, allow_download=False))
+            except Exception as exc:
+                report.issues.append(str(exc))
+        else:
+            report.details['vad'] = 'off'
+    raw_model = str(getattr(config, 'stt_whispercpp_model_path', '') or getattr(config, 'stt_model_path', '') or '').strip()
+    if raw_model:
+        model_path = Path(raw_model)
+        if model_path.is_dir():
+            model_path = model_path / ggml_model_filename(model_size)
+    else:
+        model_path = whispercpp_model_dir() / ggml_model_filename(model_size)
+    report.details['model_path'] = str(model_path)
+    if not model_path.exists():
+        report.issues.append(
+            f"whisper.cpp ggml model not found: {model_path}. Enable auto-download at runtime or set stt_whispercpp_model_path."
+        )
+    report.checks = [
+        check_ffmpeg(config),
+        check_capture_bridge(),
+    ]
+    report.ok = not report.issues
+    return report
+
 def _is_path_like(value: str) -> bool:
     if not value:
         return False
@@ -220,4 +275,5 @@ def _is_path_like(value: str) -> bool:
 
 _PROVIDER_CHECKERS: dict[STTProvider, Callable[[RuntimeConfig], ProviderHealthReport]] = {
     'whisperx': _check_whisperx,
+    'whispercpp': _check_whispercpp,
 }

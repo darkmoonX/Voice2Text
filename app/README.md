@@ -6,7 +6,7 @@ Windows live subtitle overlay runtime (Python main process + C++ capture bridge)
 
 - UI: `PySide6`
 - Capture: Python capture adapters + C++ bridge (`WASAPI loopback`, `Application Loopback Capture`)
-- STT provider: `whisperx` only. Legacy persisted names such as `whisper` / `faster-whisper` are normalized to `whisperx` for compatibility.
+- STT providers: `whisperx` (default) and optional `whispercpp` (resident whisper.cpp Vulkan server backend, with subprocess fallback). Legacy persisted names such as `whisper` / `faster-whisper` are normalized to `whisperx` for compatibility.
 - Optional translation: `Argos Translate` or offline NLLB (`CTranslate2` + `transformers`)
 
 ## Runtime Structure
@@ -18,7 +18,7 @@ app/
       capture/      # capture factory + cpp bridge adapter
       pipeline/     # subtitle assembler, delta logger, runtime recovery
       settings/     # i18n + mapping + schema
-      stt/          # WhisperX registry/factory/health-check, downloads, diarization, speaker identity
+      stt/          # STT registry/factory/health-check, WhisperX, whisper.cpp, downloads, diarization, speaker identity
     runtime_bin/    # bridge executable output
   native/
     audio_bridge/   # C++ bridge source + build script
@@ -80,6 +80,72 @@ Notes:
 
 Advanced build parameters and MSVC/MinGW presets:
 - [app/native/audio_bridge/README.md](/D:/Voice2Text/app/native/audio_bridge/README.md)
+
+## Optional whisper.cpp Vulkan Backend
+
+`whispercpp` is an alternative ASR backend for non-CUDA GPU acceleration through whisper.cpp's Vulkan path.
+WhisperX remains the default and is still the only backend with forced alignment, diarization, and speaker labels.
+The default `server` mode starts a local resident `whisper-server.exe` child process on `127.0.0.1`, warms it before
+capture starts, and reuses the loaded model for every live window. The older `subprocess` mode still exists as a
+fallback/offline path and runs `whisper-cli.exe` per window.
+
+The whisper.cpp backend emits segment timestamps only; Voice2Text synthesizes per-token timestamps from those
+segment spans and marks `alignment_enabled=False`, reusing the same rolling subtitle merge path as WhisperX
+alignment-off mode.
+
+Build/copy the local Vulkan binaries and runtime DLLs:
+
+```powershell
+cd app
+.\build_whispercpp.ps1
+```
+
+Expected output:
+- `app/src/runtime_bin/whispercpp/whisper-cli.exe`
+- `app/src/runtime_bin/whispercpp/whisper-server.exe`
+- colocated `whisper.dll`, `ggml*.dll`, `ggml-vulkan.dll`
+- `app/src/models/whispercpp/ggml-silero-v5.1.2.bin` for whisper-server VAD
+
+`vulkan-1.dll` is supplied by the system Vulkan loader and is not bundled. Install the Vulkan runtime/SDK if the
+driver does not provide it.
+
+Run with the bundled binary and auto-downloaded ggml model:
+
+```powershell
+cd app\src
+python main.py --stt-provider whispercpp --whispercpp-model-size medium
+```
+
+`medium` is the recommended live model — realtime (~0.45x at `seg10/hop2`) and cross-window stable, so the rolling
+merge dedups cleanly. `large-v2` is higher-accuracy but, in local testing, transcribes the same audio differently
+across overlapping windows, which the text-keyed merge cannot dedup → visible duplication; use it for
+**offline / file-replay** runs, not live. `large-v3` is not recommended at all (slower and more hallucination-prone).
+Note: very low `--hop-seconds` (large overlap) over-stresses the merge even for `medium`; keep the default `hop 2.0`.
+
+Useful overrides:
+
+```powershell
+$env:VOICE2TEXT_WHISPERCPP_BIN="D:\path\to\whisper-cli.exe"
+$env:VOICE2TEXT_WHISPERCPP_SERVER_BIN="D:\path\to\whisper-server.exe"
+$env:VOICE2TEXT_WHISPERCPP_VAD_MODEL="D:\path\to\ggml-silero-v5.1.2.bin"
+python main.py --stt-provider whispercpp --whispercpp-model-path D:\models\ggml-medium.bin
+python main.py --stt-provider whispercpp --whispercpp-mode subprocess  # 0032 CLI fallback path
+python main.py --stt-provider whispercpp --stt-variant cpu  # adds -ng
+python main.py --stt-provider whispercpp --whispercpp-server-vad  # opt-in; off by default
+python main.py --stt-provider whispercpp --whispercpp-server-max-len 32  # optional segment-length cap
+```
+
+Model cache:
+- default directory: `app/src/models/whispercpp/`
+- filename pattern: `ggml-<size>.bin`
+- ASR source repo: `ggerganov/whisper.cpp`
+- VAD source repo: `ggml-org/whisper-vad`, default filename `ggml-silero-v5.1.2.bin`
+- approximate disk size: `medium` ~1.5GB, `large-v2`/`large-v3` ~3.1GB
+
+Server VAD is opt-in because current `whisper-server` builds can crash on windows with zero VAD speech segments.
+When enabled, Voice2Text always passes `--vad-model`; it never starts whisper-server with a bare `--vad`.
+Server mode uses real `verbose_json` `words[]` timestamps when available, falling back to synthesized segment
+timestamps only when word timings are absent. `--whispercpp-server-max-len` is optional and defaults to `0`.
 
 ## Run
 
