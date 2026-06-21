@@ -145,4 +145,6 @@ class RuntimeConfig:
     transcript_export_display_text_only: bool = False
     transcript_export_include_confidence: bool = True
     transcript_export_dir: str = ''
-
+    import_direct_path: str = ''
+    import_direct_chunk_seconds: float = 0.0
+    import_direct_language_subchunk_seconds: float = 30.0

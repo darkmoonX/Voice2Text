@@ -11,6 +11,11 @@ from .config import RuntimeConfig
 from .cuda_compat import ensure_cublas12_from_source
 from .pipeline.gpu_telemetry import GpuTelemetryReporter
 from .pipeline.runtime_recovery import RuntimeRecoveryState, WhisperRuntimeRecovery
+from .pipeline.direct_transcription import (
+    decode_to_wav_16k_mono,
+    read_wav,
+    run_direct_transcription,
+)
 from .pipeline.segment_artifacts import SegmentArtifacts
 from .pipeline.subtitle_assembler import SubtitleAssembler
 from .pipeline.transcript_exporter import TranscriptExportOptions, TranscriptExporterSession
@@ -135,6 +140,30 @@ class TranscriptionController(QObject):
         self.start()
         return str(path)
 
+    def import_audio_file_direct(self, file_path: str) -> str:
+        """Transcribe an imported media file with one whole-file direct pass."""
+        source = str(file_path or "").strip()
+        if not source:
+            raise RuntimeError("Audio import path is empty.")
+        path = Path(source).expanduser()
+        if not path.exists():
+            raise RuntimeError(f"Audio import file does not exist: {path}")
+        self.stop()
+        self._runtime_epoch += 1
+        epoch = self._runtime_epoch
+        self._running.set()
+        self.runtime_state_changed.emit(True)
+        self._subtitle_assembler.reset()
+        self._text_delta_logger.reset()
+        self._transcript_exporter = self._build_transcript_exporter()
+        self._emit_status(f"Direct imported-audio transcription started: {path}")
+        self._worker = threading.Thread(
+            target=lambda: self._run_direct_import_guarded(epoch, path),
+            daemon=True,
+        )
+        self._worker.start()
+        return str(path)
+
 
     def is_running(self) -> bool:
         return self._running.is_set()
@@ -224,6 +253,65 @@ class TranscriptionController(QObject):
             self._restore_temporary_source_if_needed()
             self._worker = None
             self._release_runtime_memory("run-loop-finally")
+
+    def _run_direct_import_guarded(self, epoch: int, path: Path) -> None:
+        transcriber: STTTranscriber | None = None
+        try:
+            transcriber = self._create_transcriber_with_fallback()
+            self._transcriber = transcriber
+            if transcriber is None or not self._running.is_set() or epoch != self._runtime_epoch:
+                return
+            self._warmup_transcriber_instance(transcriber)
+            if not self._running.is_set() or epoch != self._runtime_epoch:
+                return
+            self._emit_status(f"Direct import decoding audio: {path}")
+            decoded = decode_to_wav_16k_mono(
+                path,
+                ffmpeg_dir=str(getattr(self._config, "ffmpeg_dll_dir", "") or ""),
+            )
+            if not self._running.is_set() or epoch != self._runtime_epoch:
+                return
+            full_audio = read_wav(decoded)
+
+            def _progress(completed: float, total: float) -> None:
+                self._emit_status(f"Direct import progress: {completed:.1f}/{total:.1f}s audio")
+
+            result = run_direct_transcription(
+                self._config,
+                full_audio,
+                transcriber=transcriber,
+                chunk_seconds=float(getattr(self._config, "import_direct_chunk_seconds", 0.0) or 0.0),
+                language_subchunk_seconds=float(
+                    getattr(self._config, "import_direct_language_subchunk_seconds", 30.0) or 30.0
+                ),
+                speaker_profile_reconcile_threshold=float(
+                    getattr(self._config, "whisperx_speaker_profile_reconcile_threshold", 0.0) or 0.0
+                ),
+                on_progress=_progress,
+                on_status=self._emit_status,
+            )
+            text = str(result.get("text") or "")
+            meta = result.get("meta") if isinstance(result.get("meta"), dict) else {}
+            exporter = self._transcript_exporter
+            if exporter is not None and (text or meta.get("token_timestamps")):
+                exporter.record(raw_text=text, source_text=text, translated_text="", meta=meta)
+            if epoch == self._runtime_epoch:
+                self.subtitle_ready.emit(text, "")
+                self._emit_status("Direct imported-audio transcription finished.")
+        except Exception as exc:
+            self._emit_error(f"Direct imported-audio transcription failed: {exc}")
+        finally:
+            if self._transcriber is transcriber:
+                self._transcriber = None
+            self._shutdown_transcriber_object(transcriber)
+            self._preprocess_pipeline = None
+            self._translator = None
+            if epoch == self._runtime_epoch:
+                self._running.clear()
+                self.runtime_state_changed.emit(False)
+            self._finalize_transcript_export()
+            self._worker = None
+            self._release_runtime_memory("direct-import-finally")
 
     def _stop_capture_once(self) -> None:
         capture: AudioCaptureBase | None
@@ -492,7 +580,6 @@ class TranscriptionController(QObject):
     def _emit_error(self, message: str) -> None:
         self._logger.error(message)
         self.error_message.emit(message)
-
 
 
 

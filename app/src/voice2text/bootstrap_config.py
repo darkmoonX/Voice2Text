@@ -133,6 +133,12 @@ def build_runtime_config(args: argparse.Namespace) -> RuntimeConfig:
         transcript_export_include_timestamps=bool(args.transcript_export_include_timestamps),
         transcript_export_include_speaker=bool(args.transcript_export_include_speaker),
         transcript_export_dir=str(args.transcript_export_dir or ""),
+        import_direct_path=str(getattr(args, "import_direct", "") or ""),
+        import_direct_chunk_seconds=max(0.0, float(getattr(args, "import_direct_chunk_seconds", 0.0) or 0.0)),
+        import_direct_language_subchunk_seconds=max(
+            0.0,
+            float(getattr(args, "import_direct_language_subchunk_seconds", 30.0) or 30.0),
+        ),
     )
     if args.source_language != "auto":
         cfg.source_language = args.source_language

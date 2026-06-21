@@ -361,7 +361,12 @@ def run_qt_app(cfg: RuntimeConfig) -> int:
             include_speaker=bool(include_speaker),
         )
 
-    def import_audio_file(file_path: str) -> str:
+    def import_audio_file(file_path: str, mode: str = "replay") -> str:
+        selected = str(mode or "replay").strip().lower()
+        if selected == "direct":
+            imported = controller.import_audio_file_direct(file_path)
+            overlay.push_status(f"Imported audio direct transcription started: {imported}")
+            return imported
         imported = controller.import_audio_file(file_path)
         overlay.push_status(f"Imported audio replay started: {imported}")
         return imported
@@ -442,5 +447,9 @@ def run_qt_app(cfg: RuntimeConfig) -> int:
 
     app.aboutToQuit.connect(_cleanup_on_quit)
     overlay.show()
-    controller.start()
+    import_direct_path = str(getattr(cfg, "import_direct_path", "") or "").strip()
+    if import_direct_path:
+        QTimer.singleShot(0, lambda: import_audio_file(import_direct_path, "direct"))
+    else:
+        controller.start()
     return app.exec()

@@ -166,7 +166,7 @@ class SettingsDialog(QDialog):
         device_provider: Callable[[], Sequence[AudioDevice]] | None = None,
         app_session_provider: Callable[[], Sequence[str]] | None = None,
         export_transcript_callback: Callable[[str, str, bool, bool], str] | None = None,
-        import_audio_callback: Callable[[str], str] | None = None,
+        import_audio_callback: Callable[[str, str], str] | None = None,
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
@@ -782,12 +782,37 @@ class SettingsDialog(QDialog):
         )
         if not path:
             return
+        mode_box = QMessageBox(self)
+        mode_box.setWindowTitle("Import Mode" if self._lang != "zh" else "匯入模式")
+        mode_box.setText(
+            "Choose how to process this imported audio file."
+            if self._lang != "zh"
+            else "選擇此匯入音檔的處理方式。"
+        )
+        direct_button = mode_box.addButton(
+            "Direct (best quality, offline)" if self._lang != "zh" else "Direct（最佳品質，離線）",
+            QMessageBox.ButtonRole.AcceptRole,
+        )
+        replay_button = mode_box.addButton(
+            "Replay (realtime preview)" if self._lang != "zh" else "Replay（即時預覽）",
+            QMessageBox.ButtonRole.ActionRole,
+        )
+        mode_box.addButton(QMessageBox.StandardButton.Cancel)
+        mode_box.exec()
+        clicked = mode_box.clickedButton()
+        if clicked is None or mode_box.standardButton(clicked) == QMessageBox.StandardButton.Cancel:
+            return
+        mode = "direct" if clicked is direct_button else "replay"
         try:
-            imported = callback(path)
+            imported = callback(path, mode)
+            if mode == "direct":
+                started = "Imported audio direct transcription started:\n" if self._lang != "zh" else "已開始匯入音檔 Direct 轉寫：\n"
+            else:
+                started = "Imported audio replay started:\n" if self._lang != "zh" else "已開始匯入音檔重播：\n"
             QMessageBox.information(
                 self,
                 "Import" if self._lang != "zh" else "匯入",
-                ("Imported audio replay started:\n" if self._lang != "zh" else "已開始匯入音檔重播：\n") + imported,
+                started + imported,
             )
         except Exception as exc:
             QMessageBox.warning(
@@ -1085,7 +1110,6 @@ class SettingsDialog(QDialog):
     def _set_combo_data(combo: QComboBox, value: str) -> None:
         idx = combo.findData(value)
         combo.setCurrentIndex(max(0, idx))
-
 
 
 

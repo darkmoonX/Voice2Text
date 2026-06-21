@@ -118,6 +118,9 @@ def build_arg_parser(whisper_defaults: WhisperRuntimeParams) -> argparse.Argumen
     parser.add_argument("--transcript-export-dir", default="", help="Transcript export output directory.")
     parser.add_argument("--record-session", dest="session_record_enabled", action="store_true", help="Record the live session (exact PCM -> WAV + manifest) under recordings/ for deterministic replay. Ignored for --source-mode file.")
     parser.add_argument("--replay-session", default="", help="Replay a recorded session dir (or its manifest.json): sets source_mode=file on the recorded WAV and restores the recorded STT config for deterministic repro.")
+    parser.add_argument("--import-direct", default="", help="Import one audio file and run whole-file direct transcription instead of live capture.")
+    parser.add_argument("--import-direct-chunk-seconds", type=float, default=0.0, help="Direct import chunk seconds. 0 = one full-file pass.")
+    parser.add_argument("--import-direct-language-subchunk-seconds", type=float, default=30.0, help="Direct import auto-language subchunk seconds when chunking is enabled. 0 disables subchunking.")
     parser.set_defaults(
         stt_auto_download=True,
         preprocess_enabled=True,
