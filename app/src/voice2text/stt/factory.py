@@ -156,6 +156,7 @@ def _build_whisperx(config: RuntimeConfig, *, device_override: Optional[str], co
         vad_method=str(getattr(config, 'whisperx_vad_method', 'silero-vad') or 'silero-vad'),
         enable_diarization=bool(getattr(config, 'whisperx_enable_diarization', False)),
         alignment_model=str(getattr(config, 'whisperx_alignment_model', '') or ''),
+        english_align_large=bool(getattr(config, 'whisperx_english_align_large', True)),
         alignment_language=str(getattr(config, 'whisperx_alignment_language', 'auto') or 'auto'),
         alignment_device=str(getattr(config, 'whisperx_alignment_device', 'auto') or 'auto'),
         align_guard=str(getattr(config, 'whisperx_align_guard', 'safe') or 'safe'),

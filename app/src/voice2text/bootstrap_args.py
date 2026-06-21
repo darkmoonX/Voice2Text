@@ -48,6 +48,8 @@ def build_arg_parser(whisper_defaults: WhisperRuntimeParams) -> argparse.Argumen
     parser.add_argument("--no-whisperx-speaker-profile", dest="whisperx_speaker_profile", action="store_false", help="Disable cross-window speaker-profile identity.")
     parser.add_argument("--speaker-profile-quality-gate", dest="whisperx_speaker_profile_quality_gate_enabled", action="store_true", help="Gate the speaker-profile learn path: low-quality clips (gibberish/music/low-confidence) can still match an existing profile for display but never update/create a centroid.")
     parser.add_argument("--whisperx-alignment-model", default="", help="Optional WhisperX alignment model id/path.")
+    parser.add_argument("--whisperx-english-align-large", dest="whisperx_english_align_large", action="store_true", help="Use the large wav2vec2 bundle (WAV2VEC2_ASR_LARGE_LV60K_960H) as the English forced-alignment default (better word order + fewer dropped words; near-free on CPU). On by default.")
+    parser.add_argument("--no-whisperx-english-align-large", dest="whisperx_english_align_large", action="store_false", help="Use WhisperX's stock base English alignment default instead of the large bundle.")
     parser.add_argument("--whisperx-alignment-language", choices=["auto", "follow-source", "en", "zh-hant", "zh-hans", "ja", "ko", "de", "fr", "es", "it", "pt", "ru"], default="auto", help="Alignment language override. auto=from ASR result, follow-source=use STT source language setting.")
     parser.add_argument("--whisperx-alignment-device", choices=["auto", "cpu", "cuda"], default="auto", help="Alignment device override. auto uses runtime heuristic.")
     parser.add_argument("--whisperx-align-guard", choices=["safe", "unsafe-cuda"], default="safe", help="Alignment CUDA safety guard. safe (default) downgrades CUDA alignment to CPU on Windows (known crash); unsafe-cuda forces CUDA with a warning (diagnostics only).")
@@ -126,6 +128,7 @@ def build_arg_parser(whisper_defaults: WhisperRuntimeParams) -> argparse.Argumen
         preprocess_enabled=True,
         whisperx_phoneme_asr=True,
         whisperx_forced_alignment=True,
+        whisperx_english_align_large=True,
         whisperx_vad=False,
         whisperx_diarization=False,
         whisperx_speaker_profile=True,

@@ -33,6 +33,7 @@ class RuntimeConfig:
     whisperx_vad_method: str = 'silero-vad'
     whisperx_enable_diarization: bool = False
     whisperx_alignment_model: str = ''
+    whisperx_english_align_large: bool = True
     whisperx_alignment_language: str = 'auto'
     whisperx_alignment_device: str = 'auto'
     # Round 0028 alignment CUDA safety guard: 'safe' (default) downgrades CUDA alignment to CPU on

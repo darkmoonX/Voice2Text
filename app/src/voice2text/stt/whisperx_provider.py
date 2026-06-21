@@ -35,6 +35,7 @@ class WhisperXTranscriber:
         vad_method: str = "silero-vad",
         enable_diarization: bool = False,
         alignment_model: str = "",
+        english_align_large: bool = True,
         alignment_language: str = "auto",
         alignment_device: str = "auto",
         align_guard: str = "safe",
@@ -113,6 +114,7 @@ class WhisperXTranscriber:
         self._vad_method = (vad_method or "silero-vad").strip().lower()
         self._enable_diarization = bool(enable_diarization)
         self._alignment_model = (alignment_model or "").strip()
+        self._english_align_large = bool(english_align_large)
         self._alignment_language = (alignment_language or 'auto').strip().lower()
         self._alignment_device_setting = (alignment_device or "auto").strip().lower()
         self._align_guard = self._normalize_align_guard(align_guard)
@@ -871,7 +873,7 @@ class WhisperXTranscriber:
         self._cleanup_alignment_partial_cache()
         align_repo_id = self._resolve_alignment_repo_id(language_code)
         align_local_dir = self._resolve_alignment_local_dir(language_code, align_repo_id)
-        explicit_model = self._alignment_model.strip()
+        explicit_model = self._effective_alignment_model(language_code)
         model_selection = explicit_model if explicit_model else f"auto:{align_repo_id or language_code}"
         cache_key = f"{language_code}|{model_selection.lower()}"
         cached = self._align_cache.get(cache_key)
@@ -927,7 +929,7 @@ class WhisperXTranscriber:
     def _resolve_alignment_model_name_for_load(self, language_code: str) -> str:
         align_repo_id = self._resolve_alignment_repo_id(language_code)
         align_local_dir = self._resolve_alignment_local_dir(language_code, align_repo_id)
-        explicit_model = self._alignment_model.strip()
+        explicit_model = self._effective_alignment_model(language_code)
         if self._is_local_hf_model_dir_ready(align_local_dir):
             return str(align_local_dir)
         # Legacy fallback: older runs may have cached by repo-id slug.
@@ -2129,6 +2131,26 @@ class WhisperXTranscriber:
         )
         return bool((has_yaml or has_json) and has_weight)
 
+    _ENGLISH_LARGE_ALIGN_BUNDLE = "WAV2VEC2_ASR_LARGE_LV60K_960H"
+
+    def _effective_alignment_model(self, language_code: str) -> str:
+        """Effective forced-alignment model id/bundle for a language.
+
+        Explicit user/CLI ``alignment_model`` always wins. Otherwise, when
+        ``english_align_large`` is on and alignment runs in English, default to the
+        large wav2vec2 bundle (``WAV2VEC2_ASR_LARGE_LV60K_960H``) instead of WhisperX's
+        stock base English model: much tighter timestamps (better word order, fewer
+        dropped words) at ~flat CPU cost. Routing the bundle name through the explicit
+        path also bypasses any stale language-scoped ``align/hf/{lang}`` cache. Non-English
+        languages are unaffected (returns ``""`` so resolution stays byte-identical).
+        """
+        explicit = self._alignment_model.strip()
+        if explicit:
+            return explicit
+        if getattr(self, "_english_align_large", True) and self._normalize_alignment_folder_language(language_code) == "en":
+            return self._ENGLISH_LARGE_ALIGN_BUNDLE
+        return ""
+
     def _resolve_alignment_repo_id(self, language_code: str) -> str:
         # If user explicitly provided an HF repo id, use it directly.
         if self._alignment_model and ('/' in self._alignment_model):
@@ -2162,8 +2184,9 @@ class WhisperXTranscriber:
 
     def _resolve_alignment_local_dir(self, language_code: str, repo_id: str) -> Path:
         base = self._alignment_hf_root_dir()
-        if self._alignment_model and ("/" not in self._alignment_model):
-            return self._alignment_custom_root_dir() / self._slugify_repo_id(self._alignment_model)
+        effective_model = self._effective_alignment_model(language_code)
+        if effective_model and ("/" not in effective_model):
+            return self._alignment_custom_root_dir() / self._slugify_repo_id(effective_model)
 
         # For auto/follow-source/explicit-language flows, keep alignment cache
         # in language-scoped folders under `align/hf/{lang}` even when model
