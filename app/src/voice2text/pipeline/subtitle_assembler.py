@@ -69,7 +69,23 @@ class SubtitleAssembler:
         self._speaker_display_map: dict[str, str] = {}
         self._speaker_display_next_index = 0
         self._required_agreement_count = 3
+        # Word-confidence gate before cross-window agreement. wav2vec2 alignment
+        # scores are on different scales per language: CJK alignment is highly
+        # confident (median ~0.96), but English/Latin alignment is systematically
+        # lower (median ~0.37). A single CJK-calibrated 0.60 cut drops ~85% of
+        # legitimate English words before they can reach the agreement count,
+        # collapsing the realtime English transcript. Keep 0.60 for CJK and use a
+        # much lower gate for non-CJK so each language drops only its genuine
+        # ~0-score alignment failures (CJK keeps ~95%, English keeps ~90%).
         self._score_threshold = 0.60
+        self._score_threshold_non_cjk = 0.10
+        # Non-CJK word-match tolerances (see `_word_matches`): loose enough to
+        # merge jittery English alignment copies of one spoken word into a single
+        # accumulating state. IoU disabled (0.0) because English word intervals
+        # frequently fail to overlap across windows.
+        self._non_cjk_match_start_diff = 1.0
+        self._non_cjk_match_end_diff = 1.1
+        self._non_cjk_match_min_iou = 0.0
         self._speaker_switch_confirm_tokens = 2
         self._speaker_switch_min_duration_seconds = 0.18
         self._speaker_micro_turn_max_duration_seconds = 0.80
@@ -248,6 +264,15 @@ class SubtitleAssembler:
         items = meta.get('token_timestamps')
         if not isinstance(items, list):
             return []
+        # Pick the confidence gate by script before filtering. The persistent
+        # `_is_cjk_source` is only updated by add_window *after* this extract, so
+        # in auto-detect mode decide from this batch's own words to avoid a
+        # one-window lag (and a wrong gate on the very first window).
+        if self._auto_detect_cjk:
+            batch_is_cjk = self._items_contain_cjk(items)
+        else:
+            batch_is_cjk = self._is_cjk_source
+        score_threshold = self._score_threshold if batch_is_cjk else self._score_threshold_non_cjk
         out: list[_WordState] = []
         for raw in items:
             if not isinstance(raw, dict):
@@ -256,7 +281,7 @@ class SubtitleAssembler:
             if not word:
                 continue
             score = self._to_float(raw.get('score'), 0.0)
-            if score < self._score_threshold:
+            if score < score_threshold:
                 continue
             start_rel = self._to_float(raw.get('start'), -1.0)
             end_rel = self._to_float(raw.get('end'), -1.0)
@@ -599,7 +624,30 @@ class SubtitleAssembler:
         union = max(a_end, b_end) - min(a_start, b_start)
         return (inter / union) if union > 0 else 0.0
 
-    def _word_matches(self, a: _WordState, b: _WordState, *, max_start_diff: float = 0.25, max_end_diff: float = 0.35, min_iou: float = 0.30) -> bool:
+    def _word_matches(
+        self,
+        a: _WordState,
+        b: _WordState,
+        *,
+        max_start_diff: float | None = None,
+        max_end_diff: float | None = None,
+        min_iou: float | None = None,
+    ) -> bool:
+        # Tolerances are script-aware. CJK alignment is tight and stable, so the
+        # same word in adjacent windows lands within ~0.25s with high interval
+        # overlap. English/Latin wav2vec2 alignment jitters far more (up to ~1s)
+        # and its word intervals often barely overlap, so the tight CJK gate fails
+        # to merge the jittered copies of one spoken word: at agreement count 3
+        # they each under-confirm (dropped words), and if promoted they render as
+        # adjacent duplicates (`completely completely`). A loose non-CJK gate with
+        # IoU disabled merges those copies into one accumulating state -> complete
+        # AND duplicate-free. (Replay: vskw 71%/9dup -> 95%/0dup; mdqm 72% -> 86%.)
+        if max_start_diff is None:
+            max_start_diff = 0.25 if self._is_cjk_source else self._non_cjk_match_start_diff
+        if max_end_diff is None:
+            max_end_diff = 0.35 if self._is_cjk_source else self._non_cjk_match_end_diff
+        if min_iou is None:
+            min_iou = 0.30 if self._is_cjk_source else self._non_cjk_match_min_iou
         if self._normalize_word(a.word) != self._normalize_word(b.word):
             return False
         if abs(a.start - b.start) > max_start_diff:
@@ -1001,6 +1049,14 @@ class SubtitleAssembler:
         return False
 
     @staticmethod
+    def _items_contain_cjk(items: list) -> bool:
+        """CJK presence over raw token_timestamps dicts (pre-extraction)."""
+        for raw in items:
+            if isinstance(raw, dict) and SubtitleAssembler._contains_cjk_text(str(raw.get('word') or '')):
+                return True
+        return False
+
+    @staticmethod
     def _contains_cjk_text(text: str) -> bool:
         return bool(re.search(r'[\u3400-\u4DBF\u4E00-\u9FFF]', text or ''))
 
@@ -1183,6 +1239,8 @@ class SubtitleAssembler:
         marker_merged = self._merge_across_leading_speaker_marker(base, incoming)
         if marker_merged:
             return marker_merged
+        if self._should_use_word_overlap_merge(base, incoming):
+            return self._merge_words_by_overlap(base, incoming)
         overlap = self._max_prefix_suffix_overlap(base, incoming)
         if overlap >= len(incoming):
             self._last_overlap_summary = {'method': 'exact-contained', 'chars': overlap, 'ratio': 1.0}
@@ -1218,6 +1276,199 @@ class SubtitleAssembler:
             sep = '' if base.endswith(('?', '!', ',', '.', ' ', '\n')) else ' '
         self._last_overlap_summary = {'method': 'append', 'chars': 0, 'ratio': 0.0}
         return self._normalize_output_text(f'{base}{sep}{incoming}')
+
+    def _should_use_word_overlap_merge(self, base: str, incoming: str) -> bool:
+        if self._is_cjk_source:
+            return False
+        return not self._contains_cjk_text(f'{base}{incoming}')
+
+    def _merge_words_by_overlap(self, base: str, incoming: str) -> str:
+        base_tokens = self._word_merge_tokens(base)
+        incoming_tokens = self._word_merge_tokens(incoming)
+        base_keys = self._word_overlap_keys(base_tokens)
+        incoming_keys = self._word_overlap_keys(incoming_tokens)
+        if not base_keys or not incoming_keys:
+            sep = '\n' if self._starts_with_speaker_marker(incoming) and not base.endswith('\n') else ' '
+            self._last_overlap_summary = {'method': 'word-append', 'chars': 0, 'ratio': 0.0}
+            return self._normalize_output_text(f'{base}{sep}{incoming}')
+
+        exact_words = self._max_word_prefix_suffix_overlap(base_keys, incoming_keys)
+        if exact_words >= len(incoming_keys):
+            self._last_overlap_summary = {
+                'method': 'word-exact-contained',
+                'chars': len(incoming),
+                'ratio': 1.0,
+                'words': exact_words,
+            }
+            return base
+        if exact_words > 0:
+            drop_to = self._token_index_after_word_count(incoming_tokens, exact_words)
+            merged_tokens = base_tokens + incoming_tokens[drop_to:]
+            self._last_overlap_summary = {
+                'method': 'word-exact',
+                'chars': 0,
+                'ratio': 1.0,
+                'words': exact_words,
+            }
+            return self._normalize_output_text(self._join_word_merge_tokens(merged_tokens))
+
+        contained = self._incoming_words_contained_in_base_tail(base_keys, incoming_keys)
+        if contained:
+            self._last_overlap_summary = {
+                'method': 'word-tail-contained',
+                'chars': len(incoming),
+                'ratio': 1.0,
+                'words': len(incoming_keys),
+            }
+            return base
+
+        fuzzy_words, fuzzy_ratio = self._max_fuzzy_word_prefix_suffix_overlap(base_keys, incoming_keys)
+        if fuzzy_words > 0:
+            keep_to = self._token_index_before_last_word_count(base_tokens, fuzzy_words)
+            merged_tokens = base_tokens[:keep_to] + incoming_tokens
+            merged = self._join_word_merge_tokens(merged_tokens)
+            if self._word_count(base) - self._word_count(merged) > self._word_count(incoming):
+                merged = self._append_words_plain(base, incoming)
+                self._last_overlap_summary = {'method': 'word-append-guarded', 'chars': 0, 'ratio': 0.0}
+                return merged
+            self._last_overlap_summary = {
+                'method': 'word-fuzzy-replace',
+                'chars': 0,
+                'ratio': round(fuzzy_ratio, 4),
+                'words': fuzzy_words,
+            }
+            return self._normalize_output_text(merged)
+
+        self._last_overlap_summary = {'method': 'word-append', 'chars': 0, 'ratio': 0.0}
+        return self._append_words_plain(base, incoming)
+
+    @classmethod
+    def _word_merge_tokens(cls, text: str) -> list[str]:
+        return re.findall(r'\n+|(?:>>|S\d+:|\[spk_\d+\])|[^\s]+', str(text or ''), flags=re.IGNORECASE)
+
+    @classmethod
+    def _word_overlap_keys(cls, tokens: list[str]) -> list[str]:
+        keys: list[str] = []
+        for token in tokens:
+            key = cls._word_overlap_key(token)
+            if key:
+                keys.append(key)
+        return keys
+
+    @staticmethod
+    def _word_overlap_key(token: str) -> str:
+        value = str(token or '').strip()
+        if not value or value.startswith('\n'):
+            return ''
+        if re.fullmatch(r'(?:>>|S\d+:|\[spk_\d+\])', value, flags=re.IGNORECASE):
+            return ''
+        value = re.sub(r'^[^\w]+|[^\w]+$', '', value.lower(), flags=re.UNICODE)
+        return SubtitleAssembler._normalize_word(value) if value else ''
+
+    @staticmethod
+    def _max_word_prefix_suffix_overlap(base_keys: list[str], incoming_keys: list[str]) -> int:
+        max_words = min(len(base_keys), len(incoming_keys))
+        for size in range(max_words, 0, -1):
+            if base_keys[-size:] == incoming_keys[:size]:
+                return size
+        return 0
+
+    @staticmethod
+    def _incoming_words_contained_in_base_tail(base_keys: list[str], incoming_keys: list[str]) -> bool:
+        if not incoming_keys:
+            return False
+        tail = base_keys[-max(len(incoming_keys) * 2, 24):]
+        width = len(incoming_keys)
+        for index in range(0, len(tail) - width + 1):
+            if tail[index:index + width] == incoming_keys:
+                return True
+        return False
+
+    @staticmethod
+    def _max_fuzzy_word_prefix_suffix_overlap(base_keys: list[str], incoming_keys: list[str]) -> tuple[int, float]:
+        max_words = min(len(base_keys), len(incoming_keys), 24)
+        min_words = 3
+        if max_words < min_words:
+            return 0, 0.0
+        best_size = 0
+        best_ratio = 0.0
+        for size in range(max_words, min_words - 1, -1):
+            left = base_keys[-size:]
+            right = incoming_keys[:size]
+            ratio = SequenceMatcher(None, left, right).ratio()
+            if ratio >= 0.80:
+                return size, ratio
+            if ratio > best_ratio:
+                best_size = size
+                best_ratio = ratio
+        if best_size >= min_words + 2 and best_ratio >= 0.74:
+            return best_size, best_ratio
+        return 0, 0.0
+
+    @classmethod
+    def _token_index_after_word_count(cls, tokens: list[str], word_count: int) -> int:
+        seen = 0
+        for index, token in enumerate(tokens):
+            if cls._word_overlap_key(token):
+                seen += 1
+                if seen >= word_count:
+                    return index + 1
+        return len(tokens)
+
+    @classmethod
+    def _token_index_before_last_word_count(cls, tokens: list[str], word_count: int) -> int:
+        seen = 0
+        for index in range(len(tokens) - 1, -1, -1):
+            if cls._word_overlap_key(tokens[index]):
+                seen += 1
+                if seen >= word_count:
+                    return index
+        return 0
+
+    @classmethod
+    def _word_count(cls, text: str) -> int:
+        return len(cls._word_overlap_keys(cls._word_merge_tokens(text)))
+
+    def _append_words_plain(self, base: str, incoming: str) -> str:
+        if self._starts_with_speaker_marker(incoming) and not base.endswith('\n'):
+            sep = '\n'
+        elif self._should_join_without_space(base, incoming):
+            sep = ''
+        else:
+            sep = '' if base.endswith((' ', '\n')) else ' '
+        return self._normalize_output_text(f'{base}{sep}{incoming}')
+
+    @classmethod
+    def _join_word_merge_tokens(cls, tokens: list[str]) -> str:
+        out = ''
+        for token in tokens:
+            if not token:
+                continue
+            if token.startswith('\n'):
+                # Preserve a blank-line pause boundary (>=2 newlines, round 0008)
+                # so `_collapse_redundant_speaker_marker_lines` keeps the
+                # re-emitted same-speaker marker on its own line instead of
+                # merging it inline. Collapsing every run to a single newline
+                # flattened English pause breaks.
+                if out:
+                    want = '\n\n' if len(token) >= 2 else '\n'
+                    trimmed = out.rstrip(' ')
+                    existing = len(trimmed) - len(trimmed.rstrip('\n'))
+                    needed = len(want) - existing
+                    out = trimmed + ('\n' * needed if needed > 0 else '')
+                continue
+            if re.fullmatch(r'(?:>>|S\d+:|\[spk_\d+\])', token, flags=re.IGNORECASE):
+                if out and not out.endswith('\n'):
+                    out = out.rstrip() + '\n'
+                out += token
+                continue
+            if not out or out.endswith('\n'):
+                out += token
+            elif cls._should_join_without_space(out, token):
+                out = out.rstrip() + token
+            else:
+                out = out.rstrip() + ' ' + token
+        return out.strip()
 
     def _merge_across_leading_speaker_marker(self, base: str, incoming: str) -> str:
         match = re.match(r'^\s*(?P<marker>>>|S\d+:|\[spk_\d+\])\s*(?P<content>.*)$', incoming, flags=re.IGNORECASE | re.DOTALL)
