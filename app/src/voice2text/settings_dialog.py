@@ -38,7 +38,7 @@ from .settings.presenter import (
     loopback_indices_from_config,
     normalize_source_language,
 )
-from .settings.schema import allowed_stt_variants, default_stt_model, is_path_like
+from .settings.schema import allowed_stt_variants, default_stt_model
 from .settings.source_selection_dialog import SourceSelectionDialog
 from .settings.widgets import (
     create_compute_type_combo,
@@ -155,6 +155,9 @@ class TranscriptExportDialog(QDialog):
 
 
 class SettingsDialog(QDialog):
+    # Sentinel data for the model-size combo's "Other…" entry (reveals the custom field).
+    CUSTOM_MODEL_DATA = "__custom__"
+
     def __init__(
         self,
         config: RuntimeConfig,
@@ -179,6 +182,9 @@ class SettingsDialog(QDialog):
         self._updates: dict[str, object] = {}
         self._form_layouts: list[QFormLayout] = []
         self._last_stt_provider = "whisperx"
+        # Remember each provider's last model-size selection so switching providers back
+        # and forth restores the previous choice instead of snapping to the default.
+        self._stt_model_size_by_provider: dict[str, str] = {}
         self._ui_built = False
         self._applying_preset = False
         self._selected_loopback_indices = self._init_loopback_indices()
@@ -212,12 +218,13 @@ class SettingsDialog(QDialog):
         self._preset_combo.currentIndexChanged.connect(self._on_preset_changed)
 
         self._model_size_combo = QComboBox()
-        self._model_size_combo.setEditable(True)
-        self._model_size_combo.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
         for _m in ("tiny", "base", "small", "medium", "large-v2", "large-v3"):
             self._model_size_combo.addItem(_m, _m)
+        # "Other…" reveals a single custom field (model name OR local path) so size and
+        # custom path are a mutually-exclusive choice — never two path-like fields at once.
+        self._model_size_combo.addItem(self._t("model_size_custom"), self.CUSTOM_MODEL_DATA)
         self._model_size_combo.currentIndexChanged.connect(self._on_bundled_field_edited)
-        self._model_size_combo.editTextChanged.connect(self._on_bundled_field_edited)
+        self._model_size_combo.currentIndexChanged.connect(self._update_custom_model_visibility)
 
         self._beam_spin = QSpinBox()
         self._beam_spin.setRange(1, 10)
@@ -231,6 +238,9 @@ class SettingsDialog(QDialog):
         self._compute_type_combo.currentIndexChanged.connect(self._on_bundled_field_edited)
 
         self._stt_model_path_edit = QLineEdit()
+        self._stt_model_path_edit.textChanged.connect(self._on_bundled_field_edited)
+        # Row label kept as an attribute so the whole custom-model row can be hidden together.
+        self._stt_model_custom_label = QLabel(self._t("model_path"))
         self._stt_auto_download_check = QCheckBox(self._t("auto_download"))
         self._whisperx_vad_check = QComboBox()
         self._whisperx_vad_check.addItem("silero-vad", "silero-vad")
@@ -255,8 +265,6 @@ class SettingsDialog(QDialog):
         self._whisperx_hf_token_edit = QLineEdit()
         self._whisperx_hf_token_edit.setEchoMode(QLineEdit.EchoMode.Password)
         self._whisperx_speaker_backend_combo = create_whisperx_speaker_backend_combo()
-        self._stt_hint = QLabel()
-        self._stt_hint.setWordWrap(True)
 
         self._segment_spin = QDoubleSpinBox()
         self._segment_spin.setDecimals(2)
@@ -353,10 +361,11 @@ class SettingsDialog(QDialog):
         form_left.addRow(self._t("stt_variant"), self._stt_variant_combo)
         form_left.addRow(self._t("compute_type"), self._compute_type_combo)
         form_left.addRow(self._t("beam_size"), self._beam_spin)
-        form_left.addRow(self._t("model_path"), self._stt_model_path_edit)
+        self._stt_model_form = form_left
+        form_left.addRow(self._stt_model_custom_label, self._stt_model_path_edit)
         form_left.addRow(self._t("auto_download"), self._stt_auto_download_check)
         form_left.addRow(self._t("whisperx_vad"), self._whisperx_vad_check)
-        form_left.addRow(self._t("whisperx_diarization"), self._whisperx_diarization_check)
+        # --- Alignment group (kept contiguous) ---
         form_left.addRow(self._t("whisperx_align_language"), self._whisperx_align_language_combo)
         form_left.addRow(self._t("whisperx_align_device"), self._whisperx_align_device_combo)
         align_guard_row = QHBoxLayout()
@@ -364,13 +373,14 @@ class SettingsDialog(QDialog):
         align_guard_row.addWidget(self._whisperx_align_guard_revert_btn)
         form_left.addRow(self._t("whisperx_align_guard"), align_guard_row)
         form_left.addRow("", self._whisperx_align_guard_warning)
-        form_left.addRow("WhisperX Diarization device", self._whisperx_diar_device_combo)
         form_left.addRow(self._t("whisperx_align_model"), self._whisperx_align_model_edit)
+        # --- Diarization group (kept contiguous) ---
+        form_left.addRow(self._t("whisperx_diarization"), self._whisperx_diarization_check)
+        form_left.addRow("WhisperX Diarization device", self._whisperx_diar_device_combo)
         form_left.addRow(self._t("whisperx_diar_model"), self._whisperx_diar_model_edit)
         form_left.addRow(self._t("whisperx_hf_token"), self._whisperx_hf_token_edit)
         form_left.addRow(self._t("whisperx_speaker_profile"), self._whisperx_speaker_profile_check)
         form_left.addRow(self._t("whisperx_speaker_backend"), self._whisperx_speaker_backend_combo)
-        form_left.addRow(self._t("stt_notes"), self._stt_hint)
 
         form_right.addRow(self._t("segment_seconds"), self._segment_spin)
         form_right.addRow(self._t("hop_seconds"), self._hop_spin)
@@ -426,6 +436,7 @@ class SettingsDialog(QDialog):
         root.addLayout(footer)
 
         self._ui_built = True
+        self._update_custom_model_visibility()
         self._on_mode_changed()
         self._on_stt_provider_changed()
         self._on_translation_toggle()
@@ -453,6 +464,11 @@ class SettingsDialog(QDialog):
             self._sync_from_config_inner(cfg)
         finally:
             self._applying_preset = False
+        # Keep the "outgoing provider" marker aligned with the freshly-synced provider so the
+        # next _on_stt_provider_changed treats this as a no-op switch (no spurious size save).
+        self._last_stt_provider = str(
+            self._stt_provider_combo.currentData() or "whisperx"
+        ).strip() or "whisperx"
 
     def _sync_from_config_inner(self, cfg: RuntimeConfig) -> None:
         self._set_combo_data(self._ui_language_combo, cfg.ui_language)
@@ -465,20 +481,30 @@ class SettingsDialog(QDialog):
         self._whisperx_speaker_profile_check.setChecked(bool(getattr(cfg, "whisperx_speaker_profile_enabled", True)))
         self._set_combo_data(self._compute_type_combo, str(getattr(cfg, "compute_type", "float16") or "float16"))
         provider = str(getattr(cfg, "stt_provider", "whisperx") or "whisperx").strip().lower()
+        # The effective model reference per provider is "explicit path/alias OR size" — exactly
+        # what the runtime resolves (factory: `stt_model_path or model_size`). _set_model_size
+        # then routes it to a preset item or the "Other…" custom field automatically, which
+        # also migrates legacy settings that stashed a bare alias in stt_model_path.
+        whisperx_effective = (
+            str(getattr(cfg, "stt_model_path", "") or "").strip()
+            or str(getattr(cfg, "model_size", "small") or "small").strip()
+            or "small"
+        )
+        whispercpp_effective = (
+            str(getattr(cfg, "stt_whispercpp_model_path", "") or getattr(cfg, "stt_model_path", "") or "").strip()
+            or str(getattr(cfg, "stt_whispercpp_model_size", "") or getattr(cfg, "model_size", "medium") or "medium").strip()
+            or "medium"
+        )
         if provider == "whispercpp":
-            self._set_model_size(str(getattr(cfg, "stt_whispercpp_model_size", "") or getattr(cfg, "model_size", "medium") or "medium"))
-            self._stt_model_path_edit.setText(str(getattr(cfg, "stt_whispercpp_model_path", "") or getattr(cfg, "stt_model_path", "") or ""))
+            self._set_model_size(whispercpp_effective)
         else:
-            # WhisperX: the model is selected via the size dropdown; the path field is an
-            # optional local-file override. Migrate legacy settings where a bare model alias
-            # was persisted in stt_model_path (which silently overrode the dropdown via
-            # factory `stt_model_path or model_size`) back into the dropdown.
-            legacy_model = str(cfg.stt_model_path or "")
-            if legacy_model and not is_path_like(legacy_model):
-                self._set_model_size(legacy_model)
-                self._stt_model_path_edit.setText("")
-            else:
-                self._stt_model_path_edit.setText(legacy_model)
+            self._set_model_size(whisperx_effective)
+        # Seed per-provider model memory so a later provider switch restores each provider's
+        # own last selection (preset size or custom value) instead of its hardcoded default.
+        self._stt_model_size_by_provider = {
+            "whisperx": whisperx_effective,
+            "whispercpp": whispercpp_effective,
+        }
         self._stt_auto_download_check.setChecked(cfg.stt_auto_download)
         self._set_combo_data(self._whisperx_vad_check, str(getattr(cfg, "whisperx_vad_method", "silero-vad") or "silero-vad"))
         self._whisperx_diarization_check.setChecked(cfg.whisperx_enable_diarization)
@@ -525,14 +551,55 @@ class SettingsDialog(QDialog):
         self._transcript_export_default_format = self._resolve_default_export_format(self._transcript_export_formats)
 
     def _set_model_size(self, value: str) -> None:
+        """Route a model reference into the combo: a known preset selects that item and
+        clears the custom field; anything else (custom alias or local path) selects
+        "Other…" and lands in the custom field."""
         v = str(value or "small").strip() or "small"
         idx = self._model_size_combo.findData(v)
-        if idx < 0:
+        if idx < 0 and v != self.CUSTOM_MODEL_DATA:
             idx = self._model_size_combo.findText(v)
-        if idx >= 0:
+        if idx >= 0 and self._model_size_combo.itemData(idx) != self.CUSTOM_MODEL_DATA:
             self._model_size_combo.setCurrentIndex(idx)
+            self._stt_model_path_edit.setText("")
         else:
-            self._model_size_combo.setEditText(v)
+            custom_idx = self._model_size_combo.findData(self.CUSTOM_MODEL_DATA)
+            if custom_idx >= 0:
+                self._model_size_combo.setCurrentIndex(custom_idx)
+            self._stt_model_path_edit.setText(v)
+        self._update_custom_model_visibility()
+
+    def _update_custom_model_visibility(self, *args: object) -> None:
+        """Show the custom model/path row only when the "Other…" entry is selected."""
+        is_custom = self._model_size_combo.currentData() == self.CUSTOM_MODEL_DATA
+        self._stt_model_path_edit.setVisible(is_custom)
+        self._stt_model_custom_label.setVisible(is_custom)
+        form = getattr(self, "_stt_model_form", None)
+        if form is not None and hasattr(form, "setRowVisible"):
+            try:
+                form.setRowVisible(self._stt_model_path_edit, is_custom)
+            except Exception:
+                pass
+
+    def _current_model_value(self) -> str:
+        """The effective model reference: custom field text when "Other…" is active,
+        otherwise the selected preset size."""
+        if self._model_size_combo.currentData() == self.CUSTOM_MODEL_DATA:
+            return self._stt_model_path_edit.text().strip()
+        return str(self._model_size_combo.currentText() or "").strip()
+
+    def _collect_model_size_and_path(self) -> tuple[str, str]:
+        """Split the current selection into (model_size, custom_path) for the payload.
+        model_size is always a real preset (it also feeds whispercpp's ggml-<size>.bin);
+        a custom value rides in the path field where both providers' resolvers honor it."""
+        provider = str(self._stt_provider_combo.currentData() or "whisperx").strip() or "whisperx"
+        if self._model_size_combo.currentData() == self.CUSTOM_MODEL_DATA:
+            custom = self._stt_model_path_edit.text().strip()
+            fallback = self._stt_model_size_by_provider.get(provider, "").strip()
+            if self._model_size_combo.findData(fallback) < 0:
+                fallback = default_stt_model(provider)
+            return (fallback, custom)
+        size = str(self._model_size_combo.currentText() or "small").strip() or "small"
+        return (size, "")
 
     def _on_preset_changed(self) -> None:
         if self._applying_preset:
@@ -625,12 +692,10 @@ class SettingsDialog(QDialog):
         ):
             field.setEnabled(not is_whispercpp)
         if is_whispercpp:
-            self._stt_hint.setText(self._t("provider_hint_whispercpp"))
             self._whisperx_align_guard_warning.setVisible(False)
         else:
             self._refresh_alignment_model_suggestions()
             self._whisperx_align_model_edit.setToolTip("留空=自動依語言選擇；選清單或填 HF repo id=固定使用指定模型")
-            self._stt_hint.setText(self._t("provider_hint_whisperx"))
             self._update_align_guard_state()
 
     def _configure_stt_variant(self, provider: str) -> None:
@@ -762,16 +827,14 @@ class SettingsDialog(QDialog):
     def _apply_stt_model_default(self, provider: str, *, previous_provider: str) -> None:
         if provider == previous_provider:
             return
-        current = self._stt_model_path_edit.text().strip()
-        if is_path_like(current):
-            return
-        default_value = default_stt_model(provider)
-        # Both providers use the size dropdown as the model selector and keep the path
-        # field as an optional local-file override (cleared on provider switch). Previously
-        # WhisperX dumped the model name into the path field, so the dropdown silently did
-        # nothing — selecting a model then required hand-editing the path.
-        self._set_model_size(default_value)
-        self._stt_model_path_edit.setText("")
+        # Remember the outgoing provider's effective selection (preset size or custom value)
+        # so switching back restores it instead of snapping to its hardcoded default.
+        if previous_provider:
+            self._stt_model_size_by_provider[previous_provider] = self._current_model_value()
+        # Restore the incoming provider's remembered selection; _set_model_size routes it to
+        # a preset item or the "Other…" custom field and toggles the custom row accordingly.
+        remembered = self._stt_model_size_by_provider.get(provider, "").strip()
+        self._set_model_size(remembered or default_stt_model(provider))
 
     def _open_source_selection(self) -> None:
         self._refresh_available_sources()
@@ -856,7 +919,7 @@ class SettingsDialog(QDialog):
             self._select_source_btn: "Open source picker to choose capture devices or app sessions.",
             self._stt_provider_combo: "Speech-to-text backend. WhisperX is default; whisper.cpp uses resident whisper-server for live Vulkan ASR and has no diarization/speaker labels.",
             self._stt_variant_combo: "Execution preference (Auto/CPU/GPU).",
-            self._stt_model_path_edit: "Model alias or local path; defaults are used when empty.",
+            self._stt_model_path_edit: "Custom model: WhisperX accepts a model name (downloaded if absent) or a local path; whisper.cpp expects a local ggml file/dir.",
             self._stt_auto_download_check: "Auto-download missing models.",
             self._whisperx_vad_check: "WhisperX VAD engine: silero-vad (lighter) or pyannote (heavier).",
             self._whisperx_diarization_check: "Enable diarization (speaker separation, heavier).",
@@ -908,17 +971,18 @@ class SettingsDialog(QDialog):
 
     def _collect_updates(self) -> dict[str, object]:
         """Collect validated settings payload applied by bootstrap.apply_settings()."""
+        model_size_value, model_path_value = self._collect_model_size_and_path()
         payload = SettingsPayloadInput(
             ui_language=str(self._ui_language_combo.currentData() or self._lang),
             source_mode=str(self._mode_combo.currentData()),
             stt_provider=str(self._stt_provider_combo.currentData() or "whisperx"),
             runtime_preset=str(self._preset_combo.currentData() or ""),
             stt_variant=str(self._stt_variant_combo.currentData() or "auto"),
-            model_size=str(self._model_size_combo.currentText() or "small").strip() or "small",
+            model_size=model_size_value,
             whisper_beam_size=int(self._beam_spin.value()),
             whisperx_speaker_profile_enabled=self._whisperx_speaker_profile_check.isChecked(),
             compute_type=str(self._compute_type_combo.currentData() or "float16"),
-            stt_model_path=self._stt_model_path_edit.text(),
+            stt_model_path=model_path_value,
             stt_auto_download=self._stt_auto_download_check.isChecked(),
             whisperx_enable_phoneme_asr=True,
             # Forced alignment has no dedicated widget; derive it from the active preset so the `cpu`
