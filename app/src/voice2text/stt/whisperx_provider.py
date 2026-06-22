@@ -2188,9 +2188,19 @@ class WhisperXTranscriber:
         if effective_model and ("/" not in effective_model):
             return self._alignment_custom_root_dir() / self._slugify_repo_id(effective_model)
 
+        # An explicitly configured HF repo id gets its own repo-keyed cache dir
+        # (`align/hf/{repo-slug}`). Otherwise two different repos for the same
+        # language collide into one `align/hf/{lang}` folder and the first-cached
+        # model is silently reused for the second — the language-scoped-cache bug.
+        # Auto-default per-language repos keep the flat language folder: their
+        # repo is constant for a given language (no collision), and existing
+        # caches stay valid so we don't trigger a surprise re-download.
+        explicit_repo = self._alignment_model.strip()
+        if explicit_repo and ("/" in explicit_repo):
+            return base / self._slugify_repo_id(explicit_repo)
+
         # For auto/follow-source/explicit-language flows, keep alignment cache
-        # in language-scoped folders under `align/hf/{lang}` even when model
-        # source is an explicit HF repo id.
+        # in language-scoped folders under `align/hf/{lang}`.
         mode = (self._alignment_language or "auto").strip().lower()
         if mode == "follow-source":
             folder_lang = self._normalize_alignment_folder_language(self._source_language_hint)
