@@ -74,7 +74,7 @@ class RuntimeConfig:
     # seg-hop/alignment/diarization/speaker-profile bundle; explicit knobs override.
     runtime_preset: str = ''
     source_language: Optional[str] = None
-    cjk_no_space_gap_seconds: float = 0.2
+    cjk_no_space_gap_seconds: float = 0.6
     source_mode: str = 'loopback'
     source_file_path: str = ''
     source_file_replay_speed: float = 0.0

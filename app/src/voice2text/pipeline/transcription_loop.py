@@ -70,7 +70,7 @@ class TranscriptionLoopEngine:
 
         self._deps.subtitle_assembler.set_language_context(self._deps.config.source_language)
         self._deps.subtitle_assembler.set_cjk_no_space_gap_seconds(
-            float(getattr(self._deps.config, "cjk_no_space_gap_seconds", 0.2) or 0.2)
+            float(getattr(self._deps.config, "cjk_no_space_gap_seconds", 0.6) or 0.6)
         )
         self._deps.subtitle_assembler.set_speaker_marker_style(
             str(getattr(self._deps.config, "speaker_marker_style", "spk") or "spk")

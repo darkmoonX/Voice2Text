@@ -68,7 +68,7 @@ def build_arg_parser(whisper_defaults: WhisperRuntimeParams) -> argparse.Argumen
     parser.add_argument("--no-preprocess", dest="preprocess_enabled", action="store_false", help="Disable audio preprocessing before WhisperX STT.")
     parser.add_argument("--preprocess-modules", default="auto", help="Comma-separated preprocessing modules: auto, none, webrtc-ns, webrtc-agc, webrtc-aec, rnnoise, spectral-gate, adaptive-gain.")
     parser.add_argument("--source-language", choices=["auto", "en", "zh-hant", "zh-hans", "ja", "ko"], default="auto", help="STT language hint. auto uses multilingual detection.")
-    parser.add_argument("--cjk-no-space-gap-seconds", type=float, default=0.2, help="When source language is Chinese, adjacent tokens within this gap are concatenated without spaces in stable/history text.")
+    parser.add_argument("--cjk-no-space-gap-seconds", type=float, default=0.6, help="When source language is Chinese, adjacent tokens within this gap are concatenated without spaces in stable/history text. 0.6 avoids spurious mid-phrase spaces from merge-drop-inflated gaps (CER-neutral); lower to mark shorter pauses.")
     parser.add_argument("--speaker-pause-break-seconds", type=float, default=1.8, help="Re-emit the speaker marker and line break when the same speaker resumes after this silence gap.")
     parser.add_argument("--subtitle-display-script", choices=["off", "hant", "hans"], default="hant", help="Fold the visible/exported subtitle to one Chinese script (char-level, comparison/CER unaffected). off keeps per-word original script.")
     parser.add_argument("--max-context", "-mc", type=int, default=whisper_defaults.max_context, help="WhisperX decode max context tokens.")
