@@ -11,7 +11,7 @@ import wave
 from pathlib import Path
 from typing import TYPE_CHECKING, Callable, Optional
 
-from ..audio_capture import AudioCaptureBase, AudioChunk
+from ..audio_capture import AudioCaptureBase, AudioChunk, MixedAudioCapture
 from .bridge_probe import (
     check_bridge_health,
     check_process_loopback_support,
@@ -250,6 +250,42 @@ def build_cpp_capture_from_config(
             return None
         if list(config.source_device_indices) and on_status is not None:
             on_status("App mode will prioritize Application Loopback Capture by process name.")
+        if len(normalized) > 1:
+            # Multi-app: a single Process Loopback activation binds one process tree, so capture each
+            # app with its own bridge process (each does exact per-process-tree loopback) and mix the
+            # streams with the existing MixedAudioCapture (resample + weighted sum). Reuses the proven
+            # single-app bridge + multi-device mixer — no C++ mixing code. Mix target is 16 kHz mono,
+            # the STT input format.
+            inner_captures: list[AudioCaptureBase] = [
+                CppBridgeCapture(
+                    source_mode="app",
+                    app_names=[name],
+                    source_device_id="",
+                    debug_segment_path=None,  # avoid N writers clobbering one debug wav
+                    debug_segment_window_seconds=debug_segment_window_seconds,
+                    on_error=on_error,
+                    on_status=on_status,
+                )
+                for name in normalized
+            ]
+            weights = list(config.source_mix_weights)
+            if weights and len(weights) != len(inner_captures):
+                if on_status is not None:
+                    on_status("App mix weights count mismatch; falling back to equal weights.")
+                weights = []
+            if on_status is not None:
+                on_status(
+                    "App mode capturing "
+                    f"{len(normalized)} apps simultaneously via per-app process loopback + mix: "
+                    f"{', '.join(normalized)}"
+                )
+            return MixedAudioCapture(
+                captures=inner_captures,
+                weights=weights or None,
+                target_sample_rate=16000,
+                channel_mode=str(getattr(config, "source_channel_mode", "mono") or "mono"),
+                on_error=on_error,
+            )
         return CppBridgeCapture(
             source_mode="app",
             app_names=normalized,

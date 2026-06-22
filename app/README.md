@@ -6,6 +6,7 @@ Windows live subtitle overlay runtime (Python main process + C++ capture bridge)
 
 - UI: `PySide6`
 - Capture: Python capture adapters + C++ bridge (`WASAPI loopback`, `Application Loopback Capture`)
+  - **App mode captures exact per-process-tree audio** via the bridge's Windows Process Loopback (no volume-dominance guessing; that heuristic is only in the Python fallback). Listing **multiple** apps (`--app-names chrome.exe,vlc.exe`) now captures **all** of them at once — one process-loopback bridge per app, mixed to 16 kHz mono via the existing `MixedAudioCapture` (round 0039). One app keeps the single-bridge path.
 - STT providers: `whisperx` (default) and optional `whispercpp` (resident whisper.cpp Vulkan server backend, with subprocess fallback). Legacy persisted names such as `whisper` / `faster-whisper` are normalized to `whisperx` for compatibility.
 - Optional translation: `Argos Translate` or offline NLLB (`CTranslate2` + `transformers`)
 
@@ -242,6 +243,7 @@ python main.py --preset cpu --cpu-threads 8  # use more CPU cores
 python main.py --list-devices
 python main.py --list-app-sessions
 python main.py --source-mode app --app-names msedge.exe
+python main.py --source-mode app --app-names msedge.exe,vlc.exe   # capture multiple apps at once (mixed)
 
 python main.py --model small --stt-variant gpu
 python main.py --stt-provider whisperx --model large-v2 --no-whisperx-vad
