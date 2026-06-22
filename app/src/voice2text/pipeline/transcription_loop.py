@@ -182,9 +182,16 @@ class TranscriptionLoopEngine:
                     window = bytes(buffer[:segment_bytes])
                     del buffer[:hop_bytes]
                     window_chunk = AudioChunk(pcm16=window, sample_rate=stream_rate, channels=stream_channels)
-                    stage_started_at = time.monotonic()
-                    self._deps.segment_artifacts.write_chunk(window_chunk, self._deps.segment_artifacts.latest_raw_segment_wav)
-                    timing["raw_artifact_seconds"] = time.monotonic() - stage_started_at
+                    # The latest_segment_*.wav snapshots are debug-only diagnostic artifacts (no runtime
+                    # or crash-bundle consumer); writing a full wav every window is pure disk I/O waste in
+                    # normal runs, so gate the writes on debug_mode (the per-window log is already gated).
+                    debug_artifacts = bool(getattr(self._deps.config, "debug_mode", False))
+                    if debug_artifacts:
+                        stage_started_at = time.monotonic()
+                        self._deps.segment_artifacts.write_chunk(window_chunk, self._deps.segment_artifacts.latest_raw_segment_wav)
+                        timing["raw_artifact_seconds"] = time.monotonic() - stage_started_at
+                    else:
+                        timing["raw_artifact_seconds"] = 0.0
 
                     preprocess_pipeline = self._deps.get_preprocess_pipeline()
                     stage_started_at = time.monotonic()
@@ -193,10 +200,13 @@ class TranscriptionLoopEngine:
                     else:
                         stt_chunk = window_chunk
                     timing["preprocess_seconds"] = time.monotonic() - stage_started_at
-                    stage_started_at = time.monotonic()
-                    self._deps.segment_artifacts.write_chunk(stt_chunk, self._deps.segment_artifacts.latest_stt_segment_wav)
-                    self._emit_segment_artifact_log(stt_chunk)
-                    timing["stt_artifact_seconds"] = time.monotonic() - stage_started_at
+                    if debug_artifacts:
+                        stage_started_at = time.monotonic()
+                        self._deps.segment_artifacts.write_chunk(stt_chunk, self._deps.segment_artifacts.latest_stt_segment_wav)
+                        self._emit_segment_artifact_log(stt_chunk)
+                        timing["stt_artifact_seconds"] = time.monotonic() - stage_started_at
+                    else:
+                        timing["stt_artifact_seconds"] = 0.0
 
                     transcriber = self._deps.get_transcriber()
                     if transcriber is None:

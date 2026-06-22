@@ -77,6 +77,7 @@ Output executable:
 
 Notes:
 - In debug mode, `app/src/segments/latest_segment_cpp_bridge.wav` is a rolling-tail artifact from the C++ bridge.
+- The per-window `app/src/segments/latest_segment_{raw,stt}.wav` snapshots (the captured window and the STT input; `raw` is the mixed stream in multi-app mode) are also written **only in debug mode** — they are diagnostic artifacts with no runtime consumer, so normal runs skip the per-window wav writes to avoid the disk I/O. Run with `--debug-mode` when a diagnostic script needs a fresh `latest_segment_stt.wav`.
 - Its window length now follows `segment_seconds` (same setting used by Python STT windows).
 
 Advanced build parameters and MSVC/MinGW presets:
