@@ -59,6 +59,16 @@ class RuntimeConfig:
     whisperx_speaker_profile_quality_min_confidence: float = 0.45
     speaker_marker_style: str = 'spk'
     speaker_pause_break_seconds: float = 1.8
+    # Delayed-freeze speaker re-anchoring: hold committed words this long before
+    # baking the speaker marker, so a late cross-window profile identity (warmup
+    # ~24s) can back-date a new turn's marker to its true onset instead of where the
+    # profile finally confirmed (~12-27s late). 0.0 = disabled (legacy immediate
+    # freeze, byte-identical). ~26-30 covers the warmup; trades commit latency for
+    # marker accuracy. `stabilization` = 'consecutive' (legacy gate) or 'majority'.
+    subtitle_commit_hold_seconds: float = 0.0
+    subtitle_reanchor_stabilization: str = 'consecutive'
+    subtitle_reanchor_majority_window_seconds: float = 2.0
+    subtitle_reanchor_majority_min_ratio: float = 0.6
     # Final display-script fold for the visible/exported subtitle: '' (off, keep
     # per-word original script), 'hant', or 'hans'. Comparison/CER unaffected.
     subtitle_display_script: str = 'hant'

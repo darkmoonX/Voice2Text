@@ -81,6 +81,12 @@ class TranscriptionLoopEngine:
         self._deps.subtitle_assembler.set_display_script(
             str(getattr(self._deps.config, "subtitle_display_script", "") or "")
         )
+        self._deps.subtitle_assembler.set_commit_hold(
+            hold_seconds=float(getattr(self._deps.config, "subtitle_commit_hold_seconds", 0.0) or 0.0),
+            stabilization=str(getattr(self._deps.config, "subtitle_reanchor_stabilization", "consecutive") or "consecutive"),
+            majority_window_seconds=float(getattr(self._deps.config, "subtitle_reanchor_majority_window_seconds", 2.0) or 2.0),
+            majority_min_ratio=float(getattr(self._deps.config, "subtitle_reanchor_majority_min_ratio", 0.6) or 0.6),
+        )
 
         (bytes_per_second, frame_bytes, segment_bytes, hop_bytes) = aligned_window_sizes(
             sample_rate=stream_rate,

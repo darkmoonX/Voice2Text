@@ -84,6 +84,8 @@ def build_runtime_config(args: argparse.Namespace) -> RuntimeConfig:
         cjk_no_space_gap_seconds=max(0.0, float(args.cjk_no_space_gap_seconds)),
         speaker_pause_break_seconds=max(0.0, float(args.speaker_pause_break_seconds)),
         subtitle_display_script=('' if str(getattr(args, 'subtitle_display_script', 'hant')) == 'off' else str(getattr(args, 'subtitle_display_script', 'hant'))),
+        subtitle_commit_hold_seconds=max(0.0, float(getattr(args, 'subtitle_commit_hold_seconds', 0.0) or 0.0)),
+        subtitle_reanchor_stabilization=str(getattr(args, 'subtitle_reanchor_stabilization', 'consecutive') or 'consecutive'),
         source_mode=args.source_mode,
         source_file_path=str(args.source_file or ""),
         source_file_replay_speed=max(0.0, float(args.source_file_replay_speed)),

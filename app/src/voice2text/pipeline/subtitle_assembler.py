@@ -22,6 +22,10 @@ class _WordState:
     count: int
     last_seen: float
     speaker: str = ''
+    # On-time per-window diarization label (kept alongside the profile-preferred
+    # `speaker`). Unused by rendering today; retained so a future speaker re-anchor
+    # can find a turn's true onset (local flips ~on-time; profile identity lags).
+    local_speaker: str = ''
 
 
 class SubtitleAssembler:
@@ -52,6 +56,18 @@ class SubtitleAssembler:
         # Absolute end time of the last word folded into the committed text, so a
         # long same-speaker pause that straddles a commit boundary still breaks.
         self._rolling_committed_last_end: float | None = None
+        # Delayed-freeze buffer: stable words that have been flushed out of the
+        # active window but are held (still as word states, re-rendered each frame)
+        # before being baked into the frozen committed string. This lets a late
+        # cross-window profile identity (warmup ~24s) back-fill the speaker on a new
+        # turn's onset words while they are still mutable, so the marker freezes at
+        # the true onset instead of where the profile finally confirmed. Empty when
+        # commit-hold is disabled (the words go straight to the frozen string).
+        # Held as whole flush BATCHES (not a flat list): each batch is drained via the
+        # same per-flush `_append_to_rolling_committed_text` the legacy path uses, so
+        # the committed text stays byte-identical to legacy except for the re-anchored
+        # speaker markers (a flat buffer re-merged at arbitrary cut points diverges).
+        self._pending_commit_batches: list[list[_WordState]] = []
         # End-of-stream finalize returns the longest clean merged snapshot seen
         # (the last "full" window before the audio tails off). That snapshot is a
         # real overlay frame the hot path already produced and emitted, so it
@@ -96,6 +112,19 @@ class SubtitleAssembler:
         # overlapping STT windows where provider-side, window-relative detection
         # cannot). 0 disables.
         self._speaker_pause_break_seconds = 1.8
+        # Delayed-freeze (speaker re-anchor) controls. `commit_hold_seconds` = how
+        # long a flushed word is held in `_pending_commit_words` before it is baked
+        # into the frozen committed string; it must cover the profile-warmup lag for
+        # the late identity to arrive (~24s visible threshold) plus margin. 0.0
+        # disables the hold entirely (flushed words freeze immediately = legacy
+        # byte-identical path). Stabilization criterion for confirming/holding a
+        # pending turn boundary: 'consecutive' mirrors the live gate (N same-label
+        # words spanning a min duration); 'majority' confirms when a label holds
+        # >= ratio of a trailing window (better for interleaved Q&A). Tunable.
+        self._commit_hold_seconds = 0.0
+        self._reanchor_stabilization = 'consecutive'
+        self._reanchor_majority_window_seconds = 2.0
+        self._reanchor_majority_min_ratio = 0.6
         # Final display-script fold (one consistent Simplified/Traditional script
         # in the visible/exported text). '' disables. Applied only to the output
         # projection -- never to internal word state or the overlap-comparison
@@ -133,6 +162,35 @@ class SubtitleAssembler:
         except Exception:
             value = 1.8
         self._speaker_pause_break_seconds = max(0.0, value)
+
+    def set_commit_hold(
+        self,
+        *,
+        hold_seconds: float | None = None,
+        stabilization: str | None = None,
+        majority_window_seconds: float | None = None,
+        majority_min_ratio: float | None = None,
+    ) -> None:
+        """Configure delayed-freeze speaker re-anchoring. `hold_seconds<=0` keeps the
+        legacy immediate-freeze path (byte-identical)."""
+        if hold_seconds is not None:
+            try:
+                self._commit_hold_seconds = max(0.0, float(hold_seconds))
+            except Exception:
+                self._commit_hold_seconds = 0.0
+        if stabilization is not None:
+            token = str(stabilization or '').strip().lower()
+            self._reanchor_stabilization = 'majority' if token == 'majority' else 'consecutive'
+        if majority_window_seconds is not None:
+            try:
+                self._reanchor_majority_window_seconds = max(0.1, float(majority_window_seconds))
+            except Exception:
+                pass
+        if majority_min_ratio is not None:
+            try:
+                self._reanchor_majority_min_ratio = max(0.0, min(1.0, float(majority_min_ratio)))
+            except Exception:
+                pass
 
     def set_display_script(self, script: str | None) -> None:
         token = str(script or '').strip().lower()
@@ -194,14 +252,16 @@ class SubtitleAssembler:
         if incoming:
             raw_start = min((w.start for w in incoming), default=elapsed)
             moved_to_history = self._flush_stable_to_history(raw_start)
-            self._append_to_rolling_committed_text(moved_to_history)
+            self._absorb_moved_into_commit(moved_to_history)
             self._merge_incoming_words(incoming)
             self._promote_partial_to_stable()
             self._prune_active_words(raw_start, retention_seconds=segment_seconds)
+            self._reanchor_and_drain_pending(now=elapsed)
         else:
             raw_start = elapsed
             moved_to_history = self._flush_stable_to_history(raw_start)
-            self._append_to_rolling_committed_text(moved_to_history)
+            self._absorb_moved_into_commit(moved_to_history)
+            self._reanchor_and_drain_pending(now=elapsed)
         diagnostics['state_update_seconds'] = time.perf_counter() - step_started_at
         diagnostics['history_dedupe'] = dict(self._last_history_dedupe_summary)
         diagnostics['moved_to_history_count'] = int(len(moved_to_history))
@@ -225,8 +285,9 @@ class SubtitleAssembler:
         # words that moved into history are appended once to a committed UI
         # buffer; each new raw window replaces the previous raw tail through
         # overlap merge. This models the overlay as: committed history + raw.
-        rolling_base = self._rolling_committed_text or self._rolling_visible_text
-        rolling_base_source = 'committed_history' if self._rolling_committed_text else 'previous_rolling'
+        committed_base = self._committed_base_text()
+        rolling_base = committed_base or self._rolling_visible_text
+        rolling_base_source = 'committed_history' if committed_base else 'previous_rolling'
         diagnostics['rolling_base_source'] = rolling_base_source
         diagnostics['history_render_seconds'] = 0.0
         diagnostics['history_chars'] = 0
@@ -298,6 +359,7 @@ class SubtitleAssembler:
                     count=1,
                     last_seen=end_abs,
                     speaker=str(raw.get('speaker') or raw.get('profile_speaker') or '').strip(),
+                    local_speaker=str(raw.get('local_speaker') or '').strip(),
                 )
             )
         out.sort(key=lambda w: (w.start, w.end))
@@ -424,6 +486,10 @@ class SubtitleAssembler:
         self._partial_words.sort(key=lambda w: (w.start, w.end))
 
     def finalize(self) -> str:
+        # Drain any delayed-freeze pending words (with their final re-anchored
+        # speakers) into the frozen committed string before snapshotting (no-op when
+        # commit-hold is disabled).
+        self._reanchor_and_drain_pending(now=float('inf'), force_all=True)
         # Flush still-unresolved words into the immutable history buffer so the
         # full record stays complete for export/debug.
         pending = list(self._stable_words) + list(self._partial_words)
@@ -473,6 +539,8 @@ class SubtitleAssembler:
 
     def mark_sentence_break(self) -> None:
         # Force current confirmed words into immutable history on sentence break.
+        # Drain any older held pending words first so commit order stays monotonic.
+        self._reanchor_and_drain_pending(now=float('inf'), force_all=True)
         if self._stable_words:
             moved = list(self._stable_words)
             self._append_history_words(moved)
@@ -500,7 +568,7 @@ class SubtitleAssembler:
         # point is where committed history ends inside merged: exact prefix in the
         # dominant paths, longest-common-prefix as a robust fallback when a marker
         # re-anchor revised the committed tail.
-        committed = self._normalize_output_text(self._rolling_committed_text)
+        committed = self._normalize_output_text(self._committed_base_text())
         if not committed:
             return merged  # nothing fully fixed yet -> all live
         if merged.startswith(committed):
@@ -679,6 +747,10 @@ class SubtitleAssembler:
         elif incoming.speaker and target.speaker and (incoming.speaker != target.speaker):
             if float(incoming.score) >= float(target.score):
                 target.speaker = incoming.speaker
+        # Keep the on-time local label; fill if the target never had one. (Local labels
+        # are per-window; the earliest sighting is the most on-time, so don't overwrite.)
+        if (not target.local_speaker) and incoming.local_speaker:
+            target.local_speaker = incoming.local_speaker
 
     def _words_to_text(self, words: list[_WordState], *, initial_speaker_label: str = '') -> str:
         if not words:
@@ -1111,14 +1183,34 @@ class SubtitleAssembler:
     def _append_to_rolling_committed_text(self, words: list[_WordState]) -> None:
         if not words:
             return
-        moved_text = self._words_to_text(words, initial_speaker_label=self._rolling_committed_last_speaker)
+        text, last_speaker, last_end = self._fold_words_into_committed(
+            self._rolling_committed_text,
+            self._rolling_committed_last_speaker,
+            self._rolling_committed_last_end,
+            words,
+        )
+        self._rolling_committed_text = text
+        self._rolling_committed_last_speaker = last_speaker
+        self._rolling_committed_last_end = last_end
+
+    def _fold_words_into_committed(
+        self,
+        committed_text: str,
+        last_speaker: str,
+        last_end: float | None,
+        words: list[_WordState],
+    ) -> tuple[str, str, float | None]:
+        """Pure fold of one flush batch into a committed string. Returns the new
+        (text, last_speaker, last_end) without mutating instance commit state, so the
+        delayed-freeze preview can fold the held batches non-destructively and match
+        exactly what the eventual per-batch drain produces."""
+        moved_text = self._words_to_text(words, initial_speaker_label=last_speaker)
         if not moved_text:
-            return
+            return committed_text, last_speaker, last_end
         previous_summary = dict(self._last_overlap_summary)
         ordered = sorted(words, key=lambda w: (w.start, w.end))
         first_speaker = ''
-        labels = self._stabilize_speakers(ordered)
-        for label in labels:
+        for label in self._stabilize_speakers(ordered):
             token = str(label or '').strip()
             if token:
                 first_speaker = token
@@ -1128,20 +1220,18 @@ class SubtitleAssembler:
         # it) still reads as a new utterance: append behind a blank-line hard
         # boundary + re-emitted marker instead of overlap-merging inline.
         boundary_pause = (
-            bool(self._rolling_committed_text)
-            and self._rolling_committed_last_end is not None
+            bool(committed_text)
+            and last_end is not None
             and float(self._speaker_pause_break_seconds) > 0.0
             and bool(first_speaker)
-            and first_speaker == self._rolling_committed_last_speaker
-            and (float(ordered[0].start) - float(self._rolling_committed_last_end)) > float(self._speaker_pause_break_seconds)
+            and first_speaker == last_speaker
+            and (float(ordered[0].start) - float(last_end)) > float(self._speaker_pause_break_seconds)
         )
         if boundary_pause:
             marker = self._speaker_label_to_marker(first_speaker)
-            self._rolling_committed_text = self._normalize_output_text(
-                f'{self._rolling_committed_text}\n\n{marker} {moved_text}'
-            )
+            new_text = self._normalize_output_text(f'{committed_text}\n\n{marker} {moved_text}')
         else:
-            base = self._rolling_committed_text
+            base = committed_text
             merged = self._merge_by_exact_overlap(base, moved_text)
             # Collapse guard: a committed-building merge must never drop more than
             # the incoming chunk's worth of prior committed text. The marker-leading
@@ -1153,12 +1243,12 @@ class SubtitleAssembler:
             if base and (len(base) - len(merged)) > len(moved_text):
                 sep = '' if base.endswith('\n') else '\n'
                 merged = self._normalize_output_text(f'{base}{sep}{moved_text}')
-            self._rolling_committed_text = merged
+            new_text = merged
         self._last_overlap_summary = previous_summary
-        self._rolling_committed_last_speaker = self._last_non_empty_speaker_label(words) or self._rolling_committed_last_speaker
+        new_last_speaker = self._last_non_empty_speaker_label(words) or last_speaker
         committed_end = max((float(w.end) for w in words), default=None)
-        if committed_end is not None:
-            self._rolling_committed_last_end = committed_end
+        new_last_end = committed_end if committed_end is not None else last_end
+        return new_text, new_last_speaker, new_last_end
 
     def _last_non_empty_speaker_label(self, words: list[_WordState]) -> str:
         ordered = sorted(words, key=lambda w: (w.start, w.end))
@@ -1168,6 +1258,169 @@ class SubtitleAssembler:
             if token:
                 return token
         return ''
+
+    # ---- Delayed-freeze speaker re-anchoring ----------------------------------
+    # When commit-hold is enabled, flushed words are buffered (re-rendered each
+    # frame) instead of frozen immediately, so a late cross-window profile identity
+    # can back-fill the speaker on a new turn's onset words before the marker bakes.
+
+    def _absorb_moved_into_commit(self, moved: list[_WordState]) -> None:
+        """Route flushed words either straight to the frozen committed string (legacy,
+        hold disabled = byte-identical) or into the delayed-freeze pending buffer."""
+        if not moved:
+            return
+        if self._commit_hold_seconds <= 0.0:
+            self._append_to_rolling_committed_text(moved)
+            return
+        # Hold the flush batch as a unit; the per-batch drain re-runs the exact legacy
+        # append (which dedups overlapping re-transcribed words at the committed-string
+        # overlap merge), so no separate word-level dedup is needed here.
+        self._pending_commit_batches.append(list(moved))
+
+    def _pending_flat(self) -> list[_WordState]:
+        return [w for batch in self._pending_commit_batches for w in batch]
+
+    def _committed_base_text(self) -> str:
+        """Committed text used as the overlay/merge base: the frozen string, plus a
+        non-destructive render of any held pending words so they stay visible while
+        their speaker settles."""
+        if self._commit_hold_seconds <= 0.0 or not self._pending_commit_batches:
+            return self._rolling_committed_text
+        # Fold the held batches into a copy of the committed state the same way the
+        # eventual per-batch drain will, so the previewed (and snapshotted) text is
+        # exactly what gets frozen.
+        text = self._rolling_committed_text
+        speaker = self._rolling_committed_last_speaker
+        end = self._rolling_committed_last_end
+        for batch in self._pending_commit_batches:
+            text, speaker, end = self._fold_words_into_committed(text, speaker, end, batch)
+        return text
+
+    def _reanchor_and_drain_pending(self, *, now: float, force_all: bool = False) -> None:
+        if self._commit_hold_seconds <= 0.0:
+            return
+        if not self._pending_commit_batches:
+            return
+        self._reanchor_pending_speakers()
+        self._drain_pending_commits(now=now, force_all=force_all)
+
+    def _earliest_active_speaker(self) -> str:
+        """Earliest non-empty speaker among the still-active (stable/partial) words -
+        i.e. the speaker just after the pending buffer; the back-fill anchor `N`."""
+        active = sorted(
+            list(self._stable_words) + list(self._partial_words),
+            key=lambda w: (w.start, w.end),
+        )
+        for w in active:
+            token = str(w.speaker or '').strip()
+            if token:
+                return token
+        return ''
+
+    def _reanchor_pending_speakers(self) -> None:
+        """Back-fill empty-speaker runs in the pending buffer. A run bounded by a known
+        previous speaker P and a known next speaker N (P != N) is the profile-warmup
+        lag of N's turn: attribute the whole gap to N (back-dating N's marker to the
+        gap onset), or split at the local-diarization boundary when one is present."""
+        pending = sorted(self._pending_flat(), key=lambda w: (w.start, w.end))
+        n = len(pending)
+        if n == 0:
+            return
+        next_known = self._earliest_active_speaker()
+        last_known = str(self._rolling_committed_last_speaker or '').strip()
+        i = 0
+        while i < n:
+            spk = str(pending[i].speaker or '').strip()
+            if spk:
+                last_known = spk
+                i += 1
+                continue
+            j = i
+            while j < n and not str(pending[j].speaker or '').strip():
+                j += 1
+            after = str(pending[j].speaker).strip() if j < n else next_known
+            if after:
+                self._fill_empty_run(pending, i, j, last_known, after)
+                last_known = after
+            i = j
+
+    def _fill_empty_run(
+        self,
+        pending: list[_WordState],
+        start: int,
+        end: int,
+        before: str,
+        after: str,
+    ) -> None:
+        """Assign speakers to pending[start:end] (all currently empty). `after` is the
+        confirmed next speaker. If `before`==`after` (or no prior) the gap is a
+        continuation -> all `after`. Otherwise use the local-diarization label to find
+        the true onset split; absent a clear local flip, give the whole gap to `after`
+        (the warmup lag belongs to the arriving speaker, per offline validation)."""
+        if start >= end or not after:
+            return
+        if not before or before == after:
+            for k in range(start, end):
+                pending[k].speaker = after
+            return
+        local_after = self._dominant_local_after(pending, end, after)
+        local_before = self._dominant_local_before(pending, start, before)
+        split = start
+        if local_after and local_before and local_after != local_before:
+            # first onset word whose local label has switched to the next speaker's cluster
+            for k in range(start, end):
+                if str(pending[k].local_speaker or '').strip() == local_after:
+                    split = k
+                    break
+            else:
+                split = start
+        for k in range(start, end):
+            pending[k].speaker = before if k < split else after
+
+    @staticmethod
+    def _dominant_local_after(pending: list[_WordState], end: int, after: str) -> str:
+        counts: dict[str, int] = {}
+        for w in pending[end:end + 6]:
+            if str(w.speaker or '').strip() == after:
+                loc = str(w.local_speaker or '').strip()
+                if loc:
+                    counts[loc] = counts.get(loc, 0) + 1
+        return max(counts.items(), key=lambda kv: kv[1])[0] if counts else ''
+
+    @staticmethod
+    def _dominant_local_before(pending: list[_WordState], start: int, before: str) -> str:
+        counts: dict[str, int] = {}
+        for w in pending[max(0, start - 6):start]:
+            if str(w.speaker or '').strip() == before:
+                loc = str(w.local_speaker or '').strip()
+                if loc:
+                    counts[loc] = counts.get(loc, 0) + 1
+        return max(counts.items(), key=lambda kv: kv[1])[0] if counts else ''
+
+    def _drain_pending_commits(self, *, now: float, force_all: bool = False) -> None:
+        """Freeze the contiguous oldest prefix of pending words that has aged past the
+        commit-hold window (their speaker has had time to settle) into the frozen
+        committed string. `force_all` flushes everything (end-of-stream finalize)."""
+        if not self._pending_commit_batches:
+            return
+        ready: list[list[_WordState]] = []
+        if force_all:
+            ready = self._pending_commit_batches
+            self._pending_commit_batches = []
+        else:
+            cutoff = float(now) - float(self._commit_hold_seconds)
+            # Release whole batches from the front whose newest word has aged past the
+            # hold window (their speaker has had time to settle). Whole-batch, in
+            # order, so each drain is the exact legacy append.
+            while self._pending_commit_batches:
+                batch = self._pending_commit_batches[0]
+                batch_end = max((float(w.end) for w in batch), default=0.0)
+                if batch_end <= cutoff:
+                    ready.append(self._pending_commit_batches.pop(0))
+                else:
+                    break
+        for batch in ready:
+            self._append_to_rolling_committed_text(batch)
 
     def _normalize_output_text(self, text: str) -> str:
         if not text:
