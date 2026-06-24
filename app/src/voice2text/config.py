@@ -49,8 +49,8 @@ class RuntimeConfig:
     whisperx_speaker_profile_model: str = 'pyannote/embedding'
     whisperx_speaker_speechbrain_model: str = 'speechbrain/spkrec-ecapa-voxceleb'
     whisperx_speaker_nemo_model: str = 'nvidia/speakerverification_en_titanet_large'
-    whisperx_speaker_profile_match_threshold: float = 0.72
-    whisperx_speaker_profile_min_seconds: float = 0.8
+    whisperx_speaker_profile_match_threshold: float = 0.65
+    whisperx_speaker_profile_min_seconds: float = 2.0
     whisperx_speaker_profile_reconcile_threshold: float = 0.52
     whisperx_speaker_profile_store_path: str = ''
     # Round 0023 learn-path quality gate: when on, gibberish / music-tail / degenerate /
