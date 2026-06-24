@@ -36,9 +36,10 @@ class RuntimeConfig:
     whisperx_english_align_large: bool = True
     whisperx_alignment_language: str = 'auto'
     whisperx_alignment_device: str = 'auto'
-    # Round 0028 alignment CUDA safety guard: 'safe' (default) downgrades CUDA alignment to CPU on
-    # Windows (known torchaudio/wav2vec2 access-violation); 'unsafe-cuda' forces CUDA with a warning.
-    # The legacy env var VOICE2TEXT_WHISPERX_ALLOW_UNSAFE_CUDA_ALIGN still works as an override.
+    # Alignment CUDA safety guard: 'safe' (default) downgrades CUDA alignment to CPU on Windows
+    # (known torchaudio/wav2vec2 access-violation); 'unsafe-cuda' forces CUDA with a warning;
+    # 'probe' runs an isolated subprocess probe and caches the verdict.
+    # The legacy env var VOICE2TEXT_WHISPERX_ALLOW_UNSAFE_CUDA_ALIGN still works for safe mode.
     whisperx_align_guard: str = 'safe'
     whisperx_diarization_device: str = 'auto'
     whisperx_diarization_model: str = 'pyannote/speaker-diarization-3.1'

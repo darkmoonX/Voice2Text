@@ -3,16 +3,20 @@ from __future__ import annotations
 
 import os
 import numpy as np
+import json
 from pathlib import Path
 from typing import Callable, Optional
 import threading
 import time
 import warnings
 import shutil
+import subprocess
+import sys
 import urllib.request
 
 from ..model_paths import library_model_dir
 from .audio_utils import has_enough_signal, normalize_chinese_script, normalize_language_hint, pcm16_to_mono_float, resample
+from .align_probe_cache import collect_probe_signature, read_cached_verdict, write_cached_verdict
 from .model_download import download_hf_files_with_progress, download_hf_snapshot_with_progress, emit_progress, estimate_hf_files_total, format_download_progress
 from .profile_quality import ClipQualityConfig
 from .speaker_identity import SpeakerIdentityConfig, SpeakerIdentityEngine
@@ -20,6 +24,8 @@ import re
 
 
 class WhisperXTranscriber:
+    _ALIGN_CUDA_PROBE_TIMEOUT_SECONDS = 120.0
+
     def __init__(
         self,
         model_ref: str = "small",
@@ -2501,8 +2507,10 @@ class WhisperXTranscriber:
 
     @staticmethod
     def _normalize_align_guard(value: str | None) -> str:
-        """Normalize the alignment-guard setting to `safe` | `unsafe-cuda` (default `safe`)."""
+        """Normalize the alignment-guard setting to `safe` | `unsafe-cuda` | `probe`."""
         token = str(value or "safe").strip().lower().replace("_", "-")
+        if token == "probe":
+            return "probe"
         if token in {"unsafe-cuda", "unsafe", "cuda"}:
             return "unsafe-cuda"
         return "safe"
@@ -2533,6 +2541,8 @@ class WhisperXTranscriber:
                 "'safe' if alignment crashes."
             )
             return token
+        if guard == "probe":
+            return self._apply_alignment_cuda_probe_policy()
         if env_allow:
             self._emit("WhisperX alignment CUDA safety guard bypassed by VOICE2TEXT_WHISPERX_ALLOW_UNSAFE_CUDA_ALIGN=1.")
             return token
@@ -2542,3 +2552,108 @@ class WhisperXTranscriber:
         )
         return "cpu"
 
+    def _apply_alignment_cuda_probe_policy(self) -> str:
+        try:
+            request = self._build_alignment_cuda_probe_request()
+        except Exception as exc:
+            self._emit(
+                f"WhisperX alignment CUDA probe setup failed ({type(exc).__name__}); "
+                "downgrading alignment to CPU."
+            )
+            return "cpu"
+        cache_path = self._alignment_cuda_probe_cache_path()
+        force = str(os.environ.get("VOICE2TEXT_WHISPERX_ALIGN_PROBE_FORCE", "")).strip().lower() in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }
+        if not force:
+            cached = read_cached_verdict(cache_path, request["signature"])
+            if cached is not None:
+                if cached:
+                    self._emit("WhisperX alignment CUDA probe cache hit: CUDA alignment previously passed.")
+                    return "cuda"
+                self._emit("WhisperX alignment CUDA probe cache hit: downgrading alignment to CPU.")
+                return "cpu"
+
+        cuda_safe, reason = self._run_alignment_cuda_probe_subprocess(
+            model=str(request["model"]),
+            language=str(request["language"]),
+            model_dir=str(request["model_dir"]),
+        )
+        try:
+            write_cached_verdict(cache_path, request["signature"], cuda_safe=cuda_safe, reason=reason)
+        except Exception as exc:
+            self._emit(f"WhisperX alignment CUDA probe cache write skipped: {type(exc).__name__}")
+        if cuda_safe:
+            self._emit("WhisperX alignment CUDA probe passed: keeping CUDA alignment.")
+            return "cuda"
+        self._emit(f"WhisperX alignment CUDA probe failed ({reason}); downgrading alignment to CPU.")
+        return "cpu"
+
+    def _alignment_cuda_probe_cache_path(self) -> Path:
+        return self._model_root / "align_cuda_probe.json"
+
+    def _build_alignment_cuda_probe_request(self) -> dict[str, object]:
+        language = self._alignment_cuda_probe_language()
+        explicit_model = self._effective_alignment_model(language)
+        resolved_model = self._resolve_alignment_model_name_for_load(language)
+        repo_id = self._resolve_alignment_repo_id(language)
+        model = resolved_model or explicit_model or repo_id or ""
+        model_dir = self._resolve_alignment_model_cache_dir(
+            explicit_model=explicit_model,
+            resolved_model_name=resolved_model,
+        )
+        signature_model = model or repo_id or explicit_model or language
+        signature = collect_probe_signature(align_model_repo=signature_model)
+        return {
+            "language": language,
+            "model": model,
+            "model_dir": str(model_dir),
+            "signature": signature,
+        }
+
+    def _alignment_cuda_probe_language(self) -> str:
+        mode = (self._alignment_language or "auto").strip().lower()
+        if mode not in {"", "auto", "follow-source"}:
+            return self._normalize_alignment_folder_language(mode)
+        if self._source_language_hint:
+            return self._normalize_alignment_folder_language(self._source_language_hint)
+        # Probe the heaviest/default-prone English alignment path when language is not known yet.
+        return "en"
+
+    def _run_alignment_cuda_probe_subprocess(self, *, model: str, language: str, model_dir: str) -> tuple[bool, str]:
+        cmd = [
+            sys.executable,
+            "-m",
+            "voice2text.stt.align_cuda_probe",
+            "--model",
+            model,
+            "--language",
+            language,
+            "--model-dir",
+            model_dir,
+        ]
+        try:
+            completed = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=self._ALIGN_CUDA_PROBE_TIMEOUT_SECONDS,
+                check=False,
+            )
+        except subprocess.TimeoutExpired:
+            return False, "timeout"
+        except Exception as exc:
+            return False, f"spawn-error:{type(exc).__name__}"
+        if completed.returncode != 0:
+            return False, f"returncode={completed.returncode}"
+        try:
+            line = (completed.stdout or "").strip().splitlines()[-1]
+            verdict = json.loads(line)
+        except Exception:
+            return False, "invalid-verdict"
+        if isinstance(verdict, dict) and verdict.get("ok") is True:
+            return True, "ok"
+        return False, "unsafe-verdict"

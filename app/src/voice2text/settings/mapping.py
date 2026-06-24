@@ -91,7 +91,7 @@ def build_settings_updates(payload: SettingsPayloadInput, *, lang: str, hop_gt_s
     if alignment_device not in {"auto", "cpu", "cuda"}:
         alignment_device = "auto"
     align_guard = (payload.whisperx_align_guard or "safe").strip().lower().replace("_", "-")
-    if align_guard not in {"safe", "unsafe-cuda"}:
+    if align_guard not in {"safe", "unsafe-cuda", "probe"}:
         align_guard = "safe"
     diarization_device = (payload.whisperx_diarization_device or "auto").strip().lower()
     if diarization_device not in {"auto", "cpu", "cuda"}:

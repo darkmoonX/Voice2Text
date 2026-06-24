@@ -99,6 +99,7 @@ def create_whisperx_diarization_device_combo() -> QComboBox:
 def create_whisperx_align_guard_combo() -> QComboBox:
     combo = QComboBox()
     combo.addItem("safe", "safe")
+    combo.addItem("probe", "probe")
     combo.addItem("unsafe-cuda", "unsafe-cuda")
     return combo
 
