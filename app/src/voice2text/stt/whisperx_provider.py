@@ -42,6 +42,7 @@ class WhisperXTranscriber:
         enable_diarization: bool = False,
         alignment_model: str = "",
         english_align_large: bool = True,
+        zh_align_wbbbbb: bool = False,
         alignment_language: str = "auto",
         alignment_device: str = "auto",
         align_guard: str = "safe",
@@ -121,6 +122,7 @@ class WhisperXTranscriber:
         self._enable_diarization = bool(enable_diarization)
         self._alignment_model = (alignment_model or "").strip()
         self._english_align_large = bool(english_align_large)
+        self._zh_align_wbbbbb = bool(zh_align_wbbbbb)
         self._alignment_language = (alignment_language or 'auto').strip().lower()
         self._alignment_device_setting = (alignment_device or "auto").strip().lower()
         self._align_guard = self._normalize_align_guard(align_guard)
@@ -2138,6 +2140,7 @@ class WhisperXTranscriber:
         return bool((has_yaml or has_json) and has_weight)
 
     _ENGLISH_LARGE_ALIGN_BUNDLE = "WAV2VEC2_ASR_LARGE_LV60K_960H"
+    _ZH_WBBBBB_ALIGN_MODEL = "wbbbbb/wav2vec2-large-chinese-zh-cn"
 
     def _effective_alignment_model(self, language_code: str) -> str:
         """Effective forced-alignment model id/bundle for a language.
@@ -2147,14 +2150,24 @@ class WhisperXTranscriber:
         large wav2vec2 bundle (``WAV2VEC2_ASR_LARGE_LV60K_960H``) instead of WhisperX's
         stock base English model: much tighter timestamps (better word order, fewer
         dropped words) at ~flat CPU cost. Routing the bundle name through the explicit
-        path also bypasses any stale language-scoped ``align/hf/{lang}`` cache. Non-English
-        languages are unaffected (returns ``""`` so resolution stays byte-identical).
+        path also bypasses any stale language-scoped ``align/hf/{lang}`` cache.
+
+        When ``zh_align_wbbbbb`` is on and alignment runs in Chinese, default to
+        ``wbbbbb/wav2vec2-large-chinese-zh-cn`` instead of WhisperX's stock
+        ``jonatasgrosman`` zh model: it is the one zh align model that runs AND exits
+        clean on CUDA (jonatasgrosman compute-hangs there), enabling ~10x GPU alignment
+        for the CJK case. It trades a small CER cost (round 0043 gate), so it is opt-in
+        (default off) and only worth it when alignment actually runs on GPU. Languages
+        other than en/zh are unaffected (returns ``""`` so resolution stays byte-identical).
         """
         explicit = self._alignment_model.strip()
         if explicit:
             return explicit
-        if getattr(self, "_english_align_large", True) and self._normalize_alignment_folder_language(language_code) == "en":
+        folder_lang = self._normalize_alignment_folder_language(language_code)
+        if getattr(self, "_english_align_large", True) and folder_lang == "en":
             return self._ENGLISH_LARGE_ALIGN_BUNDLE
+        if getattr(self, "_zh_align_wbbbbb", False) and folder_lang == "zh":
+            return self._ZH_WBBBBB_ALIGN_MODEL
         return ""
 
     def _resolve_alignment_repo_id(self, language_code: str) -> str:

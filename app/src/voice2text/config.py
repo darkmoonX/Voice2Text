@@ -34,6 +34,7 @@ class RuntimeConfig:
     whisperx_enable_diarization: bool = False
     whisperx_alignment_model: str = ''
     whisperx_english_align_large: bool = True
+    whisperx_zh_align_wbbbbb: bool = False
     whisperx_alignment_language: str = 'auto'
     whisperx_alignment_device: str = 'auto'
     # Alignment CUDA safety guard: 'safe' (default) downgrades CUDA alignment to CPU on Windows

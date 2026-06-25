@@ -36,6 +36,7 @@ _PERSIST_KEYS = {
     "whisperx_vad_method",
     "whisperx_enable_diarization",
     "whisperx_alignment_model",
+    "whisperx_zh_align_wbbbbb",
     "whisperx_alignment_language",
     "whisperx_alignment_device",
     "whisperx_align_guard",
