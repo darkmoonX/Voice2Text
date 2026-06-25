@@ -30,6 +30,7 @@ def alignment_repos_for_language(source_language: str) -> list[str]:
     if token in {"zh", "zh-hant", "zh-hans"}:
         return [
             "jonatasgrosman/wav2vec2-large-xlsr-53-chinese-zh-cn",
+            "wbbbbb/wav2vec2-large-chinese-zh-cn",
             "TencentGameMate/chinese-wav2vec2-base",
         ]
     if token == "ja":
@@ -48,6 +49,7 @@ def alignment_repos_for_language(source_language: str) -> list[str]:
         "WAV2VEC2_ASR_BASE_960H",
         "WAV2VEC2_ASR_LARGE_960H",
         "jonatasgrosman/wav2vec2-large-xlsr-53-chinese-zh-cn",
+        "wbbbbb/wav2vec2-large-chinese-zh-cn",
         "jonatasgrosman/wav2vec2-large-xlsr-53-japanese",
         "jonatasgrosman/wav2vec2-large-xlsr-53-korean",
     ]
