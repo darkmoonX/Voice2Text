@@ -1461,8 +1461,12 @@ class WhisperXTranscriber:
     @staticmethod
     def _normalize_diarization_model_ref(model_name: str) -> str:
         token = str(model_name or "").strip()
-        # Older settings may have persisted this typo; normalize before any
-        # download or pyannote pipeline construction to avoid a guaranteed 404.
+        # Older runtime_settings.json files persisted a typo'd repo id with a doubled
+        # "diarization" word (pyannote/speaker-diarization-diarization-3.1). That id 404s on
+        # the HF Hub, so map it back to the real repo before any download or pyannote pipeline
+        # construction. Do NOT delete this branch as dead code: it is the only thing keeping
+        # those stale settings files working — removing it reintroduces a guaranteed 404 for
+        # anyone who still has the typo persisted.
         if token.lower() == "pyannote/speaker-diarization-diarization-3.1":
             return "pyannote/speaker-diarization-3.1"
         return token
