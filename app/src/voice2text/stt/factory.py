@@ -171,7 +171,7 @@ def _build_whisperx(config: RuntimeConfig, *, device_override: Optional[str], co
         speaker_speechbrain_model=str(getattr(config, 'whisperx_speaker_speechbrain_model', 'speechbrain/spkrec-ecapa-voxceleb') or 'speechbrain/spkrec-ecapa-voxceleb'),
         speaker_nemo_model=str(getattr(config, 'whisperx_speaker_nemo_model', 'nvidia/speakerverification_en_titanet_large') or 'nvidia/speakerverification_en_titanet_large'),
         speaker_profile_match_threshold=float(getattr(config, 'whisperx_speaker_profile_match_threshold', 0.72) or 0.72),
-        speaker_profile_min_seconds=float(getattr(config, 'whisperx_speaker_profile_min_seconds', 0.8) or 0.8),
+        speaker_profile_min_seconds=float(getattr(config, 'whisperx_speaker_profile_min_seconds', 2.0) or 2.0),
         speaker_profile_reconcile_threshold=float(getattr(config, 'whisperx_speaker_profile_reconcile_threshold', 0.52) or 0.52),
         speaker_profile_store_path=str(getattr(config, 'whisperx_speaker_profile_store_path', '') or ''),
         speaker_profile_quality_gate_enabled=bool(getattr(config, 'whisperx_speaker_profile_quality_gate_enabled', False)),

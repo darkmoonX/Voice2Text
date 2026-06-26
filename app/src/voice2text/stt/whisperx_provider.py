@@ -61,7 +61,7 @@ class WhisperXTranscriber:
         speaker_speechbrain_model: str = "speechbrain/spkrec-ecapa-voxceleb",
         speaker_nemo_model: str = "nvidia/speakerverification_en_titanet_large",
         speaker_profile_match_threshold: float = 0.72,
-        speaker_profile_min_seconds: float = 0.8,
+        speaker_profile_min_seconds: float = 2.0,
         speaker_profile_reconcile_threshold: float = 0.52,
         speaker_profile_store_path: str = "",
         speaker_profile_quality_gate_enabled: bool = False,
