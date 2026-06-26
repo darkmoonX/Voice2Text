@@ -25,6 +25,11 @@ import re
 
 class WhisperXTranscriber:
     _ALIGN_CUDA_PROBE_TIMEOUT_SECONDS = 120.0
+    # Delay before retrying an inconclusive (likely GPU-contention) probe attempt.
+    _ALIGN_CUDA_PROBE_RETRY_DELAY_SECONDS = 2.0
+    # Windows STATUS_ACCESS_VIOLATION (0xC0000005) returncodes = the deterministic
+    # torchaudio/wav2vec2 CUDA crash the guard exists to block (cache it, never retry).
+    _ALIGN_CUDA_PROBE_ACCESS_VIOLATION_CODES = (3221225477, -1073741819)
 
     def __init__(
         self,
@@ -2590,20 +2595,50 @@ class WhisperXTranscriber:
                 self._emit("WhisperX alignment CUDA probe cache hit: downgrading alignment to CPU.")
                 return "cpu"
 
-        cuda_safe, reason = self._run_alignment_cuda_probe_subprocess(
+        cuda_safe, reason, kind = self._run_alignment_cuda_probe_subprocess(
             model=str(request["model"]),
             language=str(request["language"]),
             model_dir=str(request["model_dir"]),
         )
-        try:
-            write_cached_verdict(cache_path, request["signature"], cuda_safe=cuda_safe, reason=reason)
-        except Exception as exc:
-            self._emit(f"WhisperX alignment CUDA probe cache write skipped: {type(exc).__name__}")
-        if cuda_safe:
+        if kind == "transient":
+            # A non-deterministic failure (rc=1, invalid verdict, spawn error) is most often
+            # momentary GPU contention (an orphaned process / a prior run still resident in VRAM),
+            # NOT a real alignment fault. Retry once before trusting it, and never poison the cache.
+            self._emit(
+                f"WhisperX alignment CUDA probe inconclusive ({reason}); "
+                "retrying once (possible GPU contention)."
+            )
+            time.sleep(self._ALIGN_CUDA_PROBE_RETRY_DELAY_SECONDS)
+            cuda_safe, reason, kind = self._run_alignment_cuda_probe_subprocess(
+                model=str(request["model"]),
+                language=str(request["language"]),
+                model_dir=str(request["model_dir"]),
+            )
+
+        if kind == "safe":
+            self._write_alignment_cuda_probe_verdict(cache_path, request["signature"], True, reason)
             self._emit("WhisperX alignment CUDA probe passed: keeping CUDA alignment.")
             return "cuda"
-        self._emit(f"WhisperX alignment CUDA probe failed ({reason}); downgrading alignment to CPU.")
+        if kind in ("fatal", "timeout"):
+            # Deterministic failure (access violation / compute-hang): trust and cache it.
+            self._write_alignment_cuda_probe_verdict(cache_path, request["signature"], False, reason)
+            self._emit(f"WhisperX alignment CUDA probe failed ({reason}); downgrading alignment to CPU.")
+            return "cpu"
+        # Still inconclusive after the retry: downgrade CPU for THIS run only, without caching,
+        # so the next start re-probes and can recover CUDA once the contention clears.
+        self._emit(
+            f"WhisperX alignment CUDA probe inconclusive after retry ({reason}); downgrading alignment to "
+            "CPU for this run without caching (will re-probe on next start)."
+        )
         return "cpu"
+
+    def _write_alignment_cuda_probe_verdict(
+        self, cache_path: Path, signature: dict, cuda_safe: bool, reason: str
+    ) -> None:
+        try:
+            write_cached_verdict(cache_path, signature, cuda_safe=cuda_safe, reason=reason)
+        except Exception as exc:
+            self._emit(f"WhisperX alignment CUDA probe cache write skipped: {type(exc).__name__}")
 
     def _alignment_cuda_probe_cache_path(self) -> Path:
         return self._model_root / "align_cuda_probe.json"
@@ -2636,11 +2671,27 @@ class WhisperXTranscriber:
         # Probe the heaviest/default-prone English alignment path when language is not known yet.
         return "en"
 
-    def _run_alignment_cuda_probe_subprocess(self, *, model: str, language: str, model_dir: str) -> tuple[bool, str]:
+    def _run_alignment_cuda_probe_subprocess(
+        self, *, model: str, language: str, model_dir: str
+    ) -> tuple[bool, str, str]:
+        """Run one isolated CUDA-align probe.
+
+        Returns `(cuda_safe, reason, kind)` where `kind` classifies the outcome for the policy:
+        - `safe`      : clean rc=0 + `{"ok": true}` verdict.
+        - `fatal`     : Windows access-violation returncode (deterministic torchaudio CUDA crash).
+        - `timeout`   : probe exceeded the timeout (deterministic compute-hang).
+        - `transient` : any other failure (other non-zero rc, spawn error, invalid verdict) —
+                        likely momentary GPU contention; the policy retries and never caches it.
+        """
+        # Run the probe by absolute FILE path rather than `-m voice2text.stt.align_cuda_probe`:
+        # the subprocess inherits the launching app's cwd (often app/, not app/src), where the
+        # `voice2text` package is not importable, so `-m` fails with ModuleNotFoundError -> rc=1
+        # and the probe never actually ran. align_cuda_probe.py only imports whisperx/numpy, so a
+        # direct file run is cwd-independent.
+        probe_script = str(Path(__file__).resolve().parent / "align_cuda_probe.py")
         cmd = [
             sys.executable,
-            "-m",
-            "voice2text.stt.align_cuda_probe",
+            probe_script,
             "--model",
             model,
             "--language",
@@ -2657,16 +2708,19 @@ class WhisperXTranscriber:
                 check=False,
             )
         except subprocess.TimeoutExpired:
-            return False, "timeout"
+            return False, "timeout", "timeout"
         except Exception as exc:
-            return False, f"spawn-error:{type(exc).__name__}"
+            return False, f"spawn-error:{type(exc).__name__}", "transient"
         if completed.returncode != 0:
-            return False, f"returncode={completed.returncode}"
+            reason = f"returncode={completed.returncode}"
+            if completed.returncode in self._ALIGN_CUDA_PROBE_ACCESS_VIOLATION_CODES:
+                return False, reason, "fatal"
+            return False, reason, "transient"
         try:
             line = (completed.stdout or "").strip().splitlines()[-1]
             verdict = json.loads(line)
         except Exception:
-            return False, "invalid-verdict"
+            return False, "invalid-verdict", "transient"
         if isinstance(verdict, dict) and verdict.get("ok") is True:
-            return True, "ok"
-        return False, "unsafe-verdict"
+            return True, "ok", "safe"
+        return False, "unsafe-verdict", "transient"
