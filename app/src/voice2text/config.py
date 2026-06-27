@@ -54,6 +54,19 @@ class RuntimeConfig:
     whisperx_speaker_profile_min_seconds: float = 2.0
     whisperx_speaker_profile_reconcile_threshold: float = 0.52
     whisperx_speaker_profile_store_path: str = ''
+    # Rolling-window (realtime) speaker maturity floors. These gate how much repeated
+    # evidence a diarized speaker needs before it becomes a candidate profile
+    # (candidate_*) and then a stable visible identity (visible_*). They apply ONLY to
+    # the realtime rolling path (window <= 15s); long direct chunks keep a conservative
+    # fixed policy so reference/export speaker counts stay clean (decoupled by design).
+    # Defaults reproduce the shipped behavior (candidate 6s/8x, visible 24s/16x at the
+    # standard min_seconds=2.0 operating point). Lower the realtime floors (e.g. 4/5,
+    # 6/10) to recover real minority speakers at the cost of more noise splits — validate
+    # attribution against ground truth, not speaker count.
+    whisperx_speaker_realtime_candidate_seconds: float = 6.0
+    whisperx_speaker_realtime_candidate_samples: int = 8
+    whisperx_speaker_realtime_visible_seconds: float = 24.0
+    whisperx_speaker_realtime_visible_samples: int = 16
     # Round 0023 learn-path quality gate: when on, gibberish / music-tail / degenerate /
     # low-confidence clips can still match an existing profile for display but never update or
     # create a centroid. Default off until the harness A/B confirms it is CER-neutral.

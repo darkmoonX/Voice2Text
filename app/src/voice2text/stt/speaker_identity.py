@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-import math
 from pathlib import Path
 from typing import Callable
 
@@ -49,6 +48,12 @@ class SpeakerIdentityConfig:
     nemo_model: str
     on_status: Callable[[str], None] | None = None
     quality_gate: ClipQualityConfig = field(default_factory=ClipQualityConfig)
+    # Realtime (rolling-window) maturity floors; defaults = shipped behavior. Direct
+    # chunks ignore these and use a fixed conservative policy (see _profile_evidence_policy).
+    realtime_candidate_seconds: float = 6.0
+    realtime_candidate_samples: int = 8
+    realtime_visible_seconds: float = 24.0
+    realtime_visible_samples: int = 16
 
 
 class _BaseEmbeddingBackend:
@@ -350,6 +355,10 @@ class SpeakerIdentityEngine:
         self._match_threshold = float(max(0.0, min(0.999, config.match_threshold)))
         self._min_seconds = float(max(0.2, config.min_seconds))
         self._reconcile_threshold = float(max(0.0, min(0.999, config.reconcile_threshold)))
+        self._rt_candidate_seconds = float(max(0.0, getattr(config, "realtime_candidate_seconds", 6.0)))
+        self._rt_candidate_samples = int(max(1, getattr(config, "realtime_candidate_samples", 8)))
+        self._rt_visible_seconds = float(max(0.0, getattr(config, "realtime_visible_seconds", 24.0)))
+        self._rt_visible_samples = int(max(1, getattr(config, "realtime_visible_samples", 16)))
         self._quality_gate = config.quality_gate or ClipQualityConfig()
         self._on_status = config.on_status
         self._last_stats: dict[str, object] = {}
@@ -707,25 +716,27 @@ class SpeakerIdentityEngine:
             )
         return segments
 
-    @staticmethod
-    def _profile_evidence_policy(*, audio_seconds: float, min_seconds: float) -> tuple[float, int, float]:
+    def _profile_evidence_policy(self, *, audio_seconds: float, min_seconds: float) -> tuple[float, int, float]:
         """Return candidate evidence thresholds for long direct chunks vs rolling windows.
 
-        Rolling windows are heavily overlapped, so raw local-speaker duration is
-        not unique evidence. Direct chunks are much longer and should keep the
-        older quick-promotion behavior so reference exports can get speaker
-        labels early.
+        Rolling windows are heavily overlapped, so raw local-speaker duration is not
+        unique evidence — their maturity floors are configurable (realtime_candidate_*).
+        Direct chunks are much longer and keep a FIXED conservative quick-promotion
+        policy (max(min_seconds*3, 6.0)) so reference/export speaker counts stay clean;
+        they are deliberately decoupled from the realtime floors (lowering the realtime
+        knobs must not over-split the direct reference).
         """
         window_seconds = float(max(0.0, audio_seconds))
-        base_min_seconds = float(max(float(min_seconds) * 3.0, 6.0))
         if window_seconds <= 15.0:
-            min_samples = max(8, int(math.ceil(window_seconds / max(0.5, float(min_seconds)))))
+            base_min_seconds = float(max(0.0, self._rt_candidate_seconds))
+            min_samples = int(max(1, self._rt_candidate_samples))
             evidence_cap = float(max(0.5, min(1.5, float(min_seconds))))
-            return base_min_seconds, int(min_samples), evidence_cap
-        return base_min_seconds, 1, float(max(base_min_seconds, window_seconds))
+            return base_min_seconds, min_samples, evidence_cap
+        direct_base_seconds = float(max(float(min_seconds) * 3.0, 6.0))
+        return direct_base_seconds, 1, float(max(direct_base_seconds, window_seconds))
 
-    @staticmethod
     def _visible_profile_policy(
+        self,
         *,
         audio_seconds: float,
         candidate_min_seconds: float,
@@ -733,15 +744,18 @@ class SpeakerIdentityEngine:
     ) -> tuple[float, int]:
         """Return maturity thresholds before a profile becomes a stable visible identity.
 
-        Long direct chunks are reference-style processing and should label early.
-        Short rolling windows need more repeated evidence because the same audio
-        appears in many overlapping windows.
+        Long direct chunks are reference-style processing and label early (trivially
+        visible). Short rolling windows need more repeated evidence because the same
+        audio appears in many overlapping windows — controlled by realtime_visible_*.
+        `candidate_*` args are unused for realtime now (visible floors are independent
+        config rather than a multiple of the candidate floor); kept for call-site parity.
         """
+        del candidate_min_seconds, candidate_min_samples
         window_seconds = float(max(0.0, audio_seconds))
         if window_seconds <= 15.0:
             return (
-                float(max(candidate_min_seconds * 4.0, 24.0)),
-                int(max(candidate_min_samples * 2, 16)),
+                float(max(0.0, self._rt_visible_seconds)),
+                int(max(1, self._rt_visible_samples)),
             )
         return (0.0, 1)
 

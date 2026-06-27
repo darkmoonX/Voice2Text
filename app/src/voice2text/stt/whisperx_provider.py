@@ -62,6 +62,10 @@ class WhisperXTranscriber:
         speaker_nemo_model: str = "nvidia/speakerverification_en_titanet_large",
         speaker_profile_match_threshold: float = 0.72,
         speaker_profile_min_seconds: float = 2.0,
+        speaker_realtime_candidate_seconds: float = 6.0,
+        speaker_realtime_candidate_samples: int = 8,
+        speaker_realtime_visible_seconds: float = 24.0,
+        speaker_realtime_visible_samples: int = 16,
         speaker_profile_reconcile_threshold: float = 0.52,
         speaker_profile_store_path: str = "",
         speaker_profile_quality_gate_enabled: bool = False,
@@ -149,6 +153,10 @@ class WhisperXTranscriber:
         ).strip()
         self._speaker_profile_match_threshold = float(max(0.0, min(0.999, speaker_profile_match_threshold)))
         self._speaker_profile_min_seconds = float(max(0.2, speaker_profile_min_seconds))
+        self._speaker_realtime_candidate_seconds = float(max(0.0, speaker_realtime_candidate_seconds))
+        self._speaker_realtime_candidate_samples = int(max(1, speaker_realtime_candidate_samples))
+        self._speaker_realtime_visible_seconds = float(max(0.0, speaker_realtime_visible_seconds))
+        self._speaker_realtime_visible_samples = int(max(1, speaker_realtime_visible_samples))
         self._speaker_profile_reconcile_threshold = float(
             max(0.0, min(0.999, speaker_profile_reconcile_threshold))
         )
@@ -228,6 +236,10 @@ class WhisperXTranscriber:
                     store_path=self._speaker_profile_store_path,
                     match_threshold=self._speaker_profile_match_threshold,
                     min_seconds=self._speaker_profile_min_seconds,
+                    realtime_candidate_seconds=self._speaker_realtime_candidate_seconds,
+                    realtime_candidate_samples=self._speaker_realtime_candidate_samples,
+                    realtime_visible_seconds=self._speaker_realtime_visible_seconds,
+                    realtime_visible_samples=self._speaker_realtime_visible_samples,
                     reconcile_threshold=self._speaker_profile_reconcile_threshold,
                     model_root=str(self._model_root),
                     device=self._diarization_device,
