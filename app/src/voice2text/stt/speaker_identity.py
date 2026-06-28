@@ -15,6 +15,8 @@ def _normalize_backend(token: str) -> str:
     key = str(token or "").strip().lower().replace("-", "_")
     if key in {"pyannote", "pyannote_embedding", "pyannote_audio"}:
         return "pyannote"
+    if key in {"wespeaker", "wespeaker_resnet34", "pyannote_wespeaker"}:
+        return "wespeaker"
     if key in {"speechbrain", "speechbrain_ecapa", "ecapa", "ecapa_tdnn"}:
         return "speechbrain_ecapa"
     if key in {"nemo", "nemo_titanet", "titanet", "nvidia_nemo"}:
@@ -46,6 +48,10 @@ class SpeakerIdentityConfig:
     pyannote_model: str
     speechbrain_model: str
     nemo_model: str
+    # Round 0045 Fix 2: wespeaker-grade embedding for the cross-window profile layer
+    # (the same model pyannote diarization uses internally; separates zh where the default
+    # pyannote/embedding collapses). Cached as part of diar-3.1, no HF gating.
+    wespeaker_model: str = "pyannote/wespeaker-voxceleb-resnet34-lm"
     on_status: Callable[[str], None] | None = None
     quality_gate: ClipQualityConfig = field(default_factory=ClipQualityConfig)
     # Realtime (rolling-window) maturity floors; defaults = shipped behavior. Direct
@@ -762,6 +768,29 @@ class SpeakerIdentityEngine:
     def _build_backend(self, cfg: SpeakerIdentityConfig) -> _BaseEmbeddingBackend:
         model_root = Path(str(cfg.model_root or ".")).resolve()
         backend = _normalize_backend(cfg.backend)
+        if backend == "wespeaker":
+            # wespeaker is a pyannote-wrapped Model -> reuse the pyannote Inference path.
+            # No HF gating (local diar-3.1 cache), so fall back to pyannote/embedding only
+            # if the wespeaker model is somehow missing.
+            wespeaker_backend = _PyannoteEmbeddingBackend(
+                model_ref=str(cfg.wespeaker_model or "pyannote/wespeaker-voxceleb-resnet34-lm"),
+                hf_token=cfg.hf_token,
+                device=cfg.device,
+                model_root=model_root,
+                on_status=cfg.on_status,
+            )
+            wespeaker_backend.backend_name = "wespeaker"
+            return _FallbackEmbeddingBackend(
+                primary=wespeaker_backend,
+                fallback=_PyannoteEmbeddingBackend(
+                    model_ref=str(cfg.pyannote_model or "pyannote/embedding"),
+                    hf_token=cfg.hf_token,
+                    device=cfg.device,
+                    model_root=model_root,
+                    on_status=cfg.on_status,
+                ),
+                on_status=cfg.on_status,
+            )
         if backend == "speechbrain_ecapa":
             return _SpeechBrainEcapaBackend(
                 model_ref=cfg.speechbrain_model,

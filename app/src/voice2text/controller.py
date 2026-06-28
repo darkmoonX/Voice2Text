@@ -287,6 +287,9 @@ class TranscriptionController(QObject):
                 speaker_profile_reconcile_threshold=float(
                     getattr(self._config, "whisperx_speaker_profile_reconcile_threshold", 0.0) or 0.0
                 ),
+                whole_file_diarization=bool(
+                    getattr(self._config, "import_direct_whole_file_diarization", True)
+                ),
                 on_progress=_progress,
                 on_status=self._emit_status,
             )

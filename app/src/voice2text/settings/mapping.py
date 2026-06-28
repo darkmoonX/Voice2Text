@@ -97,7 +97,7 @@ def build_settings_updates(payload: SettingsPayloadInput, *, lang: str, hop_gt_s
     if diarization_device not in {"auto", "cpu", "cuda"}:
         diarization_device = "auto"
     speaker_profile_backend = (payload.whisperx_speaker_profile_backend or "pyannote").strip().lower()
-    if speaker_profile_backend not in {"pyannote", "speechbrain_ecapa", "nemo_titanet"}:
+    if speaker_profile_backend not in {"pyannote", "wespeaker", "speechbrain_ecapa", "nemo_titanet"}:
         speaker_profile_backend = "pyannote"
     export_formats: list[str] = []
     for token in str(payload.transcript_export_formats or "").split(","):

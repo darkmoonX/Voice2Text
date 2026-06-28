@@ -60,6 +60,7 @@ class WhisperXTranscriber:
         speaker_profile_model: str = "pyannote/embedding",
         speaker_speechbrain_model: str = "speechbrain/spkrec-ecapa-voxceleb",
         speaker_nemo_model: str = "nvidia/speakerverification_en_titanet_large",
+        speaker_wespeaker_model: str = "pyannote/wespeaker-voxceleb-resnet34-lm",
         speaker_profile_match_threshold: float = 0.72,
         speaker_profile_min_seconds: float = 2.0,
         speaker_realtime_candidate_seconds: float = 6.0,
@@ -148,6 +149,9 @@ class WhisperXTranscriber:
         self._speaker_speechbrain_model = (
             speaker_speechbrain_model or "speechbrain/spkrec-ecapa-voxceleb"
         ).strip()
+        self._speaker_wespeaker_model = (
+            speaker_wespeaker_model or "pyannote/wespeaker-voxceleb-resnet34-lm"
+        ).strip()
         self._speaker_nemo_model = (
             speaker_nemo_model or "nvidia/speakerverification_en_titanet_large"
         ).strip()
@@ -202,6 +206,17 @@ class WhisperXTranscriber:
 
         self._align_cache: dict[str, tuple[object, object]] = {}
         self._diarization_pipeline = None
+        # Round 0045: the direct/import path runs ONE whole-file diarization pass and
+        # assigns the globally-consistent labels itself (see diarize_whole_file_turns).
+        # While that external pass owns diarization, transcribe() must behave exactly as
+        # if diarization were disabled (no per-chunk labels, no profile re-cluster), so
+        # the per-chunk SPEAKER_00 labels and the weaker pyannote/embedding profile layer
+        # never override the strong whole-file labels.
+        self._diarization_suppressed = False
+        # Whole-file diarization (direct/import) is pinned to CPU: a single multi-minute
+        # pyannote call is exactly the "sustained load" that crashes GPU pyannote, and the
+        # proven 3-speaker zh result came from a CPU whole-file pass.
+        self._whole_file_diarization_pipeline = None
         self._diarization_disabled_reason: str | None = None
         self._diarization_cuda_warmed = False
         self._speaker_embedding_inference = None
@@ -247,6 +262,7 @@ class WhisperXTranscriber:
                     pyannote_model=self._speaker_profile_model,
                     speechbrain_model=self._speaker_speechbrain_model,
                     nemo_model=self._speaker_nemo_model,
+                    wespeaker_model=self._speaker_wespeaker_model,
                     on_status=self._emit,
                     quality_gate=ClipQualityConfig(
                         enabled=self._speaker_profile_quality_gate_enabled,
@@ -402,8 +418,11 @@ class WhisperXTranscriber:
                 f"[whisperx-trace] #{trace_id} align-done: segments={len(aligned)}, "
                 f"align_lang={align_lang or 'n/a'}, align_device={self._alignment_device}"
             )
+        # Round 0045: external whole-file diarization (direct/import) suppresses the
+        # per-chunk diarization + profile layer so it can own globally-consistent labels.
+        diarize_active = bool(self._enable_diarization) and not bool(self._diarization_suppressed)
         self._last_diarization_timing = {}
-        if self._enable_diarization:
+        if diarize_active:
             stage_started_at = time.perf_counter()
             aligned = self._attach_speaker_labels(audio, aligned)
             provider_timing["diarization_seconds"] = time.perf_counter() - stage_started_at
@@ -421,7 +440,7 @@ class WhisperXTranscriber:
         token_meta: list[dict[str, object]] = []
         words_fallback: list[str] = []
         diarized_turns: list[dict[str, object]] = []
-        if self._enable_diarization:
+        if diarize_active:
             for seg in aligned:
                 if not isinstance(seg, dict):
                     continue
@@ -442,10 +461,10 @@ class WhisperXTranscriber:
                         "speaker": speaker,
                     }
                 )
-        text = self._format_diarized_text(aligned) if self._enable_diarization else ""
+        text = self._format_diarized_text(aligned) if diarize_active else ""
         if not text:
             text = " ".join((str(seg.get("text") or "").strip() for seg in aligned if str(seg.get("text") or "").strip())).strip()
-        require_profile_identity = self._require_profile_identity_for_display()
+        require_profile_identity = diarize_active and self._require_profile_identity_for_display()
         for seg in aligned:
             seg_speaker = (
                 self._resolve_display_segment_speaker(seg)
@@ -531,7 +550,7 @@ class WhisperXTranscriber:
             "speaker_profile_stats": dict(self._last_speaker_profile_stats),
             "provider_timing": provider_timing,
         }
-        if self._enable_diarization and (self._trace_enabled or marker_count > 0 or len(diarized_turns) > 0):
+        if diarize_active and (self._trace_enabled or marker_count > 0 or len(diarized_turns) > 0):
             unique_speakers = sorted(
                 {
                     str(item.get("speaker") or "").strip()
@@ -1189,6 +1208,93 @@ class WhisperXTranscriber:
         has_config = any((path / name).exists() for name in ("config.json", "config.yaml", "preprocessor_config.json"))
         has_weights = any((path / name).exists() for name in ("model.safetensors", "pytorch_model.bin", "model.bin"))
         return bool(has_config and has_weights)
+
+    def set_diarization_suppressed(self, suppressed: bool) -> None:
+        """Toggle per-chunk diarization + profile clustering inside transcribe().
+
+        Used by the direct/import whole-file diarization path (round 0045): while an
+        external whole-file pass owns speaker assignment, transcribe() must emit pure
+        ASR/alignment tokens with no speaker labels so the strong global labels are not
+        overwritten by per-chunk SPEAKER_00 labels or the weaker profile embedding.
+        """
+        self._diarization_suppressed = bool(suppressed)
+
+    def supports_whole_file_diarization(self) -> bool:
+        return bool(self._enable_diarization)
+
+    def _ensure_whole_file_diarization_pipeline(self):
+        """Return a CPU-pinned diarization pipeline for the whole-file direct pass.
+
+        Reuses the main pipeline when it already runs on CPU; otherwise builds and caches
+        a dedicated CPU pipeline (the GPU pipeline is left untouched for realtime).
+        """
+        if str(self._diarization_device) == "cpu":
+            self._ensure_diarization_pipeline_loaded()
+            return self._diarization_pipeline
+        if self._whole_file_diarization_pipeline is not None:
+            return self._whole_file_diarization_pipeline
+        self._emit("[download] whole-file diarization preparing (CPU)")
+        self._sanitize_broken_proxy_env()
+        resolved_hf_token = self._resolve_hf_token()
+        self._apply_hf_token_env(resolved_hf_token)
+        model_name_for_pipeline = self._resolve_diarization_model_for_pipeline(
+            model_name=self._diarization_model,
+            hf_token=resolved_hf_token,
+        )
+        self._whole_file_diarization_pipeline = self._create_diarization_pipeline(
+            model_name=model_name_for_pipeline,
+            device="cpu",
+            hf_token=resolved_hf_token,
+        )
+        self._emit("whole-file diarization pipeline initialized (CPU).")
+        return self._whole_file_diarization_pipeline
+
+    def diarize_whole_file_turns(self, chunk, channel_mode: str = "mono") -> list[dict[str, object]]:
+        """Run ONE diarization pass over the whole audio and return global turns.
+
+        Returns ``[{"start", "end", "speaker"}, ...]`` (absolute seconds, labels like
+        ``SPEAKER_00`` that stay consistent across the entire file). Unlike the per-chunk
+        ``_attach_speaker_labels`` path, the labels here are globally consistent, so the
+        direct path can assign them to words by time overlap and skip the cross-window
+        profile re-cluster entirely. Returns ``[]`` on any failure (caller degrades to
+        no speaker labels rather than crashing the pass).
+        """
+        if not self._enable_diarization:
+            return []
+        try:
+            audio = pcm16_to_mono_float(chunk.pcm16, chunk.channels, channel_mode=channel_mode)
+            if getattr(chunk, "sample_rate", 16000) != 16000 and audio.size:
+                audio = resample(audio, chunk.sample_rate, 16000)
+            audio_f32 = np.asarray(audio, dtype=np.float32).reshape(-1)
+            if audio_f32.size < 1600:
+                return []
+            if not np.isfinite(audio_f32).all():
+                audio_f32 = np.nan_to_num(audio_f32, nan=0.0, posinf=1.0, neginf=-1.0)
+            pipeline = self._ensure_whole_file_diarization_pipeline()
+            if pipeline is None:
+                return []
+            started_at = time.perf_counter()
+            diarize_segments = pipeline(audio_f32)
+            turns: list[dict[str, object]] = []
+            for row in diarize_segments.itertuples(index=False):
+                try:
+                    start = float(getattr(row, "start"))
+                    end = float(getattr(row, "end"))
+                    speaker = str(getattr(row, "speaker") or "").strip()
+                except Exception:
+                    continue
+                if speaker and end > start:
+                    turns.append({"start": start, "end": end, "speaker": speaker})
+            turns.sort(key=lambda t: (float(t["start"]), float(t["end"])))
+            self._emit(
+                "[speaker-turn] whole-file diarization: "
+                f"turns={len(turns)}; speakers={len({t['speaker'] for t in turns})}; "
+                f"elapsed={time.perf_counter() - started_at:.1f}s"
+            )
+            return turns
+        except Exception as exc:  # noqa: BLE001
+            self._emit(f"WhisperX whole-file diarization failed: {exc}")
+            return []
 
     def _attach_speaker_labels(self, audio, segments: list[dict]) -> list[dict]:
         detail_started_at = time.perf_counter()

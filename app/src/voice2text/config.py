@@ -50,6 +50,9 @@ class RuntimeConfig:
     whisperx_speaker_profile_model: str = 'pyannote/embedding'
     whisperx_speaker_speechbrain_model: str = 'speechbrain/spkrec-ecapa-voxceleb'
     whisperx_speaker_nemo_model: str = 'nvidia/speakerverification_en_titanet_large'
+    # Round 0045 Fix 2: set backend='wespeaker' to use this (diar-3.1's own embedding,
+    # separates zh where pyannote/embedding collapses cross-window identity).
+    whisperx_speaker_wespeaker_model: str = 'pyannote/wespeaker-voxceleb-resnet34-lm'
     whisperx_speaker_profile_match_threshold: float = 0.72
     whisperx_speaker_profile_min_seconds: float = 2.0
     whisperx_speaker_profile_reconcile_threshold: float = 0.52
@@ -174,3 +177,6 @@ class RuntimeConfig:
     import_direct_path: str = ''
     import_direct_chunk_seconds: float = 0.0
     import_direct_language_subchunk_seconds: float = 30.0
+    # Round 0045: direct/import diarization runs once on the whole file (globally
+    # consistent labels, no weaker profile re-cluster) instead of per-chunk.
+    import_direct_whole_file_diarization: bool = True

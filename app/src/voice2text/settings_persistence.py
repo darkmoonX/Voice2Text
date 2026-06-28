@@ -48,6 +48,7 @@ _PERSIST_KEYS = {
     "whisperx_speaker_profile_model",
     "whisperx_speaker_speechbrain_model",
     "whisperx_speaker_nemo_model",
+    "whisperx_speaker_wespeaker_model",
     "whisperx_speaker_profile_match_threshold",
     "whisperx_speaker_profile_min_seconds",
     "whisperx_speaker_realtime_candidate_seconds",

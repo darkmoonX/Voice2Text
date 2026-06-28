@@ -107,6 +107,7 @@ def create_whisperx_align_guard_combo() -> QComboBox:
 def create_whisperx_speaker_backend_combo() -> QComboBox:
     combo = QComboBox()
     combo.addItem("pyannote", "pyannote")
+    combo.addItem("wespeaker", "wespeaker")
     combo.addItem("speechbrain-ecapa", "speechbrain_ecapa")
     combo.addItem("nemo-titanet", "nemo_titanet")
     return combo

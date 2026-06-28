@@ -193,6 +193,48 @@ def reconcile_direct_speaker_profiles(
     return dict(stats)
 
 
+def _assign_global_speakers(
+    token_timestamps: list[dict[str, object]],
+    turns: list[dict[str, object]],
+) -> int:
+    """Stamp each token with the whole-file diarization speaker by time overlap.
+
+    Tokens carry absolute audio times (``absolute_start``/``absolute_end`` added by
+    ``enrich_absolute_timestamps``, falling back to ``start``/``end``). The turn whose
+    span best overlaps a token's midpoint wins; the label is written to ``speaker``,
+    ``profile_speaker`` and ``local_speaker`` so every downstream consumer (export cues,
+    text markers, scorer) sees the same globally-consistent identity. Returns the number
+    of tokens that received a label.
+    """
+    if not turns:
+        return 0
+    spans = [(float(t["start"]), float(t["end"]), str(t["speaker"])) for t in turns]
+    assigned = 0
+    for row in token_timestamps:
+        try:
+            start = float(row.get("absolute_start", row.get("start")))
+            end = float(row.get("absolute_end", row.get("end")))
+        except Exception:
+            continue
+        mid = (start + end) / 2.0
+        best_label = ""
+        best_overlap = 0.0
+        for s, e, label in spans:
+            if s <= mid < e:
+                best_label = label
+                break
+            overlap = min(end, e) - max(start, s)
+            if overlap > best_overlap:
+                best_overlap = overlap
+                best_label = label
+        if best_label:
+            row["speaker"] = best_label
+            row["profile_speaker"] = best_label
+            row["local_speaker"] = best_label
+            assigned += 1
+    return assigned
+
+
 def run_direct_transcription(
     cfg: RuntimeConfig,
     full_audio: AudioChunk,
@@ -201,13 +243,31 @@ def run_direct_transcription(
     chunk_seconds: float,
     language_subchunk_seconds: float = 30.0,
     speaker_profile_reconcile_threshold: float = 0.0,
+    whole_file_diarization: bool = True,
     on_progress: ProgressCallback | None = None,
     on_status: StatusCallback | None = None,
 ) -> dict[str, object]:
-    """Run one whole-file imported-audio transcription pass with optional chunking."""
+    """Run one whole-file imported-audio transcription pass with optional chunking.
+
+    When ``whole_file_diarization`` is set and the transcriber supports it (round 0045),
+    per-chunk diarization + the cross-window profile re-cluster are suppressed during the
+    ASR loop and a single whole-file diarization pass assigns globally-consistent speaker
+    labels afterwards. This avoids the chunked-diarization + weaker ``pyannote/embedding``
+    collapse that merged distinct speakers (e.g. zh Bn 3 voices -> 1).
+    """
     provider = normalize_stt_provider(str(getattr(cfg, "stt_provider", "whisperx") or "whisperx"))
     if provider == "whispercpp" and on_status is not None:
         on_status("direct mode: whispercpp has no diarization - single-pass, no speaker labels")
+
+    set_suppressed = getattr(transcriber, "set_diarization_suppressed", None)
+    diarize_whole_file = getattr(transcriber, "diarize_whole_file_turns", None)
+    supports_whole_file = bool(getattr(transcriber, "supports_whole_file_diarization", lambda: False)())
+    whole_file_active = (
+        bool(whole_file_diarization)
+        and supports_whole_file
+        and callable(set_suppressed)
+        and callable(diarize_whole_file)
+    )
 
     duration = audio_duration_seconds(full_audio)
     requested_chunk_seconds = float(max(0.0, chunk_seconds))
@@ -235,58 +295,63 @@ def run_direct_transcription(
 
     get_meta = getattr(transcriber, "get_last_transcription_meta", lambda: {})
     transcribe = getattr(transcriber, "transcribe")
-    while offset < duration or (index == 0 and duration == 0.0):
-        index += 1
-        current_duration = duration if not use_chunked else min(resolved_chunk_seconds, max(0.0, duration - offset))
-        if current_duration <= 0.0:
-            break
-        audio = full_audio if not use_chunked else slice_audio_chunk(full_audio, offset, current_duration)
+    if whole_file_active:
+        # Suppress per-chunk diarization + profile re-cluster during the ASR loop; a
+        # single whole-file pass below assigns globally-consistent speaker labels.
+        set_suppressed(True)
         if on_status is not None:
-            on_status(f"direct mode: chunk {index} start={offset:.2f}s duration={current_duration:.2f}s")
-        if use_language_subchunks and current_duration > language_subchunk_seconds:
-            sub_offset = 0.0
-            sub_index = 0
-            while sub_offset < current_duration:
-                sub_index += 1
-                sub_duration = min(language_subchunk_seconds, max(0.0, current_duration - sub_offset))
-                if sub_duration <= 0.0:
-                    break
-                sub_audio = slice_audio_chunk(audio, sub_offset, sub_duration)
-                if on_status is not None:
-                    on_status(
-                        f"direct mode: chunk {index}.{sub_index} start={offset + sub_offset:.2f}s "
-                        f"duration={sub_duration:.2f}s language=auto"
-                    )
-                text = transcribe(sub_audio, language=None, channel_mode=cfg.source_channel_mode)
+            on_status("direct mode: whole-file diarization (per-chunk diarization suppressed)")
+    try:
+        while offset < duration or (index == 0 and duration == 0.0):
+            index += 1
+            current_duration = duration if not use_chunked else min(resolved_chunk_seconds, max(0.0, duration - offset))
+            if current_duration <= 0.0:
+                break
+            audio = full_audio if not use_chunked else slice_audio_chunk(full_audio, offset, current_duration)
+            if on_status is not None:
+                on_status(f"direct mode: chunk {index} start={offset:.2f}s duration={current_duration:.2f}s")
+            if use_language_subchunks and current_duration > language_subchunk_seconds:
+                sub_offset = 0.0
+                sub_index = 0
+                while sub_offset < current_duration:
+                    sub_index += 1
+                    sub_duration = min(language_subchunk_seconds, max(0.0, current_duration - sub_offset))
+                    if sub_duration <= 0.0:
+                        break
+                    sub_audio = slice_audio_chunk(audio, sub_offset, sub_duration)
+                    if on_status is not None:
+                        on_status(
+                            f"direct mode: chunk {index}.{sub_index} start={offset + sub_offset:.2f}s "
+                            f"duration={sub_duration:.2f}s language=auto"
+                        )
+                    text = transcribe(sub_audio, language=None, channel_mode=cfg.source_channel_mode)
+                    meta = get_meta()
+                    if not isinstance(meta, dict):
+                        meta = {}
+                    meta = enrich_absolute_timestamps(meta, offset + sub_offset)
+                    meta["direct_parent_chunk_index"] = int(index)
+                    meta["direct_language_subchunk_index"] = int(sub_index)
+                    texts.append(str(text or "").strip())
+                    metas.append(meta)
+                    sub_offset += language_subchunk_seconds
+                    _emit_progress(offset + min(sub_offset, current_duration))
+            else:
+                text = transcribe(audio, language=cfg.source_language, channel_mode=cfg.source_channel_mode)
                 meta = get_meta()
                 if not isinstance(meta, dict):
                     meta = {}
-                meta = enrich_absolute_timestamps(meta, offset + sub_offset)
-                meta["direct_parent_chunk_index"] = int(index)
-                meta["direct_language_subchunk_index"] = int(sub_index)
+                meta = enrich_absolute_timestamps(meta, offset)
                 texts.append(str(text or "").strip())
                 metas.append(meta)
-                sub_offset += language_subchunk_seconds
-                _emit_progress(offset + min(sub_offset, current_duration))
-        else:
-            text = transcribe(audio, language=cfg.source_language, channel_mode=cfg.source_channel_mode)
-            meta = get_meta()
-            if not isinstance(meta, dict):
-                meta = {}
-            meta = enrich_absolute_timestamps(meta, offset)
-            texts.append(str(text or "").strip())
-            metas.append(meta)
-            _emit_progress(offset + current_duration)
-        if not use_chunked:
-            break
-        offset += resolved_chunk_seconds
+                _emit_progress(offset + current_duration)
+            if not use_chunked:
+                break
+            offset += resolved_chunk_seconds
+    finally:
+        if whole_file_active:
+            set_suppressed(False)
 
     text = "\n".join((item for item in texts if item)).strip()
-    speaker_reconciliation = reconcile_direct_speaker_profiles(
-        transcriber,
-        metas,
-        threshold=float(max(0.0, speaker_profile_reconcile_threshold)),
-    )
     token_timestamps: list[dict[str, object]] = []
     detected_language = ""
     alignment_language = ""
@@ -298,6 +363,41 @@ def run_direct_transcription(
         rows = meta.get("token_timestamps")
         if isinstance(rows, list):
             token_timestamps.extend([dict(row) for row in rows if isinstance(row, dict)])
+
+    if whole_file_active:
+        # One whole-file diarization pass -> globally-consistent labels assigned by time.
+        # No cross-window profile re-cluster (its weaker pyannote/embedding is what
+        # collapsed distinct speakers); reconciliation is intentionally skipped.
+        if on_status is not None:
+            on_status("direct mode: running whole-file diarization pass")
+        turns = diarize_whole_file(full_audio, cfg.source_channel_mode)
+        assigned = _assign_global_speakers(token_timestamps, turns)
+        speaker_count = len({str(t.get("speaker") or "") for t in turns if str(t.get("speaker") or "")})
+        if on_status is not None:
+            on_status(
+                f"direct mode: whole-file diarization assigned {assigned}/{len(token_timestamps)} "
+                f"tokens across {speaker_count} speaker(s)"
+            )
+        speaker_reconciliation = {
+            "status": "whole_file_diarization",
+            "merged_count": 0,
+            "remap": {},
+            "turn_count": len(turns),
+            "speaker_count": speaker_count,
+            "tokens_assigned": assigned,
+        }
+    else:
+        speaker_reconciliation = reconcile_direct_speaker_profiles(
+            transcriber,
+            metas,
+            threshold=float(max(0.0, speaker_profile_reconcile_threshold)),
+        )
+        # reconcile may rewrite metas in place; re-extract so combined tokens reflect it.
+        token_timestamps = []
+        for meta in metas:
+            rows = meta.get("token_timestamps")
+            if isinstance(rows, list):
+                token_timestamps.extend([dict(row) for row in rows if isinstance(row, dict)])
     combined_meta: dict[str, object] = {
         "elapsed_seconds": 0.0,
         "token_timestamps": token_timestamps,

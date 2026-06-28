@@ -170,6 +170,7 @@ def _build_whisperx(config: RuntimeConfig, *, device_override: Optional[str], co
         speaker_profile_model=str(getattr(config, 'whisperx_speaker_profile_model', 'pyannote/embedding') or 'pyannote/embedding'),
         speaker_speechbrain_model=str(getattr(config, 'whisperx_speaker_speechbrain_model', 'speechbrain/spkrec-ecapa-voxceleb') or 'speechbrain/spkrec-ecapa-voxceleb'),
         speaker_nemo_model=str(getattr(config, 'whisperx_speaker_nemo_model', 'nvidia/speakerverification_en_titanet_large') or 'nvidia/speakerverification_en_titanet_large'),
+        speaker_wespeaker_model=str(getattr(config, 'whisperx_speaker_wespeaker_model', 'pyannote/wespeaker-voxceleb-resnet34-lm') or 'pyannote/wespeaker-voxceleb-resnet34-lm'),
         speaker_profile_match_threshold=float(getattr(config, 'whisperx_speaker_profile_match_threshold', 0.72) or 0.72),
         speaker_profile_min_seconds=float(getattr(config, 'whisperx_speaker_profile_min_seconds', 2.0) or 2.0),
         speaker_realtime_candidate_seconds=float(getattr(config, 'whisperx_speaker_realtime_candidate_seconds', 6.0) or 6.0),
