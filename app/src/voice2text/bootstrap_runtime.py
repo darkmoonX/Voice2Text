@@ -263,6 +263,13 @@ def run_qt_app(cfg: RuntimeConfig) -> int:
         if changed_keys:
             logger.info("Loaded persisted settings: %s", sorted(changed_keys))
 
+    # Seed per-language defaults (e.g. zh reconcile_threshold 0.88) for fields the user left at
+    # the global default. Runs after CLI + persisted so explicit choices still win.
+    from .language_defaults import apply_language_defaults
+    lang_applied = apply_language_defaults(cfg)
+    if lang_applied:
+        logger.info("Applied per-language defaults (%s): %s", cfg.source_language, sorted(lang_applied))
+
     configure_windows_dll_search_paths(cfg, on_status=lambda msg: logger.info(msg))
     if bool(getattr(cfg, "debug_mode", False)):
         os.environ["VOICE2TEXT_TRACE_WHISPERX"] = "1"
