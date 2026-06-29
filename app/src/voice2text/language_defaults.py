@@ -19,10 +19,25 @@ from __future__ import annotations
 from .config import RuntimeConfig
 
 # Resolved-language-key -> {RuntimeConfig field: language-appropriate default}.
-# Only list fields that genuinely diverge from the global default for that language.
+# Only list fields where the global default is wrong/risky for that language.
+#
+# NOT here on purpose:
+#  - Alignment model/device: already resolved per-language INSIDE the provider
+#    (`_effective_alignment_model` + `whisperx_english_align_large` / `whisperx_zh_align_wbbbbb`),
+#    and it resolves at alignment time from the detected language so it works under auto-detect
+#    too. Seeding `whisperx_alignment_model` here would be the explicit override that BYPASSES
+#    that better logic. Leave it to the provider.
+#  - assign gate (`match_threshold`): raising it for zh over-fragments the dominant speaker
+#    (probe-confirmed); keep the global 0.72.
 LANGUAGE_DEFAULTS: dict[str, dict[str, object]] = {
     "zh": {
+        # The global 0.52 merges distinct zh speakers (cross-cos ~0.78) back into one every
+        # window. 0.88 (same~0.95/cross~0.78 gap) -> Bn realtime 55->90%. (active: 0.52 != 0.88)
         "whisperx_speaker_profile_reconcile_threshold": 0.88,
+        # Protective guard (currently inert: global default is already 2.0). zh needs >= 2.0 —
+        # min_seconds 0.8 silently suppressed CJK speakers (a real past regression). If the
+        # global default is ever lowered (e.g. to recover English minorities), this keeps zh at 2.0.
+        "whisperx_speaker_profile_min_seconds": 2.0,
     },
 }
 
