@@ -65,6 +65,8 @@ class WhisperXTranscriber:
         speaker_profile_min_seconds: float = 2.0,
         speaker_realtime_candidate_seconds: float = 6.0,
         speaker_realtime_candidate_samples: int = 8,
+        speaker_realtime_candidate_match_threshold: float = 0.0,
+        speaker_realtime_update_match_threshold: float = 0.0,
         speaker_realtime_visible_seconds: float = 24.0,
         speaker_realtime_visible_samples: int = 16,
         speaker_profile_reconcile_threshold: float = 0.52,
@@ -159,6 +161,8 @@ class WhisperXTranscriber:
         self._speaker_profile_min_seconds = float(max(0.2, speaker_profile_min_seconds))
         self._speaker_realtime_candidate_seconds = float(max(0.0, speaker_realtime_candidate_seconds))
         self._speaker_realtime_candidate_samples = int(max(1, speaker_realtime_candidate_samples))
+        self._speaker_realtime_candidate_match_threshold = float(max(0.0, speaker_realtime_candidate_match_threshold))
+        self._speaker_realtime_update_match_threshold = float(max(0.0, speaker_realtime_update_match_threshold))
         self._speaker_realtime_visible_seconds = float(max(0.0, speaker_realtime_visible_seconds))
         self._speaker_realtime_visible_samples = int(max(1, speaker_realtime_visible_samples))
         self._speaker_profile_reconcile_threshold = float(
@@ -253,6 +257,8 @@ class WhisperXTranscriber:
                     min_seconds=self._speaker_profile_min_seconds,
                     realtime_candidate_seconds=self._speaker_realtime_candidate_seconds,
                     realtime_candidate_samples=self._speaker_realtime_candidate_samples,
+                    realtime_candidate_match_threshold=self._speaker_realtime_candidate_match_threshold,
+                    realtime_update_match_threshold=self._speaker_realtime_update_match_threshold,
                     realtime_visible_seconds=self._speaker_realtime_visible_seconds,
                     realtime_visible_samples=self._speaker_realtime_visible_samples,
                     reconcile_threshold=self._speaker_profile_reconcile_threshold,

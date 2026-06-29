@@ -65,6 +65,7 @@ class SpeakerProfileStore:
         candidate_min_seconds: float = 0.0,
         candidate_min_samples: int = 1,
         candidate_threshold: float | None = None,
+        update_threshold: float | None = None,
         allow_update: bool = True,
     ) -> SpeakerMatchResult:
         normalized = _normalize_embedding(embedding)
@@ -72,6 +73,14 @@ class SpeakerProfileStore:
             return SpeakerMatchResult(profile_id="", similarity=-1.0, created=False)
 
         min_threshold = float(max(0.0, min(0.999, threshold)))
+        # Round 0045 step 1b: decouple ASSIGN from UPDATE. A window is assigned to (displayed
+        # as) the nearest profile at min_threshold, but its embedding is only blended INTO the
+        # centroid when similarity >= update_threshold. This keeps a profile's centroid "pure"
+        # so it does not drift/blend toward other speakers and snowball into absorbing everyone.
+        # update_threshold=None preserves legacy behavior (update == assign).
+        effective_update_threshold = (
+            float(max(0.0, min(0.999, update_threshold))) if update_threshold is not None else min_threshold
+        )
         update_weight = float(max(0.25, min(12.0, duration_seconds)))
         label = str(observed_label or "").strip()
 
@@ -101,12 +110,15 @@ class SpeakerProfileStore:
 
             if best_index >= 0 and best_similarity >= min_threshold:
                 profile = self._profiles[best_index]
-                old_centroid = _normalize_embedding(np.asarray(profile.get("centroid") or [], dtype=np.float32))
-                old_weight = float(profile.get("weight", 0.0) or 0.0)
-                merged = old_centroid * old_weight + normalized * update_weight
-                merged = _normalize_embedding(merged)
-                profile["centroid"] = merged.tolist()
-                profile["weight"] = float(old_weight + update_weight)
+                # Always count the observation (maturity/display), but only blend the embedding
+                # into the centroid when the match is strong enough (>= update threshold).
+                if best_similarity >= effective_update_threshold:
+                    old_centroid = _normalize_embedding(np.asarray(profile.get("centroid") or [], dtype=np.float32))
+                    old_weight = float(profile.get("weight", 0.0) or 0.0)
+                    merged = old_centroid * old_weight + normalized * update_weight
+                    merged = _normalize_embedding(merged)
+                    profile["centroid"] = merged.tolist()
+                    profile["weight"] = float(old_weight + update_weight)
                 profile["samples"] = int(profile.get("samples", 0) or 0) + 1
                 profile["total_seconds"] = float(profile.get("total_seconds", 0.0) or 0.0) + float(max(0.0, duration_seconds))
                 if label:

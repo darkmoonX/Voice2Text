@@ -68,6 +68,13 @@ class RuntimeConfig:
     # attribution against ground truth, not speaker count.
     whisperx_speaker_realtime_candidate_seconds: float = 6.0
     whisperx_speaker_realtime_candidate_samples: int = 8
+    # 0.0 = derive from match_threshold-0.05; lower (e.g. 0.55) reduces candidate fragmentation
+    # so minority speakers' windows concentrate and reach the promotion floor (realtime only).
+    whisperx_speaker_realtime_candidate_match_threshold: float = 0.0
+    # 0.0 = blend into a profile centroid at the assign gate (legacy); higher (e.g. 0.85) only
+    # blends on a strong match so centroids stay pure and the dominant profile cannot drift to
+    # absorb other speakers (realtime only).
+    whisperx_speaker_realtime_update_match_threshold: float = 0.0
     whisperx_speaker_realtime_visible_seconds: float = 24.0
     whisperx_speaker_realtime_visible_samples: int = 16
     # Round 0023 learn-path quality gate: when on, gibberish / music-tail / degenerate /

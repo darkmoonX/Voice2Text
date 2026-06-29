@@ -58,6 +58,15 @@ class SpeakerIdentityConfig:
     # chunks ignore these and use a fixed conservative policy (see _profile_evidence_policy).
     realtime_candidate_seconds: float = 6.0
     realtime_candidate_samples: int = 8
+    # Round 0045 step 1: decouple the realtime candidate-match gate from match_threshold.
+    # 0.0 = keep the legacy derived value (match_threshold - 0.05). A lower value raises the
+    # probability that a speaker's noisy short-clip windows match their OWN prior candidate
+    # (less fragmentation -> minority candidates reach the samples floor -> get promoted).
+    realtime_candidate_match_threshold: float = 0.0
+    # Round 0045 step 1b: assign-vs-update decoupling (realtime). 0.0 = update at the assign
+    # gate (legacy). Higher (e.g. 0.85) blends a clip into a profile centroid only on a strong
+    # match, keeping centroids pure so the dominant profile cannot drift and absorb everyone.
+    realtime_update_match_threshold: float = 0.0
     realtime_visible_seconds: float = 24.0
     realtime_visible_samples: int = 16
 
@@ -363,6 +372,8 @@ class SpeakerIdentityEngine:
         self._reconcile_threshold = float(max(0.0, min(0.999, config.reconcile_threshold)))
         self._rt_candidate_seconds = float(max(0.0, getattr(config, "realtime_candidate_seconds", 6.0)))
         self._rt_candidate_samples = int(max(1, getattr(config, "realtime_candidate_samples", 8)))
+        self._rt_candidate_match_threshold = float(max(0.0, getattr(config, "realtime_candidate_match_threshold", 0.0)))
+        self._rt_update_match_threshold = float(max(0.0, getattr(config, "realtime_update_match_threshold", 0.0)))
         self._rt_visible_seconds = float(max(0.0, getattr(config, "realtime_visible_seconds", 24.0)))
         self._rt_visible_samples = int(max(1, getattr(config, "realtime_visible_samples", 16)))
         self._quality_gate = config.quality_gate or ClipQualityConfig()
@@ -530,7 +541,8 @@ class SpeakerIdentityEngine:
             candidate_min_samples=candidate_min_samples,
         )
         visible_alias_threshold = float(max(self._match_threshold, min(0.82, self._match_threshold + 0.04)))
-        candidate_threshold = float(max(0.0, self._match_threshold - 0.05))
+        candidate_threshold = self._resolve_candidate_threshold(audio_seconds)
+        update_threshold = self._resolve_update_threshold(audio_seconds)
 
         for (speaker, spans) in spans_by_speaker.items():
             clip = self._collect_speaker_clip(audio_f32, spans)
@@ -569,6 +581,7 @@ class SpeakerIdentityEngine:
                 candidate_min_seconds=candidate_min_seconds,
                 candidate_min_samples=candidate_min_samples,
                 candidate_threshold=candidate_threshold,
+                update_threshold=update_threshold,
                 allow_update=learn_allowed,
             )
             if not matched.profile_id:
@@ -721,6 +734,26 @@ class SpeakerIdentityEngine:
                 f"profile_total={stats.get('profile_count', 0)}"
             )
         return segments
+
+    def _resolve_candidate_threshold(self, audio_seconds: float) -> float:
+        """Similarity gate for matching a clip to an existing candidate (not a profile).
+
+        Realtime windows can override it via realtime_candidate_match_threshold (0.0 keeps
+        the legacy match_threshold-0.05). Lowering it concentrates a speaker's fragmented
+        short-clip windows onto one candidate so it can reach the promotion samples floor.
+        Direct chunks (window > 15s) always keep the legacy derived value.
+        """
+        window_seconds = float(max(0.0, audio_seconds))
+        if window_seconds <= 15.0 and self._rt_candidate_match_threshold > 0.0:
+            return float(max(0.0, min(0.999, self._rt_candidate_match_threshold)))
+        return float(max(0.0, self._match_threshold - 0.05))
+
+    def _resolve_update_threshold(self, audio_seconds: float) -> float | None:
+        """Centroid-update gate (realtime only). None => update at the assign gate (legacy)."""
+        window_seconds = float(max(0.0, audio_seconds))
+        if window_seconds <= 15.0 and self._rt_update_match_threshold > 0.0:
+            return float(max(0.0, min(0.999, self._rt_update_match_threshold)))
+        return None
 
     def _profile_evidence_policy(self, *, audio_seconds: float, min_seconds: float) -> tuple[float, int, float]:
         """Return candidate evidence thresholds for long direct chunks vs rolling windows.

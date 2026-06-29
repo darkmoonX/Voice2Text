@@ -53,6 +53,8 @@ _PERSIST_KEYS = {
     "whisperx_speaker_profile_min_seconds",
     "whisperx_speaker_realtime_candidate_seconds",
     "whisperx_speaker_realtime_candidate_samples",
+    "whisperx_speaker_realtime_candidate_match_threshold",
+    "whisperx_speaker_realtime_update_match_threshold",
     "whisperx_speaker_realtime_visible_seconds",
     "whisperx_speaker_realtime_visible_samples",
     "whisperx_speaker_profile_reconcile_threshold",

@@ -175,6 +175,8 @@ def _build_whisperx(config: RuntimeConfig, *, device_override: Optional[str], co
         speaker_profile_min_seconds=float(getattr(config, 'whisperx_speaker_profile_min_seconds', 2.0) or 2.0),
         speaker_realtime_candidate_seconds=float(getattr(config, 'whisperx_speaker_realtime_candidate_seconds', 6.0) or 6.0),
         speaker_realtime_candidate_samples=int(getattr(config, 'whisperx_speaker_realtime_candidate_samples', 8) or 8),
+        speaker_realtime_candidate_match_threshold=float(getattr(config, 'whisperx_speaker_realtime_candidate_match_threshold', 0.0) or 0.0),
+        speaker_realtime_update_match_threshold=float(getattr(config, 'whisperx_speaker_realtime_update_match_threshold', 0.0) or 0.0),
         speaker_realtime_visible_seconds=float(getattr(config, 'whisperx_speaker_realtime_visible_seconds', 24.0) or 24.0),
         speaker_realtime_visible_samples=int(getattr(config, 'whisperx_speaker_realtime_visible_samples', 16) or 16),
         speaker_profile_reconcile_threshold=float(getattr(config, 'whisperx_speaker_profile_reconcile_threshold', 0.52) or 0.52),
