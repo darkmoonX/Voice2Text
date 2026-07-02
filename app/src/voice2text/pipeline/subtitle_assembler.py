@@ -1037,6 +1037,31 @@ class SubtitleAssembler:
         self._speaker_display_next_index = max(self._speaker_display_next_index + 1, int(display.rsplit('_', 1)[-1]) + 1)
         return display
 
+    def apply_speaker_alias_remap(self, remap: dict[str, str] | None) -> None:
+        """Round 0053: when the profile store merges/reconciles ids (`{dropped_id: kept_id}`,
+        e.g. the shipped `whisperx_speaker_profile_reconcile_threshold` auto-reconcile, or a
+        future direct-informed consolidation), keep the DISPLAYED speaker number continuous
+        instead of letting the surviving id acquire a fresh one. This is the exact mechanism
+        behind round 0046's churn: words already emitted under `dropped_id` carry an established
+        display alias; future windows assign `kept_id` instead, which -- without this hook --
+        gets its OWN fresh display number on first sight, making one continuing speaker appear to
+        split. If either side of the remap already has a display alias, both ids point to that
+        same alias going forward. Never rewrites already-emitted text (forward-only, alias
+        resolution only touches how FUTURE words with these raw ids render); safe to call every
+        window with an empty/no-op remap (byte-identical when reconcile doesn't fire)."""
+        if not remap:
+            return
+        for (old_id, new_id) in remap.items():
+            old_token = str(old_id or '').strip()
+            new_token = str(new_id or '').strip()
+            if not old_token or not new_token or old_token == new_token:
+                continue
+            alias = self._speaker_display_map.get(old_token) or self._speaker_display_map.get(new_token)
+            if not alias:
+                continue
+            self._speaker_display_map[old_token] = alias
+            self._speaker_display_map[new_token] = alias
+
 
     @staticmethod
     def _is_punct(token: str) -> bool:

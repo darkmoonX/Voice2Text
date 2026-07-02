@@ -419,7 +419,17 @@ class TranscriptionLoopEngine:
                                 try:
                                     refresh_fn = getattr(refresh_transcriber, "refresh_speaker_inventory", None)
                                     if callable(refresh_fn):
-                                        refresh_fn(refresh_chunk, channel_mode=refresh_channel_mode)
+                                        refresh_result = refresh_fn(refresh_chunk, channel_mode=refresh_channel_mode)
+                                        # Round 0053: propagate any merge this refresh performed into
+                                        # display-label continuity (round 0046's remap was previously
+                                        # discarded here -- this is what makes a merge-only refresh
+                                        # (alpha=0, merge=True) safe to A/B: the surviving profile id
+                                        # no longer needs a fresh on-screen number). Only touches how
+                                        # FUTURE words render; never rewrites already-emitted text.
+                                        if isinstance(refresh_result, dict):
+                                            refresh_remap = refresh_result.get("remap")
+                                            if isinstance(refresh_remap, dict) and refresh_remap:
+                                                self._deps.subtitle_assembler.apply_speaker_alias_remap(refresh_remap)
                                 except Exception:
                                     pass
                                 finally:
@@ -544,6 +554,18 @@ class TranscriptionLoopEngine:
                             enriched_rows.append(item)
                         transcription_meta["token_timestamps"] = enriched_rows
                     timing["timestamp_enrich_seconds"] = time.monotonic() - stage_started_at
+
+                    # Round 0053: propagate any profile-store merge/reconcile this window (e.g.
+                    # the shipped auto-reconcile threshold) into stable display-label continuity
+                    # BEFORE this window's words are rendered, so a surviving profile id doesn't
+                    # acquire a fresh on-screen number for a speaker that's already displayed.
+                    speaker_profile_stats = transcription_meta.get("speaker_profile_stats")
+                    if isinstance(speaker_profile_stats, dict):
+                        auto_reconcile = speaker_profile_stats.get("auto_reconcile")
+                        if isinstance(auto_reconcile, dict):
+                            reconcile_remap = auto_reconcile.get("remap")
+                            if isinstance(reconcile_remap, dict) and reconcile_remap:
+                                self._deps.subtitle_assembler.apply_speaker_alias_remap(reconcile_remap)
 
                     stage_started_at = time.monotonic()
                     source_rolling = self._deps.subtitle_assembler.merge_incremental_text(
