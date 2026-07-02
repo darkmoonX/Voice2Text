@@ -24,6 +24,33 @@ from .speaker_identity import SpeakerIdentityConfig, SpeakerIdentityEngine
 import re
 
 
+def _parse_temperature_schedule(text: str | None) -> list[float] | None:
+    """Round 0049: parse a comma-separated temperature-fallback schedule ("0.0,0.2,0.4").
+
+    Returns None for empty/unparsable input (= keep the library default schedule). Values are
+    clamped to [0.0, 1.0], deduped and sorted ascending; 0.0 is prepended when missing because
+    the schedule's semantics require a greedy first pass before any fallback re-decode.
+    """
+    raw = str(text or "").strip()
+    if not raw:
+        return None
+    values: list[float] = []
+    for part in raw.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        try:
+            values.append(min(1.0, max(0.0, float(part))))
+        except ValueError:
+            return None
+    if not values:
+        return None
+    schedule = sorted(set(values))
+    if schedule[0] != 0.0:
+        schedule.insert(0, 0.0)
+    return schedule
+
+
 class WhisperXTranscriber:
     _ALIGN_CUDA_PROBE_TIMEOUT_SECONDS = 120.0
     # Delay before retrying an inconclusive (likely GPU-contention) probe attempt.
@@ -41,6 +68,10 @@ class WhisperXTranscriber:
         cpu_threads: int = 0,
         beam_size: int = 5,
         batch_size: int = 4,
+        asr_temperatures: str = "",
+        asr_log_prob_threshold: float | None = None,
+        asr_compression_ratio_threshold: float | None = None,
+        asr_no_speech_threshold: float | None = None,
         enable_phoneme_asr: bool = True,
         enable_forced_alignment: bool = True,
         enable_vad: bool = True,
@@ -126,6 +157,22 @@ class WhisperXTranscriber:
         self._cpu_threads = int(max(0, cpu_threads))
         self._beam_size = max(1, int(beam_size))
         self._batch_size = max(1, int(batch_size))
+        # Round 0049: temperature-fallback overrides. Parsed once here; None/empty keeps
+        # the library defaults so the unset path stays byte-identical. An unparsable
+        # schedule string is reported at model-load time (see _build_asr_options).
+        self._asr_temperatures_raw = str(asr_temperatures or "")
+        self._asr_temperatures = _parse_temperature_schedule(asr_temperatures)
+        self._asr_log_prob_threshold = (
+            float(asr_log_prob_threshold) if asr_log_prob_threshold is not None else None
+        )
+        self._asr_compression_ratio_threshold = (
+            float(asr_compression_ratio_threshold)
+            if asr_compression_ratio_threshold is not None
+            else None
+        )
+        self._asr_no_speech_threshold = (
+            float(asr_no_speech_threshold) if asr_no_speech_threshold is not None else None
+        )
         self._enable_phoneme_asr = bool(enable_phoneme_asr)
         # Rolling per-window initial_prompt (cross-window decoder context for
         # short windows). whisperx sets ASR options at load time, so a per-window
@@ -319,6 +366,20 @@ class WhisperXTranscriber:
         if isinstance(defaults, dict):
             options.update(defaults)
         options["beam_size"] = self._beam_size
+        # Round 0049: temperature-fallback overrides (None = library default, byte-identical).
+        if self._asr_temperatures_raw.strip() and self._asr_temperatures is None:
+            self._emit(
+                f"[asr-options] ignoring unparsable temperatures override: {self._asr_temperatures_raw!r}"
+            )
+        if self._asr_temperatures is not None:
+            options["temperatures"] = list(self._asr_temperatures)
+            self._emit(f"[asr-options] temperature-fallback schedule override: {self._asr_temperatures}")
+        if self._asr_log_prob_threshold is not None:
+            options["log_prob_threshold"] = float(self._asr_log_prob_threshold)
+        if self._asr_compression_ratio_threshold is not None:
+            options["compression_ratio_threshold"] = float(self._asr_compression_ratio_threshold)
+        if self._asr_no_speech_threshold is not None:
+            options["no_speech_threshold"] = float(self._asr_no_speech_threshold)
         return options
 
     def _resolve_default_asr_options(self) -> dict[str, object]:

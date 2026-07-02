@@ -153,6 +153,14 @@ class RuntimeConfig:
     # decode context for cross-window continuity (code-switch / proper nouns).
     # 0 disables (byte-identical to no prompt).
     whisperx_rolling_prompt_chars: int = 0
+    # Round 0049: surgical overrides for faster-whisper's temperature-fallback re-decode
+    # (the hard-window latency source). Empty/None = library defaults (byte-identical).
+    # NOTE: the legacy whisper_logprob_thold/whisper_no_speech_thold/whisper_temperature
+    # fields above are pre-WhisperX dead knobs (no stt/ consumer) — these are the wired ones.
+    whisperx_asr_temperatures: str = ""
+    whisperx_asr_log_prob_threshold: Optional[float] = None
+    whisperx_asr_compression_ratio_threshold: Optional[float] = None
+    whisperx_asr_no_speech_threshold: Optional[float] = None
     max_lines: int = 10
     overlay_width: int = 1200
     overlay_height: int = 320
