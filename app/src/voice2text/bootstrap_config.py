@@ -97,6 +97,19 @@ def build_runtime_config(args: argparse.Namespace) -> RuntimeConfig:
         whisperx_speaker_realtime_refresh_match_mode=str(
             getattr(args, "speaker_realtime_refresh_match_mode", "argmax") or "argmax"
         ),
+        whisperx_speaker_count_hint_enabled=bool(getattr(args, "speaker_count_hint_enabled", False)),
+        whisperx_speaker_count_hint_seconds=max(
+            0.1,
+            float(getattr(args, "speaker_count_hint_seconds", 60.0) or 60.0),
+        ),
+        whisperx_speaker_count_hint_window_seconds=max(
+            1.0,
+            float(getattr(args, "speaker_count_hint_window_seconds", 300.0) or 300.0),
+        ),
+        whisperx_speaker_count_hint_sliver_floor_seconds=max(
+            0.0,
+            float(getattr(args, "speaker_count_hint_sliver_floor_seconds", 1.5) or 0.0),
+        ),
         whisperx_speaker_profile_quality_gate_enabled=bool(getattr(args, "whisperx_speaker_profile_quality_gate_enabled", False)),
         runtime_preset=str(getattr(args, "preset", "") or ""),
         whisperx_alignment_model=args.whisperx_alignment_model,
@@ -107,6 +120,14 @@ def build_runtime_config(args: argparse.Namespace) -> RuntimeConfig:
         whisperx_align_guard=str(getattr(args, "whisperx_align_guard", "safe") or "safe"),
         whisperx_diarization_device=args.whisperx_diarization_device,
         whisperx_diarization_model=args.whisperx_diarization_model,
+        whisperx_diarization_min_speakers=max(
+            0,
+            int(0 if getattr(args, "diarization_min_speakers", None) is None else args.diarization_min_speakers),
+        ),
+        whisperx_diarization_max_speakers=max(
+            0,
+            int(0 if getattr(args, "diarization_max_speakers", None) is None else args.diarization_max_speakers),
+        ),
         whisperx_hf_token=args.whisperx_hf_token,
         cpu_fallback_on_cuda_error=not args.no_cpu_fallback,
         cuda_compat_source_dll=args.cublas_source_dll,

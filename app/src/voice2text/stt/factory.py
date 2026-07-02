@@ -168,6 +168,8 @@ def _build_whisperx(config: RuntimeConfig, *, device_override: Optional[str], co
         diarization_device=str(getattr(config, 'whisperx_diarization_device', 'auto') or 'auto'),
         source_language_hint=str(getattr(config, 'source_language', '') or ''),
         diarization_model=str(getattr(config, 'whisperx_diarization_model', 'pyannote/speaker-diarization-3.1') or 'pyannote/speaker-diarization-3.1'),
+        diarization_min_speakers=int(max(0, getattr(config, 'whisperx_diarization_min_speakers', 0) or 0)),
+        diarization_max_speakers=int(max(0, getattr(config, 'whisperx_diarization_max_speakers', 0) or 0)),
         hf_token=str(getattr(config, 'whisperx_hf_token', '') or ''),
         speaker_profile_enabled=bool(getattr(config, 'whisperx_speaker_profile_enabled', True)),
         speaker_profile_backend=str(getattr(config, 'whisperx_speaker_profile_backend', 'pyannote') or 'pyannote'),

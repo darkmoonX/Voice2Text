@@ -258,6 +258,9 @@ class SettingsDialog(QDialog):
         self._whisperx_align_guard_revert_btn = QPushButton()
         self._whisperx_align_guard_revert_btn.clicked.connect(self._on_align_guard_revert)
         self._whisperx_diar_device_combo = create_whisperx_diarization_device_combo()
+        self._whisperx_expected_speakers_spin = QSpinBox()
+        self._whisperx_expected_speakers_spin.setRange(0, 20)
+        self._whisperx_expected_speakers_spin.valueChanged.connect(self._on_bundled_field_edited)
         self._whisperx_align_model_edit.setEditable(True)
         self._whisperx_align_model_edit.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
         self._whisperx_align_model_edit.lineEdit().setPlaceholderText("auto (leave empty) or HF repo id")
@@ -385,6 +388,7 @@ class SettingsDialog(QDialog):
         form_left.addRow(self._t("whisperx_zh_align_wbbbbb"), self._whisperx_zh_align_wbbbbb_check)
         # --- Diarization group (kept contiguous) ---
         form_left.addRow(self._t("whisperx_diarization"), self._whisperx_diarization_check)
+        form_left.addRow(self._t("whisperx_expected_speakers"), self._whisperx_expected_speakers_spin)
         form_left.addRow("WhisperX Diarization device", self._whisperx_diar_device_combo)
         form_left.addRow(self._t("whisperx_diar_model"), self._whisperx_diar_model_edit)
         form_left.addRow(self._t("whisperx_hf_token"), self._whisperx_hf_token_edit)
@@ -524,6 +528,9 @@ class SettingsDialog(QDialog):
         self._set_combo_data(self._whisperx_align_guard_combo, str(getattr(cfg, 'whisperx_align_guard', 'safe') or 'safe'))
         self._update_align_guard_state()
         self._set_combo_data(self._whisperx_diar_device_combo, str(getattr(cfg, 'whisperx_diarization_device', 'auto') or 'auto'))
+        min_speakers = int(max(0, getattr(cfg, "whisperx_diarization_min_speakers", 0) or 0))
+        max_speakers = int(max(0, getattr(cfg, "whisperx_diarization_max_speakers", 0) or 0))
+        self._whisperx_expected_speakers_spin.setValue(min_speakers if min_speakers == max_speakers else 0)
         self._set_alignment_model_value(cfg.whisperx_alignment_model)
         self._whisperx_diar_model_edit.setText(cfg.whisperx_diarization_model)
         self._whisperx_hf_token_edit.setText(cfg.whisperx_hf_token)
@@ -967,6 +974,7 @@ class SettingsDialog(QDialog):
             self._whisperx_align_guard_combo: "Alignment CUDA safety guard. safe=downgrade CUDA alignment to CPU on Windows (default, avoids torchaudio/wav2vec2 crashes). unsafe-cuda=keep CUDA alignment (diagnostics only; may crash).",
             self._whisperx_align_guard_revert_btn: "Revert the alignment guard back to the safe default.",
             self._whisperx_diar_device_combo: "Diarization device: auto follows ASR device, cpu lowers VRAM pressure, cuda improves throughput.",
+            self._whisperx_expected_speakers_spin: "Expected speaker count. 0=unknown/auto; positive values feed diarization and cap live speaker profiles.",
             self._whisperx_align_model_edit: "Alignment model. Empty=auto; choose suggestion or type HF repo id.",
             self._whisperx_diar_model_edit: "Diarization model id.",
             self._whisperx_hf_token_edit: "Hugging Face token for restricted/private models.",
@@ -1039,6 +1047,7 @@ class SettingsDialog(QDialog):
             whisperx_align_guard=str(self._whisperx_align_guard_combo.currentData() or 'safe'),
             whisperx_diarization_device=str(self._whisperx_diar_device_combo.currentData() or 'auto'),
             whisperx_diarization_model=self._whisperx_diar_model_edit.text(),
+            whisperx_diarization_expected_speakers=int(self._whisperx_expected_speakers_spin.value()),
             whisperx_hf_token=self._whisperx_hf_token_edit.text(),
             whisperx_speaker_profile_backend=str(self._whisperx_speaker_backend_combo.currentData() or "pyannote"),
             source_language=str(self._source_language_combo.currentData()),

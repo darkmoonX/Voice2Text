@@ -86,6 +86,8 @@ class WhisperXTranscriber:
         diarization_device: str = "auto",
         source_language_hint: str | None = None,
         diarization_model: str = "pyannote/speaker-diarization-3.1",
+        diarization_min_speakers: int = 0,
+        diarization_max_speakers: int = 0,
         hf_token: str = "",
         speaker_profile_enabled: bool = True,
         speaker_profile_backend: str = "pyannote",
@@ -197,6 +199,8 @@ class WhisperXTranscriber:
         self._diarization_model = self._normalize_diarization_model_ref(
             diarization_model or "pyannote/speaker-diarization-3.1"
         )
+        self._diar_min_speakers = int(max(0, diarization_min_speakers))
+        self._diar_max_speakers = int(max(0, diarization_max_speakers))
         self._hf_token = (hf_token or "").strip()
         self._speaker_profile_enabled = bool(speaker_profile_enabled)
         self._speaker_profile_backend = (speaker_profile_backend or "pyannote").strip()
@@ -332,6 +336,7 @@ class WhisperXTranscriber:
                     realtime_refresh_min_cluster_seconds=self._speaker_realtime_refresh_min_cluster_seconds,
                     realtime_refresh_merge=self._speaker_realtime_refresh_merge,
                     realtime_refresh_match_mode=self._speaker_realtime_refresh_match_mode,
+                    max_speakers_hint=self._diar_max_speakers,
                     reconcile_threshold=self._speaker_profile_reconcile_threshold,
                     model_root=str(self._model_root),
                     device=self._diarization_device,
@@ -1371,7 +1376,7 @@ class WhisperXTranscriber:
             if pipeline is None:
                 return []
             started_at = time.perf_counter()
-            diarize_segments = pipeline(audio_f32)
+            diarize_segments = pipeline(audio_f32, **self._diar_speaker_count_kwargs())
             turns: list[dict[str, object]] = []
             for row in diarize_segments.itertuples(index=False):
                 try:
@@ -1456,6 +1461,48 @@ class WhisperXTranscriber:
                 return {"status": "skip_failed"}
         finally:
             self._speaker_inventory_refresh_lock.release()
+
+    def estimate_speaker_count(
+        self,
+        chunk,
+        channel_mode: str = "mono",
+        *,
+        sliver_floor_seconds: float = 1.5,
+    ) -> int | None:
+        if not self._speaker_inventory_refresh_lock.acquire(blocking=False):
+            return None
+        try:
+            try:
+                if not self._enable_diarization:
+                    return None
+                turns = self.diarize_whole_file_turns(chunk, channel_mode=channel_mode, emit_status=False)
+                if not turns:
+                    return None
+                seconds_by_speaker: dict[str, float] = {}
+                for turn in turns:
+                    try:
+                        start = float(turn.get("start"))
+                        end = float(turn.get("end"))
+                        speaker = str(turn.get("speaker") or "").strip()
+                    except Exception:
+                        continue
+                    if speaker and end > start:
+                        seconds_by_speaker[speaker] = seconds_by_speaker.get(speaker, 0.0) + (end - start)
+                floor = float(max(0.0, sliver_floor_seconds))
+                count = sum(1 for seconds in seconds_by_speaker.values() if seconds >= floor)
+                return int(count) if count > 0 else None
+            except Exception:
+                return None
+        finally:
+            self._speaker_inventory_refresh_lock.release()
+
+    def set_speaker_count_cap(self, cap: int) -> None:
+        engine = getattr(self, "_speaker_identity_engine", None)
+        if engine is None:
+            return
+        store = getattr(engine, "_profile_store", None)
+        if store is not None:
+            store.set_soft_speaker_cap(int(max(0, cap)))
 
     def resolve_local_speaker(
         self,
@@ -1790,7 +1837,7 @@ class WhisperXTranscriber:
             self._last_diarization_timing["pipeline_load_seconds"] = time.perf_counter() - stage_started_at
 
             stage_started_at = time.perf_counter()
-            diarize_segments = self._diarization_pipeline(audio_f32)
+            diarize_segments = self._diarization_pipeline(audio_f32, **self._diar_speaker_count_kwargs())
             self._last_diarization_timing["pipeline_run_seconds"] = time.perf_counter() - stage_started_at
             stage_started_at = time.perf_counter()
             aligned = self._whisperx.assign_word_speakers(diarize_segments, {"segments": segments})
@@ -1817,6 +1864,16 @@ class WhisperXTranscriber:
             self._emit(f"WhisperX diarization skipped: {exc}")
             self._emit("WhisperX diarization disabled for this runtime session after initialization failure.")
             return segments
+
+    def _diar_speaker_count_kwargs(self) -> dict[str, int]:
+        kwargs: dict[str, int] = {}
+        min_speakers = int(max(0, getattr(self, "_diar_min_speakers", 0) or 0))
+        max_speakers = int(max(0, getattr(self, "_diar_max_speakers", 0) or 0))
+        if min_speakers > 0:
+            kwargs["min_speakers"] = min_speakers
+        if max_speakers > 0:
+            kwargs["max_speakers"] = max_speakers
+        return kwargs
 
     def _apply_speaker_profiles(self, audio, segments: list[dict]) -> list[dict]:
         if not self._enable_diarization:

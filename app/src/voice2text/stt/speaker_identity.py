@@ -75,6 +75,7 @@ class SpeakerIdentityConfig:
     realtime_refresh_min_cluster_seconds: float = 4.0
     realtime_refresh_merge: bool = True
     realtime_refresh_match_mode: str = "argmax"
+    max_speakers_hint: int = 0
 
 
 class _BaseEmbeddingBackend:
@@ -398,6 +399,7 @@ class SpeakerIdentityEngine:
         self._profile_store: SpeakerProfileStore | None = None
         if self._enabled:
             self._profile_store = SpeakerProfileStore(path=str(config.store_path), on_status=self._on_status)
+            self._profile_store.set_soft_speaker_cap(int(max(0, getattr(config, "max_speakers_hint", 0) or 0)))
         self._backend = self._build_backend(config)
 
     @property

@@ -48,6 +48,7 @@ class SpeakerProfileStore:
         self._path = Path(path)
         self._on_status = on_status
         self._max_profiles = max(1, int(max_profiles))
+        self._soft_speaker_cap = 0
         self._lock = threading.Lock()
         self._profiles: list[dict[str, object]] = []
         self._candidates: list[dict[str, object]] = []
@@ -133,7 +134,8 @@ class SpeakerProfileStore:
                     created=False,
                 )
 
-            if len(self._profiles) >= self._max_profiles:
+            effective_cap = self._effective_profile_cap_locked()
+            if len(self._profiles) >= effective_cap:
                 return SpeakerMatchResult(profile_id="", similarity=best_similarity, created=False)
 
             min_candidate_seconds = float(max(0.0, candidate_min_seconds))
@@ -165,6 +167,15 @@ class SpeakerProfileStore:
     def profile_count(self) -> int:
         with self._lock:
             return int(len(self._profiles))
+
+    def set_soft_speaker_cap(self, cap: int) -> None:
+        with self._lock:
+            self._soft_speaker_cap = max(0, int(cap))
+
+    def _effective_profile_cap_locked(self) -> int:
+        if self._soft_speaker_cap <= 0:
+            return int(self._max_profiles)
+        return int(min(self._max_profiles, self._soft_speaker_cap))
 
     def candidate_count(self) -> int:
         with self._lock:

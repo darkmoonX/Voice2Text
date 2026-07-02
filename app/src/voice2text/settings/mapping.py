@@ -26,6 +26,7 @@ class SettingsPayloadInput:
     whisperx_align_guard: str
     whisperx_diarization_device: str
     whisperx_diarization_model: str
+    whisperx_diarization_expected_speakers: int
     whisperx_hf_token: str
     whisperx_speaker_profile_backend: str
     source_language: str
@@ -117,6 +118,7 @@ def build_settings_updates(payload: SettingsPayloadInput, *, lang: str, hop_gt_s
     diarization_device = (payload.whisperx_diarization_device or "auto").strip().lower()
     if diarization_device not in {"auto", "cpu", "cuda"}:
         diarization_device = "auto"
+    expected_speakers = max(0, min(20, int(payload.whisperx_diarization_expected_speakers or 0)))
     speaker_profile_backend = (payload.whisperx_speaker_profile_backend or "pyannote").strip().lower()
     if speaker_profile_backend not in {"pyannote", "wespeaker", "speechbrain_ecapa", "nemo_titanet"}:
         speaker_profile_backend = "pyannote"
@@ -152,6 +154,8 @@ def build_settings_updates(payload: SettingsPayloadInput, *, lang: str, hop_gt_s
         'whisperx_align_guard': align_guard,
         'whisperx_diarization_device': diarization_device,
         'whisperx_diarization_model': payload.whisperx_diarization_model.strip() or 'pyannote/speaker-diarization-3.1',
+        'whisperx_diarization_min_speakers': expected_speakers,
+        'whisperx_diarization_max_speakers': expected_speakers,
         'whisperx_hf_token': payload.whisperx_hf_token.strip(),
         'whisperx_speaker_profile_backend': speaker_profile_backend,
         'source_mode': payload.source_mode,

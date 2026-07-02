@@ -72,6 +72,24 @@ class TranscriptionLoopEngine:
         refresh_elapsed_since_trigger = 0.0
         refresh_lock = Lock() if refresh_buffer is not None else None
         refresh_in_flight = False
+        count_hint_enabled = bool(getattr(self._deps.config, "whisperx_speaker_count_hint_enabled", False))
+        count_hint_seconds = float(
+            max(0.1, getattr(self._deps.config, "whisperx_speaker_count_hint_seconds", 60.0) or 60.0)
+        )
+        count_hint_window_seconds = float(
+            max(1.0, getattr(self._deps.config, "whisperx_speaker_count_hint_window_seconds", 300.0) or 300.0)
+        )
+        count_hint_sliver_floor_seconds = float(
+            max(0.0, getattr(self._deps.config, "whisperx_speaker_count_hint_sliver_floor_seconds", 1.5) or 0.0)
+        )
+        count_hint_buffer: bytearray | None = bytearray() if count_hint_enabled else None
+        count_hint_elapsed_since_trigger = 0.0
+        count_hint_lock = Lock() if count_hint_buffer is not None else None
+        count_hint_in_flight = False
+        observed_max_speaker_count = 0
+        operator_max_speaker_count = int(
+            max(0, getattr(self._deps.config, "whisperx_diarization_max_speakers", 0) or 0)
+        )
 
         # Round 0048: pre-commit local-diarization relabel for the live overlay. Disabled ->
         # relabel_buffer stays None -> byte-identical (no buffer upkeep, no resolver wired).
@@ -353,6 +371,9 @@ class TranscriptionLoopEngine:
                     if refresh_buffer is not None:
                         refresh_buffer.clear()
                         refresh_elapsed_since_trigger = 0.0
+                    if count_hint_buffer is not None:
+                        count_hint_buffer.clear()
+                        count_hint_elapsed_since_trigger = 0.0
                     if relabel_buffer is not None:
                         relabel_buffer.clear()
                     format_change_silence_seconds = self._prefill_startup_silence(
@@ -437,6 +458,64 @@ class TranscriptionLoopEngine:
                                         refresh_in_flight = False
 
                             Thread(target=_run_refresh, name="speaker-inventory-refresh", daemon=True).start()
+                if count_hint_buffer is not None:
+                    count_hint_buffer.extend(chunk.pcm16)
+                    count_hint_elapsed_since_trigger += float(len(chunk.pcm16)) / float(max(1, bytes_per_second))
+                    max_count_hint_bytes = max(
+                        frame_bytes, int(round(count_hint_window_seconds * float(bytes_per_second)))
+                    )
+                    max_count_hint_bytes = max(frame_bytes, (max_count_hint_bytes // frame_bytes) * frame_bytes)
+                    if len(count_hint_buffer) > max_count_hint_bytes:
+                        del count_hint_buffer[: len(count_hint_buffer) - max_count_hint_bytes]
+                    if len(count_hint_buffer) >= frame_bytes and count_hint_elapsed_since_trigger >= count_hint_seconds:
+                        if count_hint_lock is not None:
+                            with count_hint_lock:
+                                can_start_count_hint = not count_hint_in_flight
+                                if can_start_count_hint:
+                                    count_hint_in_flight = True
+                            if can_start_count_hint:
+                                count_hint_elapsed_since_trigger = 0.0
+                                count_hint_snapshot = bytes(count_hint_buffer)
+                                count_hint_chunk = AudioChunk(
+                                    pcm16=count_hint_snapshot,
+                                    sample_rate=stream_rate,
+                                    channels=stream_channels,
+                                )
+                                count_hint_channel_mode = str(
+                                    getattr(self._deps.config, "source_channel_mode", "mono") or "mono"
+                                )
+                                count_hint_transcriber = self._deps.get_transcriber()
+
+                                def _run_count_hint() -> None:
+                                    nonlocal count_hint_in_flight, observed_max_speaker_count
+                                    try:
+                                        estimate_fn = getattr(count_hint_transcriber, "estimate_speaker_count", None)
+                                        cap_fn = getattr(count_hint_transcriber, "set_speaker_count_cap", None)
+                                        if callable(estimate_fn) and callable(cap_fn):
+                                            count = estimate_fn(
+                                                count_hint_chunk,
+                                                channel_mode=count_hint_channel_mode,
+                                                sliver_floor_seconds=count_hint_sliver_floor_seconds,
+                                            )
+                                            if count is not None:
+                                                observed_max_speaker_count = max(
+                                                    observed_max_speaker_count,
+                                                    int(max(0, count)),
+                                                )
+                                                if observed_max_speaker_count > 0:
+                                                    effective_cap = (
+                                                        max(operator_max_speaker_count, observed_max_speaker_count)
+                                                        if operator_max_speaker_count > 0
+                                                        else observed_max_speaker_count
+                                                    )
+                                                    cap_fn(effective_cap)
+                                    except Exception:
+                                        pass
+                                    finally:
+                                        with count_hint_lock:
+                                            count_hint_in_flight = False
+
+                                Thread(target=_run_count_hint, name="speaker-count-hint", daemon=True).start()
                 max_buffer_bytes = max(segment_bytes * 6, bytes_per_second)
                 max_buffer_bytes = max(frame_bytes, max_buffer_bytes // frame_bytes * frame_bytes)
                 if len(buffer) > max_buffer_bytes:

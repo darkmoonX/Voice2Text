@@ -44,6 +44,8 @@ class RuntimeConfig:
     whisperx_align_guard: str = 'safe'
     whisperx_diarization_device: str = 'auto'
     whisperx_diarization_model: str = 'pyannote/speaker-diarization-3.1'
+    whisperx_diarization_min_speakers: int = 0
+    whisperx_diarization_max_speakers: int = 0
     whisperx_hf_token: str = ''
     whisperx_speaker_profile_enabled: bool = True
     whisperx_speaker_profile_backend: str = 'pyannote'
@@ -83,6 +85,10 @@ class RuntimeConfig:
     whisperx_speaker_realtime_refresh_min_cluster_seconds: float = 4.0
     whisperx_speaker_realtime_refresh_merge: bool = True
     whisperx_speaker_realtime_refresh_match_mode: str = 'argmax'
+    whisperx_speaker_count_hint_enabled: bool = False
+    whisperx_speaker_count_hint_seconds: float = 60.0
+    whisperx_speaker_count_hint_window_seconds: float = 300.0
+    whisperx_speaker_count_hint_sliver_floor_seconds: float = 1.5
     # Round 0023 learn-path quality gate: when on, gibberish / music-tail / degenerate /
     # low-confidence clips can still match an existing profile for display but never update or
     # create a centroid. Default off until the harness A/B confirms it is CER-neutral.
