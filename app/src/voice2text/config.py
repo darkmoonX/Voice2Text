@@ -77,6 +77,12 @@ class RuntimeConfig:
     whisperx_speaker_realtime_update_match_threshold: float = 0.0
     whisperx_speaker_realtime_visible_seconds: float = 24.0
     whisperx_speaker_realtime_visible_samples: int = 16
+    whisperx_speaker_realtime_refresh_seconds: float = 0.0
+    whisperx_speaker_realtime_refresh_alpha: float = 0.5
+    whisperx_speaker_realtime_refresh_assign_threshold: float = 0.55
+    whisperx_speaker_realtime_refresh_min_cluster_seconds: float = 4.0
+    whisperx_speaker_realtime_refresh_merge: bool = True
+    whisperx_speaker_realtime_refresh_match_mode: str = 'argmax'
     # Round 0023 learn-path quality gate: when on, gibberish / music-tail / degenerate /
     # low-confidence clips can still match an existing profile for display but never update or
     # create a centroid. Default off until the harness A/B confirms it is CER-neutral.
@@ -94,6 +100,18 @@ class RuntimeConfig:
     subtitle_reanchor_stabilization: str = 'consecutive'
     subtitle_reanchor_majority_window_seconds: float = 2.0
     subtitle_reanchor_majority_min_ratio: float = 0.6
+    # Round 0048: pre-commit local diarization relabel for the LIVE overlay (Plan B from 0046).
+    # A pending batch's speaker label is resolved from a short local re-diarization pass over its
+    # own (not-yet-frozen) audio span right before it freezes -- never rewrites already-committed
+    # text (that was 0046's proven failure mode). Read-only against the profile store (no EMA, no
+    # merge, no new-profile creation). Default off = byte-identical (no rolling audio buffer, no
+    # resolver call). Feasibility-spike-validated at window=20s + sliver_floor=1.5s
+    # (app/src/tests/claude_output/plan_b_spike/, 2026-07-02); assign_threshold is NOT
+    # spike-validated, a starting point pending A/B.
+    subtitle_relabel_enabled: bool = False
+    subtitle_relabel_window_seconds: float = 20.0
+    subtitle_relabel_sliver_floor_seconds: float = 1.5
+    subtitle_relabel_assign_threshold: float = 0.65
     # Final display-script fold for the visible/exported subtitle: '' (off, keep
     # per-word original script), 'hant', or 'hans'. Comparison/CER unaffected.
     subtitle_display_script: str = 'hant'
@@ -174,6 +192,12 @@ class RuntimeConfig:
     # Round 0020: record the live session (exact PCM -> WAV + manifest) for
     # deterministic replay/bug-repro. Default off; ignored for source_mode=file.
     session_record_enabled: bool = False
+    # Round 0047: after a genuine session end (not a settings restart / mode switch), run one
+    # whole-file direct-quality transcription+diarization pass over the just-recorded session WAV
+    # on a background thread and write it as an ADDITIONAL export (never touches the live overlay
+    # or the incremental export). Requires session_record_enabled=True to have any effect. Default
+    # off -> byte-identical to pre-0047.
+    session_finalize_direct_relabel_enabled: bool = False
     transcript_export_enabled: bool = False
     transcript_export_formats: str = 'txt,srt,json'
     transcript_export_include_timestamps: bool = True

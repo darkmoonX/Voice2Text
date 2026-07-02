@@ -182,6 +182,64 @@ class SpeakerProfileStore:
                 for item in self._candidates
             ]
 
+    def profile_summaries(self) -> list[dict[str, object]]:
+        with self._lock:
+            return [dict(profile) for profile in self._profiles]
+
+    def blend_centroid(self, profile_id: str, centroid: np.ndarray, alpha: float) -> bool:
+        normalized_id = str(profile_id or "").strip()
+        normalized = _normalize_embedding(centroid)
+        if not normalized_id or normalized.size == 0:
+            return False
+        trust = float(max(0.0, min(1.0, alpha)))
+        with self._lock:
+            for profile in self._profiles:
+                if str(profile.get("id") or "") != normalized_id:
+                    continue
+                old_centroid = _normalize_embedding(np.asarray(profile.get("centroid") or [], dtype=np.float32))
+                if old_centroid.size == 0 or old_centroid.size != normalized.size:
+                    return False
+                blended = _normalize_embedding(normalized * trust + old_centroid * (1.0 - trust))
+                profile["centroid"] = blended.tolist()
+                self._save_locked()
+                return True
+        return False
+
+    def merge_profiles(self, keep_id: str, drop_ids: list[str]) -> dict[str, object]:
+        normalized_keep = str(keep_id or "").strip()
+        normalized_drops = [
+            str(item or "").strip()
+            for item in drop_ids
+            if str(item or "").strip() and str(item or "").strip() != normalized_keep
+        ]
+        with self._lock:
+            remap: dict[str, str] = {}
+            merged_rows: list[dict[str, object]] = []
+            if not normalized_keep or not normalized_drops:
+                return {
+                    "merged_count": 0,
+                    "remap": {},
+                    "merged": [],
+                    "profile_count": int(len(self._profiles)),
+                }
+            for drop_id in normalized_drops:
+                merged = self._merge_profile_locked(normalized_keep, drop_id, similarity=None)
+                if not merged:
+                    continue
+                remap[drop_id] = normalized_keep
+                for old, new in list(remap.items()):
+                    if new == drop_id:
+                        remap[old] = normalized_keep
+                merged_rows.append(merged)
+            if remap:
+                self._save_locked()
+            return {
+                "merged_count": int(len(merged_rows)),
+                "remap": dict(remap),
+                "merged": merged_rows,
+                "profile_count": int(len(self._profiles)),
+            }
+
     def visible_profile_alias(
         self,
         *,
@@ -300,36 +358,14 @@ class SpeakerProfileStore:
                 if not keep_id or not drop_id or keep_id == drop_id:
                     break
 
-                keep_weight = float(keep.get("weight", 0.0) or 0.0)
-                drop_weight = float(drop.get("weight", 0.0) or 0.0)
-                keep_centroid = _normalize_embedding(np.asarray(keep.get("centroid") or [], dtype=np.float32))
-                drop_centroid = _normalize_embedding(np.asarray(drop.get("centroid") or [], dtype=np.float32))
-                merged = _normalize_embedding(keep_centroid * keep_weight + drop_centroid * drop_weight)
-                keep["centroid"] = merged.tolist()
-                keep["weight"] = float(keep_weight + drop_weight)
-                keep["samples"] = int(keep.get("samples", 0) or 0) + int(drop.get("samples", 0) or 0)
-                keep["total_seconds"] = (
-                    float(keep.get("total_seconds", 0.0) or 0.0)
-                    + float(drop.get("total_seconds", 0.0) or 0.0)
-                )
-                labels = list(keep.get("observed_labels") or [])
-                for label in list(drop.get("observed_labels") or []):
-                    if label not in labels:
-                        labels.append(label)
-                keep["observed_labels"] = labels[-12:]
-
+                merged = self._merge_profile_locked(keep_id, drop_id, similarity=similarity)
+                if not merged:
+                    break
                 remap[drop_id] = keep_id
                 for old, new in list(remap.items()):
                     if new == drop_id:
                         remap[old] = keep_id
-                merged_rows.append(
-                    {
-                        "from": drop_id,
-                        "to": keep_id,
-                        "similarity": float(similarity),
-                    }
-                )
-                del self._profiles[drop_index]
+                merged_rows.append(merged)
                 changed = True
 
             if remap:
@@ -341,6 +377,47 @@ class SpeakerProfileStore:
                 "merged": merged_rows,
                 "profile_count": int(len(self._profiles)),
             }
+
+    def _merge_profile_locked(self, keep_id: str, drop_id: str, similarity: float | None) -> dict[str, object] | None:
+        keep_index = -1
+        drop_index = -1
+        for idx, profile in enumerate(self._profiles):
+            pid = str(profile.get("id") or "")
+            if pid == keep_id:
+                keep_index = idx
+            elif pid == drop_id:
+                drop_index = idx
+        if keep_index < 0 or drop_index < 0 or keep_index == drop_index:
+            return None
+        keep = self._profiles[keep_index]
+        drop = self._profiles[drop_index]
+        keep_weight = float(keep.get("weight", 0.0) or 0.0)
+        drop_weight = float(drop.get("weight", 0.0) or 0.0)
+        keep_centroid = _normalize_embedding(np.asarray(keep.get("centroid") or [], dtype=np.float32))
+        drop_centroid = _normalize_embedding(np.asarray(drop.get("centroid") or [], dtype=np.float32))
+        if keep_centroid.size == 0 or drop_centroid.size == 0 or keep_centroid.size != drop_centroid.size:
+            return None
+        merged = _normalize_embedding(keep_centroid * keep_weight + drop_centroid * drop_weight)
+        keep["centroid"] = merged.tolist()
+        keep["weight"] = float(keep_weight + drop_weight)
+        keep["samples"] = int(keep.get("samples", 0) or 0) + int(drop.get("samples", 0) or 0)
+        keep["total_seconds"] = (
+            float(keep.get("total_seconds", 0.0) or 0.0)
+            + float(drop.get("total_seconds", 0.0) or 0.0)
+        )
+        labels = list(keep.get("observed_labels") or [])
+        for label in list(drop.get("observed_labels") or []):
+            if label not in labels:
+                labels.append(label)
+        keep["observed_labels"] = labels[-12:]
+        del self._profiles[drop_index]
+        row: dict[str, object] = {
+            "from": str(drop_id),
+            "to": str(keep_id),
+        }
+        if similarity is not None:
+            row["similarity"] = float(similarity)
+        return row
 
     def _stage_or_promote_candidate_locked(
         self,

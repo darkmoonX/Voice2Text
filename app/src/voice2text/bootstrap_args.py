@@ -46,6 +46,13 @@ def build_arg_parser(whisper_defaults: WhisperRuntimeParams) -> argparse.Argumen
     parser.add_argument("--no-whisperx-diarization", dest="whisperx_diarization", action="store_false", help="Disable WhisperX diarization.")
     parser.add_argument("--whisperx-speaker-profile", dest="whisperx_speaker_profile", action="store_true", help="Enable cross-window speaker-profile identity.")
     parser.add_argument("--no-whisperx-speaker-profile", dest="whisperx_speaker_profile", action="store_false", help="Disable cross-window speaker-profile identity.")
+    parser.add_argument("--speaker-realtime-refresh-seconds", type=float, default=0.0, help="Audio-seconds cadence/window for forward-only speaker inventory refresh. 0 disables (default).")
+    parser.add_argument("--speaker-realtime-refresh-alpha", type=float, default=0.5, help="EMA trust toward the offline 60s profile-space centroid.")
+    parser.add_argument("--speaker-realtime-refresh-assign-threshold", type=float, default=0.55, help="Cosine floor for assigning an existing profile to an offline refresh cluster.")
+    parser.add_argument("--speaker-realtime-refresh-min-cluster-seconds", type=float, default=4.0, help="Drop offline refresh clusters shorter than this duration.")
+    parser.add_argument("--speaker-realtime-refresh-match-mode", choices=["argmax", "mutual"], default="argmax", help="Refresh profile-to-cluster assignment mode.")
+    parser.add_argument("--speaker-realtime-refresh-merge", dest="speaker_realtime_refresh_merge", action="store_true", help="Enable offline-arbitrated profile merge during refresh.")
+    parser.add_argument("--no-speaker-realtime-refresh-merge", dest="speaker_realtime_refresh_merge", action="store_false", help="Disable offline-arbitrated profile merge during refresh.")
     parser.add_argument("--speaker-profile-quality-gate", dest="whisperx_speaker_profile_quality_gate_enabled", action="store_true", help="Gate the speaker-profile learn path: low-quality clips (gibberish/music/low-confidence) can still match an existing profile for display but never update/create a centroid.")
     parser.add_argument("--whisperx-alignment-model", default="", help="Optional WhisperX alignment model id/path.")
     parser.add_argument("--whisperx-english-align-large", dest="whisperx_english_align_large", action="store_true", help="Use the large wav2vec2 bundle (WAV2VEC2_ASR_LARGE_LV60K_960H) as the English forced-alignment default (better word order + fewer dropped words; near-free on CPU). On by default.")
@@ -75,6 +82,10 @@ def build_arg_parser(whisper_defaults: WhisperRuntimeParams) -> argparse.Argumen
     parser.add_argument("--subtitle-display-script", choices=["off", "hant", "hans"], default="hant", help="Fold the visible/exported subtitle to one Chinese script (char-level, comparison/CER unaffected). off keeps per-word original script.")
     parser.add_argument("--subtitle-commit-hold-seconds", type=float, default=0.0, help="Delayed-freeze speaker re-anchor: hold committed words this long before baking the marker so a late cross-window profile identity can back-date a new turn's marker to its true onset. 0 = disabled (legacy immediate freeze, byte-identical). ~26-30 covers profile warmup; trades commit latency for marker accuracy.")
     parser.add_argument("--subtitle-reanchor-stabilization", choices=["consecutive", "majority"], default="consecutive", help="Speaker-boundary stabilization for delayed-freeze re-anchoring: consecutive (legacy gate) or majority (window ratio, better for interleaved Q&A).")
+    parser.add_argument("--subtitle-relabel", dest="subtitle_relabel_enabled", action="store_true", help="Round 0048: pre-commit local diarization relabel for the live overlay. Resolves a pending subtitle batch's speaker from a short local re-diarization pass, read-only against the profile store, right before the batch freezes. Default off (byte-identical).")
+    parser.add_argument("--subtitle-relabel-window-seconds", type=float, default=20.0, help="Round 0048: local-diarization window size covered by the pre-commit relabel (also becomes the effective commit-hold when relabel is enabled). Feasibility-spike-validated at 20s.")
+    parser.add_argument("--subtitle-relabel-sliver-floor-seconds", type=float, default=1.5, help="Round 0048: drop local diarization clusters shorter than this before matching (suppresses phantom-speaker oversplit). Feasibility-spike-validated at 1.5s for a 20s window.")
+    parser.add_argument("--subtitle-relabel-assign-threshold", type=float, default=0.65, help="Round 0048: profile-match cosine floor for the pre-commit relabel. NOT spike-validated; starting point pending A/B.")
     parser.add_argument("--max-context", "-mc", type=int, default=whisper_defaults.max_context, help="WhisperX decode max context tokens.")
     parser.add_argument("--entropy-thold", type=float, default=whisper_defaults.entropy_thold, help="Whisper entropy threshold (Python maps to compression_ratio_threshold).")
     parser.add_argument("--logprob-thold", type=float, default=whisper_defaults.logprob_thold, help="Whisper log probability threshold.")
@@ -123,6 +134,7 @@ def build_arg_parser(whisper_defaults: WhisperRuntimeParams) -> argparse.Argumen
     parser.add_argument("--transcript-export-no-speaker", dest="transcript_export_include_speaker", action="store_false", help="Export transcript without speaker labels.")
     parser.add_argument("--transcript-export-dir", default="", help="Transcript export output directory.")
     parser.add_argument("--record-session", dest="session_record_enabled", action="store_true", help="Record the live session (exact PCM -> WAV + manifest) under recordings/ for deterministic replay. Ignored for --source-mode file.")
+    parser.add_argument("--session-finalize-direct-relabel", dest="session_finalize_direct_relabel_enabled", action="store_true", help="After a genuine session end, run one whole-file direct-quality transcription+diarization pass over the recorded session WAV on a background thread and write it as an additional export (recordings/<stamp>/direct_relabel/). Requires --record-session. Never touches the live overlay or the incremental export.")
     parser.add_argument("--replay-session", default="", help="Replay a recorded session dir (or its manifest.json): sets source_mode=file on the recorded WAV and restores the recorded STT config for deterministic repro.")
     parser.add_argument("--import-direct", default="", help="Import one audio file and run whole-file direct transcription instead of live capture.")
     parser.add_argument("--import-direct-chunk-seconds", type=float, default=0.0, help="Direct import chunk seconds. 0 = one full-file pass.")
@@ -137,8 +149,11 @@ def build_arg_parser(whisper_defaults: WhisperRuntimeParams) -> argparse.Argumen
         whisperx_vad=False,
         whisperx_diarization=False,
         whisperx_speaker_profile=True,
+        speaker_realtime_refresh_merge=True,
+        subtitle_relabel_enabled=False,
         debug_mode=False,
         session_record_enabled=False,
+        session_finalize_direct_relabel_enabled=False,
         transcript_export_enabled=False,
         transcript_export_include_timestamps=True,
         transcript_export_include_speaker=True,

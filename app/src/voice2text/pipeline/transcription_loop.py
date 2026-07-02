@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass
-from threading import Event
+from threading import Event, Lock, Thread
 from typing import Callable
 
 from ..capture import AudioChunk
@@ -67,6 +67,26 @@ class TranscriptionLoopEngine:
         segment_seconds = min(max(1.0, float(self._deps.config.segment_seconds)), 12.0)
         hop_seconds = min(max(0.1, float(self._deps.config.hop_seconds)), max(0.1, segment_seconds - 0.1))
         self._hop_seconds = float(hop_seconds)
+        refresh_seconds = float(max(0.0, getattr(self._deps.config, "whisperx_speaker_realtime_refresh_seconds", 0.0) or 0.0))
+        refresh_buffer: bytearray | None = bytearray() if refresh_seconds > 0.0 else None
+        refresh_elapsed_since_trigger = 0.0
+        refresh_lock = Lock() if refresh_buffer is not None else None
+        refresh_in_flight = False
+
+        # Round 0048: pre-commit local-diarization relabel for the live overlay. Disabled ->
+        # relabel_buffer stays None -> byte-identical (no buffer upkeep, no resolver wired).
+        relabel_enabled = bool(getattr(self._deps.config, "subtitle_relabel_enabled", False))
+        relabel_window_seconds = float(
+            max(1.0, getattr(self._deps.config, "subtitle_relabel_window_seconds", 20.0) or 20.0)
+        )
+        relabel_sliver_floor_seconds = float(
+            max(0.0, getattr(self._deps.config, "subtitle_relabel_sliver_floor_seconds", 1.5) or 0.0)
+        )
+        relabel_assign_threshold = float(
+            max(0.0, min(0.999, getattr(self._deps.config, "subtitle_relabel_assign_threshold", 0.65) or 0.65))
+        )
+        relabel_buffer: bytearray | None = bytearray() if relabel_enabled else None
+        relabel_buffer_start_seconds = 0.0
 
         self._deps.subtitle_assembler.set_language_context(self._deps.config.source_language)
         self._deps.subtitle_assembler.set_cjk_no_space_gap_seconds(
@@ -81,8 +101,14 @@ class TranscriptionLoopEngine:
         self._deps.subtitle_assembler.set_display_script(
             str(getattr(self._deps.config, "subtitle_display_script", "") or "")
         )
+        configured_hold_seconds = float(getattr(self._deps.config, "subtitle_commit_hold_seconds", 0.0) or 0.0)
+        # Relabel needs the batch to stay pending at least relabel_window_seconds so its audio
+        # span is available; don't silently shrink an operator-configured longer reanchor hold.
+        effective_hold_seconds = (
+            max(configured_hold_seconds, relabel_window_seconds) if relabel_enabled else configured_hold_seconds
+        )
         self._deps.subtitle_assembler.set_commit_hold(
-            hold_seconds=float(getattr(self._deps.config, "subtitle_commit_hold_seconds", 0.0) or 0.0),
+            hold_seconds=effective_hold_seconds,
             stabilization=str(getattr(self._deps.config, "subtitle_reanchor_stabilization", "consecutive") or "consecutive"),
             majority_window_seconds=float(getattr(self._deps.config, "subtitle_reanchor_majority_window_seconds", 2.0) or 2.0),
             majority_min_ratio=float(getattr(self._deps.config, "subtitle_reanchor_majority_min_ratio", 0.6) or 0.6),
@@ -106,6 +132,89 @@ class TranscriptionLoopEngine:
             # Keep token absolute timestamps aligned with real audio timeline
             # after injecting synthetic silence at startup.
             self._window_elapsed_seconds = -startup_silence_seconds
+        if relabel_buffer is not None:
+            relabel_buffer_start_seconds = float(self._window_elapsed_seconds)
+        # Extra slack beyond relabel_window_seconds: a batch drains as soon as it ages past the
+        # (relabel-extended) commit hold, i.e. right at the buffer's trailing edge -- without
+        # margin its span could have just fallen out of the rolling window.
+        relabel_retention_seconds = relabel_window_seconds + segment_seconds
+
+        def _resolve_relabel_span(span_start: float, span_end: float) -> str | None:
+            """Round 0048: slice the rolling relabel buffer to [span_start, span_end) and ask
+            the transcriber to resolve a speaker id via local re-diarization (read-only against
+            the profile store). Any failure/empty result -> None (caller keeps the existing
+            label). Runs synchronously on the loop thread by design (see task spec)."""
+            def _emit_relabel(outcome: str, cost_seconds: float | None = None) -> None:
+                cost = f"; cost={cost_seconds:.3f}s" if cost_seconds is not None else ""
+                self._deps.emit_status(
+                    f"[subtitle-relabel] span={float(span_start):.2f}..{float(span_end):.2f}s; {outcome}{cost}"
+                )
+
+            if relabel_buffer is None or not relabel_buffer:
+                _emit_relabel("skip=empty-buffer")
+                return None
+            try:
+                clip_transcriber = self._deps.get_transcriber()
+                resolve_fn = getattr(clip_transcriber, "resolve_local_speaker", None)
+                if not callable(resolve_fn):
+                    _emit_relabel("skip=no-resolver")
+                    return None
+                buf_start = relabel_buffer_start_seconds
+                buf_bytes = bytes(relabel_buffer)
+                buf_end = buf_start + (float(len(buf_bytes)) / float(max(1, bytes_per_second)))
+                if min(float(span_end), buf_end) <= max(float(span_start), buf_start):
+                    _emit_relabel(f"skip=span-outside-buffer({buf_start:.2f}..{buf_end:.2f}s)")
+                    return None
+                # Slice the spike-validated CONTEXT window (buffer tail, ~relabel_window_seconds),
+                # not just the batch's own few seconds: the local partition needs surrounding
+                # speech to cluster against, and the profile-space embedding needs the chosen
+                # cluster's audio across the whole window to yield a trustworthy cosine. Anchor
+                # the window at the buffer's live edge so every batch draining at one sentence
+                # break slices identical bytes (provider memoises the diarization on them).
+                ctx_lo = max(buf_start, min(float(span_start), buf_end - relabel_window_seconds))
+                start_byte = max(0, int(round((ctx_lo - buf_start) * bytes_per_second)))
+                start_byte -= start_byte % max(1, frame_bytes)
+                end_byte = len(buf_bytes) - (len(buf_bytes) % max(1, frame_bytes))
+                if end_byte <= start_byte:
+                    _emit_relabel("skip=degenerate-slice")
+                    return None
+                ctx_lo = buf_start + float(start_byte) / float(max(1, bytes_per_second))
+                span_chunk = AudioChunk(
+                    pcm16=buf_bytes[start_byte:end_byte],
+                    sample_rate=stream_rate,
+                    channels=stream_channels,
+                )
+                channel_mode = str(getattr(self._deps.config, "source_channel_mode", "mono") or "mono")
+                resolve_stats: dict = {}
+                resolve_started_at = time.perf_counter()
+                resolved = resolve_fn(
+                    span_chunk,
+                    channel_mode=channel_mode,
+                    sliver_floor_seconds=relabel_sliver_floor_seconds,
+                    assign_threshold=relabel_assign_threshold,
+                    target_start_seconds=max(0.0, float(span_start) - ctx_lo),
+                    target_end_seconds=max(0.0, float(span_end) - ctx_lo),
+                    stats=resolve_stats,
+                )
+                diar_s = resolve_stats.get("diar_seconds")
+                embed_s = resolve_stats.get("embed_seconds")
+                clip_s = resolve_stats.get("clip_seconds")
+                breakdown = ""
+                if diar_s is not None:
+                    breakdown += f"; diar={float(diar_s):.3f}s"
+                if embed_s is not None:
+                    breakdown += f"; embed={float(embed_s):.3f}s(clip={float(clip_s or 0.0):.1f}s)"
+                _emit_relabel(
+                    f"resolved={resolved or 'none'}; reason={resolve_stats.get('reason', 'unknown')}; "
+                    f"ctx={ctx_lo:.2f}..{buf_end:.2f}s; cached={resolve_stats.get('turns_cached', False)}{breakdown}",
+                    time.perf_counter() - resolve_started_at,
+                )
+                return resolved
+            except Exception as exc:
+                _emit_relabel(f"skip=error:{type(exc).__name__}")
+                return None
+
+        self._deps.subtitle_assembler.set_relabel_resolver(_resolve_relabel_span if relabel_enabled else None)
         last_chunk_at = time.monotonic()
         last_recover_at = 0.0
 
@@ -151,6 +260,11 @@ class TranscriptionLoopEngine:
                         hop_seconds=hop_seconds,
                     )
                     buffer.clear()
+                    if refresh_buffer is not None:
+                        refresh_buffer.clear()
+                        refresh_elapsed_since_trigger = 0.0
+                    if relabel_buffer is not None:
+                        relabel_buffer.clear()
                     format_change_silence_seconds = self._prefill_startup_silence(
                         buffer=buffer,
                         segment_bytes=segment_bytes,
@@ -161,6 +275,8 @@ class TranscriptionLoopEngine:
                     )
                     if format_change_silence_seconds > 0.0:
                         self._window_elapsed_seconds -= format_change_silence_seconds
+                    if relabel_buffer is not None:
+                        relabel_buffer_start_seconds = float(self._window_elapsed_seconds)
                     self._deps.emit_status(f"Stream format changed: {stream_rate} Hz, {stream_channels} ch")
 
                 chunk_pcm = chunk.pcm16
@@ -173,6 +289,54 @@ class TranscriptionLoopEngine:
                 if chunk_pcm is not chunk.pcm16:
                     chunk = AudioChunk(pcm16=chunk_pcm, sample_rate=chunk.sample_rate, channels=chunk.channels)
                 buffer.extend(chunk.pcm16)
+                if relabel_buffer is not None:
+                    relabel_buffer.extend(chunk.pcm16)
+                    max_relabel_bytes = max(
+                        frame_bytes, int(round(relabel_retention_seconds * float(bytes_per_second)))
+                    )
+                    max_relabel_bytes = max(frame_bytes, (max_relabel_bytes // frame_bytes) * frame_bytes)
+                    if len(relabel_buffer) > max_relabel_bytes:
+                        trimmed_bytes = len(relabel_buffer) - max_relabel_bytes
+                        del relabel_buffer[:trimmed_bytes]
+                        relabel_buffer_start_seconds += float(trimmed_bytes) / float(max(1, bytes_per_second))
+                if refresh_buffer is not None:
+                    refresh_buffer.extend(chunk.pcm16)
+                    refresh_elapsed_since_trigger += float(len(chunk.pcm16)) / float(max(1, bytes_per_second))
+                    max_refresh_bytes = max(frame_bytes, int(round(refresh_seconds * float(bytes_per_second))))
+                    max_refresh_bytes = max(frame_bytes, (max_refresh_bytes // frame_bytes) * frame_bytes)
+                    if len(refresh_buffer) > max_refresh_bytes:
+                        del refresh_buffer[: len(refresh_buffer) - max_refresh_bytes]
+                    if len(refresh_buffer) >= max_refresh_bytes and refresh_elapsed_since_trigger >= refresh_seconds:
+                        if refresh_lock is None:
+                            continue
+                        with refresh_lock:
+                            can_start_refresh = not refresh_in_flight
+                            if can_start_refresh:
+                                refresh_in_flight = True
+                        if can_start_refresh:
+                            refresh_elapsed_since_trigger = 0.0
+                            refresh_snapshot = bytes(refresh_buffer)
+                            refresh_chunk = AudioChunk(
+                                pcm16=refresh_snapshot,
+                                sample_rate=stream_rate,
+                                channels=stream_channels,
+                            )
+                            refresh_channel_mode = str(getattr(self._deps.config, "source_channel_mode", "mono") or "mono")
+                            refresh_transcriber = self._deps.get_transcriber()
+
+                            def _run_refresh() -> None:
+                                nonlocal refresh_in_flight
+                                try:
+                                    refresh_fn = getattr(refresh_transcriber, "refresh_speaker_inventory", None)
+                                    if callable(refresh_fn):
+                                        refresh_fn(refresh_chunk, channel_mode=refresh_channel_mode)
+                                except Exception:
+                                    pass
+                                finally:
+                                    with refresh_lock:
+                                        refresh_in_flight = False
+
+                            Thread(target=_run_refresh, name="speaker-inventory-refresh", daemon=True).start()
                 max_buffer_bytes = max(segment_bytes * 6, bytes_per_second)
                 max_buffer_bytes = max(frame_bytes, max_buffer_bytes // frame_bytes * frame_bytes)
                 if len(buffer) > max_buffer_bytes:

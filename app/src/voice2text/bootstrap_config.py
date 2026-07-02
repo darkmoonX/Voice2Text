@@ -65,6 +65,38 @@ def build_runtime_config(args: argparse.Namespace) -> RuntimeConfig:
         whisperx_enable_vad=bool(args.whisperx_vad),
         whisperx_enable_diarization=bool(args.whisperx_diarization),
         whisperx_speaker_profile_enabled=bool(getattr(args, "whisperx_speaker_profile", True)),
+        whisperx_speaker_realtime_refresh_seconds=max(0.0, float(getattr(args, "speaker_realtime_refresh_seconds", 0.0) or 0.0)),
+        whisperx_speaker_realtime_refresh_alpha=max(
+            0.0,
+            min(
+                1.0,
+                float(
+                    0.5 if getattr(args, "speaker_realtime_refresh_alpha", 0.5) is None
+                    else getattr(args, "speaker_realtime_refresh_alpha", 0.5)
+                ),
+            ),
+        ),
+        whisperx_speaker_realtime_refresh_assign_threshold=max(
+            0.0,
+            min(
+                0.999,
+                float(
+                    0.55 if getattr(args, "speaker_realtime_refresh_assign_threshold", 0.55) is None
+                    else getattr(args, "speaker_realtime_refresh_assign_threshold", 0.55)
+                ),
+            ),
+        ),
+        whisperx_speaker_realtime_refresh_min_cluster_seconds=max(
+            0.0,
+            float(
+                4.0 if getattr(args, "speaker_realtime_refresh_min_cluster_seconds", 4.0) is None
+                else getattr(args, "speaker_realtime_refresh_min_cluster_seconds", 4.0)
+            ),
+        ),
+        whisperx_speaker_realtime_refresh_merge=bool(getattr(args, "speaker_realtime_refresh_merge", True)),
+        whisperx_speaker_realtime_refresh_match_mode=str(
+            getattr(args, "speaker_realtime_refresh_match_mode", "argmax") or "argmax"
+        ),
         whisperx_speaker_profile_quality_gate_enabled=bool(getattr(args, "whisperx_speaker_profile_quality_gate_enabled", False)),
         runtime_preset=str(getattr(args, "preset", "") or ""),
         whisperx_alignment_model=args.whisperx_alignment_model,
@@ -87,6 +119,10 @@ def build_runtime_config(args: argparse.Namespace) -> RuntimeConfig:
         subtitle_display_script=('' if str(getattr(args, 'subtitle_display_script', 'hant')) == 'off' else str(getattr(args, 'subtitle_display_script', 'hant'))),
         subtitle_commit_hold_seconds=max(0.0, float(getattr(args, 'subtitle_commit_hold_seconds', 0.0) or 0.0)),
         subtitle_reanchor_stabilization=str(getattr(args, 'subtitle_reanchor_stabilization', 'consecutive') or 'consecutive'),
+        subtitle_relabel_enabled=bool(getattr(args, 'subtitle_relabel_enabled', False)),
+        subtitle_relabel_window_seconds=max(1.0, float(getattr(args, 'subtitle_relabel_window_seconds', 20.0) or 20.0)),
+        subtitle_relabel_sliver_floor_seconds=max(0.0, float(getattr(args, 'subtitle_relabel_sliver_floor_seconds', 1.5) or 0.0)),
+        subtitle_relabel_assign_threshold=max(0.0, min(0.999, float(getattr(args, 'subtitle_relabel_assign_threshold', 0.65) or 0.65))),
         source_mode=args.source_mode,
         source_file_path=str(args.source_file or ""),
         source_file_replay_speed=max(0.0, float(args.source_file_replay_speed)),
@@ -132,6 +168,9 @@ def build_runtime_config(args: argparse.Namespace) -> RuntimeConfig:
         log_dir=resolve_log_dir(args.log_dir),
         debug_mode=bool(args.debug_mode),
         session_record_enabled=bool(getattr(args, "session_record_enabled", False)),
+        session_finalize_direct_relabel_enabled=bool(
+            getattr(args, "session_finalize_direct_relabel_enabled", False)
+        ),
         transcript_export_enabled=bool(args.transcript_export_enabled),
         transcript_export_formats=str(args.transcript_export_formats or "txt,srt,json"),
         transcript_export_include_timestamps=bool(args.transcript_export_include_timestamps),

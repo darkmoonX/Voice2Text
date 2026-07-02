@@ -80,8 +80,14 @@ class TranscriptionController(QObject):
         self._bootstrap_thread = threading.Thread(target=lambda: self._bootstrap_stt_stack(current_epoch), daemon=True)
         self._bootstrap_thread.start()
 
-    def stop(self) -> None:
-        """Stop capture/worker threads and reset transient runtime state."""
+    def stop(self, *, finalize_session_export: bool = True) -> None:
+        """Stop capture/worker threads and reset transient runtime state.
+
+        `finalize_session_export=False` suppresses the round-0047 session-finalize direct-relabel
+        background job — used by callers where this isn't a genuine session end (a settings
+        restart, or switching into file-replay/import mode), so it never fires on every settings
+        tweak, only on a real stop.
+        """
         self._runtime_epoch += 1
         self._running.clear()
         self.runtime_state_changed.emit(False)
@@ -95,6 +101,8 @@ class TranscriptionController(QObject):
             worker.join(timeout=2.0)
         if worker is None or not worker.is_alive():
             self._worker = None
+        with self._capture_lock:
+            capture_before_stop = self._capture
         self._stop_capture_once()
         self._shutdown_transcriber_once()
         self._preprocess_pipeline = None
@@ -102,12 +110,14 @@ class TranscriptionController(QObject):
         self._subtitle_assembler.reset()
         self._text_delta_logger.reset()
         self._finalize_transcript_export()
+        if finalize_session_export:
+            self._maybe_start_session_finalize_relabel(capture_before_stop)
         self._restore_temporary_source_if_needed()
         self._release_runtime_memory("controller.stop")
 
     def restart(self) -> None:
         """Convenience API used by settings updates to rebuild runtime stack."""
-        self.stop()
+        self.stop(finalize_session_export=False)
         self.start()
 
     def is_temporary_file_replay_active(self) -> bool:
@@ -125,7 +135,7 @@ class TranscriptionController(QObject):
         path = Path(source).expanduser()
         if not path.exists():
             raise RuntimeError(f"Audio import file does not exist: {path}")
-        self.stop()
+        self.stop(finalize_session_export=False)
         self._temporary_source_restore = {
             "source_mode": self._config.source_mode,
             "source_file_path": getattr(self._config, "source_file_path", ""),
@@ -148,7 +158,7 @@ class TranscriptionController(QObject):
         path = Path(source).expanduser()
         if not path.exists():
             raise RuntimeError(f"Audio import file does not exist: {path}")
-        self.stop()
+        self.stop(finalize_session_export=False)
         self._runtime_epoch += 1
         epoch = self._runtime_epoch
         self._running.set()
@@ -446,6 +456,109 @@ class TranscriptionController(QObject):
             exporter.finalize()
         except Exception as exc:
             self._emit_error(f"Transcript export failed: {exc}")
+
+    def _maybe_start_session_finalize_relabel(self, capture: AudioCaptureBase | None) -> None:
+        """Round 0047: after a genuine session end, run one whole-file direct-quality
+        transcription+diarization pass over the just-recorded session WAV on a background
+        thread and write it as an ADDITIONAL export. Never touches the live overlay or the
+        incremental export. No-ops unless both `session_record_enabled` and
+        `session_finalize_direct_relabel_enabled` are set and the capture was actually a
+        session recording of non-trivial duration.
+        """
+        if not bool(getattr(self._config, "session_finalize_direct_relabel_enabled", False)):
+            return
+        if not bool(getattr(self._config, "session_record_enabled", False)):
+            return
+        if capture is None:
+            return
+        wav_path = getattr(capture, "wav_path", None)
+        out_dir = getattr(capture, "out_dir", None)
+        if wav_path is None or out_dir is None:
+            return  # not a RecordingAudioCapture (e.g. source_mode=file never wraps one)
+        try:
+            duration_seconds = float(getattr(capture, "duration_seconds", 0.0) or 0.0)
+        except Exception:
+            duration_seconds = 0.0
+        floor_seconds = 5.0
+        if duration_seconds < floor_seconds:
+            return
+        wav_path = Path(wav_path)
+        out_dir = Path(out_dir)
+        self._emit_status(
+            f"Session finalize direct-relabel queued ({duration_seconds:.1f}s recorded) -> "
+            f"{out_dir / 'direct_relabel'}"
+        )
+        thread = threading.Thread(
+            target=lambda: self._run_session_finalize_relabel_guarded(wav_path, out_dir),
+            daemon=True,
+        )
+        thread.start()
+
+    def _run_session_finalize_relabel_guarded(self, wav_path: Path, out_dir: Path) -> None:
+        transcriber: STTTranscriber | None = None
+        try:
+            if not wav_path.exists():
+                self._emit_error(f"Session finalize direct-relabel: recorded WAV not found: {wav_path}")
+                return
+            transcriber = self._create_transcriber_with_fallback()
+            if transcriber is None:
+                self._emit_error("Session finalize direct-relabel: transcriber unavailable.")
+                return
+            self._warmup_transcriber_instance(transcriber)
+            full_audio = read_wav(wav_path)
+
+            def _progress(completed: float, total: float) -> None:
+                self._emit_status(
+                    f"Session finalize direct-relabel progress: {completed:.1f}/{total:.1f}s audio"
+                )
+
+            result = run_direct_transcription(
+                self._config,
+                full_audio,
+                transcriber=transcriber,
+                chunk_seconds=float(getattr(self._config, "import_direct_chunk_seconds", 0.0) or 0.0),
+                language_subchunk_seconds=float(
+                    getattr(self._config, "import_direct_language_subchunk_seconds", 30.0) or 30.0
+                ),
+                speaker_profile_reconcile_threshold=float(
+                    getattr(self._config, "whisperx_speaker_profile_reconcile_threshold", 0.0) or 0.0
+                ),
+                whole_file_diarization=bool(
+                    getattr(self._config, "import_direct_whole_file_diarization", True)
+                ),
+                on_progress=_progress,
+                on_status=self._emit_status,
+            )
+            text = str(result.get("text") or "")
+            meta = result.get("meta") if isinstance(result.get("meta"), dict) else {}
+            if text or meta.get("token_timestamps"):
+                exporter = self._build_session_finalize_relabel_exporter(out_dir)
+                exporter.record(raw_text=text, source_text=text, translated_text="", meta=meta)
+                exporter.finalize()
+            self._emit_status(f"Session finalize direct-relabel finished -> {out_dir / 'direct_relabel'}")
+        except Exception as exc:
+            self._emit_error(f"Session finalize direct-relabel failed: {exc}")
+        finally:
+            self._shutdown_transcriber_object(transcriber)
+
+    def _build_session_finalize_relabel_exporter(self, out_dir: Path) -> TranscriptExporterSession:
+        raw_formats = str(getattr(self._config, "transcript_export_formats", "") or "txt,srt,json")
+        formats: list[str] = []
+        for token in raw_formats.split(","):
+            item = token.strip().lower()
+            if item in {"txt", "srt", "json"} and item not in formats:
+                formats.append(item)
+        if not formats:
+            formats = ["txt", "srt", "json"]
+        options = TranscriptExportOptions(
+            enabled=True,
+            formats=formats,
+            include_timestamps=bool(getattr(self._config, "transcript_export_include_timestamps", True)),
+            include_speaker=bool(getattr(self._config, "transcript_export_include_speaker", True)),
+            output_dir=str(out_dir / "direct_relabel"),
+            include_confidence=bool(getattr(self._config, "transcript_export_include_confidence", True)),
+        )
+        return TranscriptExporterSession(options, on_status=self._emit_status)
 
     def export_transcript_now(
         self,

@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from difflib import SequenceMatcher
 import re
 import time
+from typing import Callable
 
 
 @dataclass
@@ -125,6 +126,12 @@ class SubtitleAssembler:
         self._reanchor_stabilization = 'consecutive'
         self._reanchor_majority_window_seconds = 2.0
         self._reanchor_majority_min_ratio = 0.6
+        # Round 0048: pre-commit local-diarization relabel resolver, injected by the loop via
+        # `set_relabel_resolver`. Called once per pending batch, right before it freezes (inside
+        # `_drain_pending_commits`), with the batch's absolute (start, end) span; returns a
+        # resolved speaker id or None (no confident relabel / disabled / any failure -> no-op,
+        # keep the existing label). None = feature off, byte-identical.
+        self._relabel_resolver: Callable[[float, float], str | None] | None = None
         # Final display-script fold (one consistent Simplified/Traditional script
         # in the visible/exported text). '' disables. Applied only to the output
         # projection -- never to internal word state or the overlap-comparison
@@ -191,6 +198,11 @@ class SubtitleAssembler:
                 self._reanchor_majority_min_ratio = max(0.0, min(1.0, float(majority_min_ratio)))
             except Exception:
                 pass
+
+    def set_relabel_resolver(self, resolver: Callable[[float, float], str | None] | None) -> None:
+        """Round 0048: inject the pre-commit local-diarization relabel resolver. `None` disables
+        the feature (default) -- `_drain_pending_commits` skips the relabel call entirely."""
+        self._relabel_resolver = resolver
 
     def set_display_script(self, script: str | None) -> None:
         token = str(script or '').strip().lower()
@@ -1420,7 +1432,28 @@ class SubtitleAssembler:
                 else:
                     break
         for batch in ready:
+            self._apply_relabel_if_configured(batch)
             self._append_to_rolling_committed_text(batch)
+
+    def _apply_relabel_if_configured(self, batch: list[_WordState]) -> None:
+        """Round 0048: right before a batch freezes, let the injected resolver replace its
+        speaker label with one resolved from a local re-diarization pass over the batch's own
+        (still-mutable) audio span. No-op (batch keeps its existing label) unless the resolver is
+        set, returns a non-empty id, and doesn't raise -- any failure here must never break the
+        live merge path."""
+        if self._relabel_resolver is None or not batch:
+            return
+        try:
+            start = min(float(w.start) for w in batch)
+            end = max(float(w.end) for w in batch)
+            resolved = self._relabel_resolver(start, end)
+        except Exception:
+            return
+        token = str(resolved or '').strip()
+        if not token:
+            return
+        for w in batch:
+            w.speaker = token
 
     def _normalize_output_text(self, text: str) -> str:
         if not text:

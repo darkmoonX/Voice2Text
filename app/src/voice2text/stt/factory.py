@@ -179,6 +179,20 @@ def _build_whisperx(config: RuntimeConfig, *, device_override: Optional[str], co
         speaker_realtime_update_match_threshold=float(getattr(config, 'whisperx_speaker_realtime_update_match_threshold', 0.0) or 0.0),
         speaker_realtime_visible_seconds=float(getattr(config, 'whisperx_speaker_realtime_visible_seconds', 24.0) or 24.0),
         speaker_realtime_visible_samples=int(getattr(config, 'whisperx_speaker_realtime_visible_samples', 16) or 16),
+        speaker_realtime_refresh_alpha=float(
+            0.5 if getattr(config, 'whisperx_speaker_realtime_refresh_alpha', 0.5) is None
+            else getattr(config, 'whisperx_speaker_realtime_refresh_alpha', 0.5)
+        ),
+        speaker_realtime_refresh_assign_threshold=float(
+            0.55 if getattr(config, 'whisperx_speaker_realtime_refresh_assign_threshold', 0.55) is None
+            else getattr(config, 'whisperx_speaker_realtime_refresh_assign_threshold', 0.55)
+        ),
+        speaker_realtime_refresh_min_cluster_seconds=float(
+            4.0 if getattr(config, 'whisperx_speaker_realtime_refresh_min_cluster_seconds', 4.0) is None
+            else getattr(config, 'whisperx_speaker_realtime_refresh_min_cluster_seconds', 4.0)
+        ),
+        speaker_realtime_refresh_merge=bool(getattr(config, 'whisperx_speaker_realtime_refresh_merge', True)),
+        speaker_realtime_refresh_match_mode=str(getattr(config, 'whisperx_speaker_realtime_refresh_match_mode', 'argmax') or 'argmax'),
         speaker_profile_reconcile_threshold=float(getattr(config, 'whisperx_speaker_profile_reconcile_threshold', 0.52) or 0.52),
         speaker_profile_store_path=str(getattr(config, 'whisperx_speaker_profile_store_path', '') or ''),
         speaker_profile_quality_gate_enabled=bool(getattr(config, 'whisperx_speaker_profile_quality_gate_enabled', False)),

@@ -133,6 +133,20 @@ class RecordingAudioCapture(AudioCaptureBase):
     def out_dir(self) -> Path:
         return self._out_dir
 
+    @property
+    def wav_path(self) -> Path:
+        return self._wav_path
+
+    @property
+    def finalized(self) -> bool:
+        return bool(self._finalized)
+
+    @property
+    def duration_seconds(self) -> float:
+        """Recorded audio duration; only meaningful after `stop()` has finalized the WAV."""
+        (sr, ch) = self._wav_params or (self.sample_rate, self.channels)
+        return float(self._total_bytes) / float(max(1, int(sr) * max(1, int(ch)) * 2))
+
     def start(self) -> None:
         self._inner.start()
         self.sample_rate = int(getattr(self._inner, "sample_rate", self.sample_rate) or self.sample_rate)

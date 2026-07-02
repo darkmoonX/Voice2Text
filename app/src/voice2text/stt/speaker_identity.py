@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
+import time
 from typing import Callable
 
 import numpy as np
@@ -69,6 +70,11 @@ class SpeakerIdentityConfig:
     realtime_update_match_threshold: float = 0.0
     realtime_visible_seconds: float = 24.0
     realtime_visible_samples: int = 16
+    realtime_refresh_alpha: float = 0.5
+    realtime_refresh_assign_threshold: float = 0.55
+    realtime_refresh_min_cluster_seconds: float = 4.0
+    realtime_refresh_merge: bool = True
+    realtime_refresh_match_mode: str = "argmax"
 
 
 class _BaseEmbeddingBackend:
@@ -376,6 +382,16 @@ class SpeakerIdentityEngine:
         self._rt_update_match_threshold = float(max(0.0, getattr(config, "realtime_update_match_threshold", 0.0)))
         self._rt_visible_seconds = float(max(0.0, getattr(config, "realtime_visible_seconds", 24.0)))
         self._rt_visible_samples = int(max(1, getattr(config, "realtime_visible_samples", 16)))
+        self._rt_refresh_alpha = float(max(0.0, min(1.0, getattr(config, "realtime_refresh_alpha", 0.5))))
+        self._rt_refresh_assign_threshold = float(
+            max(0.0, min(0.999, getattr(config, "realtime_refresh_assign_threshold", 0.55)))
+        )
+        self._rt_refresh_min_cluster_seconds = float(
+            max(0.0, getattr(config, "realtime_refresh_min_cluster_seconds", 4.0))
+        )
+        self._rt_refresh_merge = bool(getattr(config, "realtime_refresh_merge", True))
+        refresh_match_mode = str(getattr(config, "realtime_refresh_match_mode", "argmax") or "argmax").strip().lower()
+        self._rt_refresh_match_mode = "mutual" if refresh_match_mode == "mutual" else "argmax"
         self._quality_gate = config.quality_gate or ClipQualityConfig()
         self._on_status = config.on_status
         self._last_stats: dict[str, object] = {}
@@ -421,6 +437,178 @@ class SpeakerIdentityEngine:
                 f"merged={stats.get('merged_count', 0)}; profile_total={stats.get('profile_count', 0)}"
             )
         return stats
+
+    def refresh_inventory(self, cluster_centroids: dict[str, object]) -> dict[str, object]:
+        started_at = time.perf_counter()
+        stats: dict[str, object] = {
+            "enabled": bool(self._enabled),
+            "backend": self._backend_name,
+            "profile_store_ready": bool(self._profile_store is not None),
+            "status": "init",
+            "alpha": float(self._rt_refresh_alpha),
+            "assign_threshold": float(self._rt_refresh_assign_threshold),
+            "min_cluster_seconds": float(self._rt_refresh_min_cluster_seconds),
+            "merge_enabled": bool(self._rt_refresh_merge),
+            "match_mode": str(self._rt_refresh_match_mode),
+            "clusters": 0,
+            "profile_count_before": int(self._profile_store.profile_count()) if self._profile_store is not None else 0,
+            "profile_count": int(self._profile_store.profile_count()) if self._profile_store is not None else 0,
+            "refreshed_count": 0,
+            "merged_count": 0,
+            "remap": {},
+            "assignments": [],
+        }
+        if not self._enabled:
+            stats["status"] = "skip_disabled"
+            self._last_stats = stats
+            return stats
+        if self._profile_store is None:
+            stats["status"] = "skip_store_unavailable"
+            self._last_stats = stats
+            return stats
+        clusters: dict[str, np.ndarray] = {}
+        cluster_seconds: dict[str, float] = {}
+        for cluster_id, payload in dict(cluster_centroids or {}).items():
+            cid = str(cluster_id or "").strip()
+            if not cid:
+                continue
+            duration_seconds = self._rt_refresh_min_cluster_seconds
+            centroid_payload = payload
+            if isinstance(payload, dict):
+                centroid_payload = payload.get("centroid")
+                try:
+                    duration_seconds = float(payload.get("duration_seconds", 0.0) or 0.0)
+                except Exception:
+                    duration_seconds = 0.0
+            if duration_seconds < self._rt_refresh_min_cluster_seconds:
+                continue
+            centroid = _normalize_embedding(np.asarray(centroid_payload if centroid_payload is not None else [], dtype=np.float32))
+            if centroid.size == 0:
+                continue
+            clusters[cid] = centroid
+            cluster_seconds[cid] = float(duration_seconds)
+        stats["clusters"] = int(len(clusters))
+        if not clusters:
+            stats["status"] = "skip_no_clusters"
+            stats["elapsed_seconds"] = float(time.perf_counter() - started_at)
+            self._last_stats = stats
+            return stats
+
+        profiles = self._profile_store.profile_summaries()
+        if not profiles:
+            stats["status"] = "skip_no_profiles"
+            stats["elapsed_seconds"] = float(time.perf_counter() - started_at)
+            self._last_stats = stats
+            return stats
+        cluster_ids = list(clusters.keys())
+        rows: list[dict[str, object]] = []
+        profile_rows: list[tuple[dict[str, object], np.ndarray]] = []
+        best_profile_for_cluster: dict[str, tuple[str, float]] = {}
+        for profile in profiles:
+            profile_id = str(profile.get("id") or "")
+            centroid = _normalize_embedding(np.asarray(profile.get("centroid") or [], dtype=np.float32))
+            if not profile_id or centroid.size == 0:
+                continue
+            profile_rows.append((profile, centroid))
+            for cid in cluster_ids:
+                cluster = clusters[cid]
+                similarity = float(np.dot(centroid, cluster)) if centroid.size == cluster.size else -1.0
+                current = best_profile_for_cluster.get(cid)
+                if current is None or similarity > current[1]:
+                    best_profile_for_cluster[cid] = (profile_id, similarity)
+        for profile, centroid in profile_rows:
+            profile_id = str(profile.get("id") or "")
+            similarities: list[tuple[str, float]] = []
+            for cid in cluster_ids:
+                cluster = clusters[cid]
+                similarity = float(np.dot(centroid, cluster)) if centroid.size == cluster.size else -1.0
+                similarities.append((cid, similarity))
+            if not similarities:
+                continue
+            best_cluster_id, best_similarity = max(similarities, key=lambda item: item[1])
+            if best_similarity < self._rt_refresh_assign_threshold:
+                continue
+            if self._rt_refresh_match_mode == "mutual":
+                reciprocal = best_profile_for_cluster.get(best_cluster_id)
+                if reciprocal is None or reciprocal[0] != profile_id:
+                    continue
+            rows.append(
+                {
+                    "profile_id": profile_id,
+                    "cluster_id": best_cluster_id,
+                    "similarity": float(best_similarity),
+                    "weight": float(profile.get("weight", 0.0) or 0.0),
+                    "samples": int(profile.get("samples", 0) or 0),
+                    "total_seconds": float(profile.get("total_seconds", 0.0) or 0.0),
+                }
+            )
+
+        if not rows:
+            stats["status"] = "done_no_assignment"
+            stats["elapsed_seconds"] = float(time.perf_counter() - started_at)
+            self._last_stats = stats
+            return stats
+
+        remap: dict[str, str] = {}
+        refreshed_count = 0
+        merged_count = 0
+        rows_by_cluster: dict[str, list[dict[str, object]]] = {}
+        for row in rows:
+            rows_by_cluster.setdefault(str(row.get("cluster_id") or ""), []).append(row)
+        for cluster_id, cluster_rows in rows_by_cluster.items():
+            keep_row = max(cluster_rows, key=self._profile_maturity_key)
+            keep_id = str(keep_row.get("profile_id") or "")
+            drop_ids = [
+                str(row.get("profile_id") or "")
+                for row in cluster_rows
+                if str(row.get("profile_id") or "") and str(row.get("profile_id") or "") != keep_id
+            ]
+            if self._rt_refresh_merge and drop_ids:
+                merge_stats = self._profile_store.merge_profiles(keep_id, drop_ids)
+                merged_count += int(merge_stats.get("merged_count", 0) or 0)
+                remap.update({str(old): str(new) for old, new in dict(merge_stats.get("remap") or {}).items()})
+            if keep_id and self._profile_store.blend_centroid(keep_id, clusters[cluster_id], self._rt_refresh_alpha):
+                refreshed_count += 1
+
+        stats["assignments"] = rows
+        stats["refreshed_count"] = int(refreshed_count)
+        stats["merged_count"] = int(merged_count)
+        stats["remap"] = dict(remap)
+        stats["profile_count"] = int(self._profile_store.profile_count())
+        stats["status"] = "done"
+        stats["elapsed_seconds"] = float(time.perf_counter() - started_at)
+        self._last_stats = stats
+        return stats
+
+    def match_profile_readonly(self, embedding: np.ndarray, *, threshold: float) -> str | None:
+        """Round 0048: argmax-match a single embedding against persisted profile centroids,
+        READ-ONLY -- never mutates the store (no EMA, no merge, no new-profile creation). Used by
+        the pre-commit local-diarization relabel path, which needs a same-space comparison
+        (embedding must already be extracted with THIS engine's backend, same principle as the
+        round-0046 refresh) but must never write back, since the correction target there is a
+        still-mutable subtitle batch, not the inventory itself."""
+        if not self._enabled or self._profile_store is None:
+            return None
+        query = _normalize_embedding(np.asarray(embedding if embedding is not None else [], dtype=np.float32))
+        if query.size == 0:
+            return None
+        profiles = self._profile_store.profile_summaries()
+        if not profiles:
+            return None
+        best_id = ""
+        best_similarity = -1.0
+        for profile in profiles:
+            profile_id = str(profile.get("id") or "")
+            centroid = _normalize_embedding(np.asarray(profile.get("centroid") or [], dtype=np.float32))
+            if not profile_id or centroid.size == 0 or centroid.size != query.size:
+                continue
+            similarity = float(np.dot(centroid, query))
+            if similarity > best_similarity:
+                best_similarity = similarity
+                best_id = profile_id
+        if best_id and best_similarity >= float(max(0.0, min(0.999, threshold))):
+            return best_id
+        return None
 
     def apply(
         self,
@@ -754,6 +942,15 @@ class SpeakerIdentityEngine:
         if window_seconds <= 15.0 and self._rt_update_match_threshold > 0.0:
             return float(max(0.0, min(0.999, self._rt_update_match_threshold)))
         return None
+
+    @staticmethod
+    def _profile_maturity_key(profile: dict[str, object]) -> tuple[float, int, float, str]:
+        return (
+            float(profile.get("total_seconds", 0.0) or 0.0),
+            int(profile.get("samples", 0) or 0),
+            float(profile.get("weight", 0.0) or 0.0),
+            str(profile.get("profile_id") or profile.get("id") or ""),
+        )
 
     def _profile_evidence_policy(self, *, audio_seconds: float, min_seconds: float) -> tuple[float, int, float]:
         """Return candidate evidence thresholds for long direct chunks vs rolling windows.

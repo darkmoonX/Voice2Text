@@ -13,6 +13,7 @@ import shutil
 import subprocess
 import sys
 import urllib.request
+import zlib
 
 from ..model_paths import library_model_dir
 from .audio_utils import has_enough_signal, normalize_chinese_script, normalize_language_hint, pcm16_to_mono_float, resample
@@ -69,6 +70,11 @@ class WhisperXTranscriber:
         speaker_realtime_update_match_threshold: float = 0.0,
         speaker_realtime_visible_seconds: float = 24.0,
         speaker_realtime_visible_samples: int = 16,
+        speaker_realtime_refresh_alpha: float = 0.5,
+        speaker_realtime_refresh_assign_threshold: float = 0.55,
+        speaker_realtime_refresh_min_cluster_seconds: float = 4.0,
+        speaker_realtime_refresh_merge: bool = True,
+        speaker_realtime_refresh_match_mode: str = "argmax",
         speaker_profile_reconcile_threshold: float = 0.52,
         speaker_profile_store_path: str = "",
         speaker_profile_quality_gate_enabled: bool = False,
@@ -165,6 +171,14 @@ class WhisperXTranscriber:
         self._speaker_realtime_update_match_threshold = float(max(0.0, speaker_realtime_update_match_threshold))
         self._speaker_realtime_visible_seconds = float(max(0.0, speaker_realtime_visible_seconds))
         self._speaker_realtime_visible_samples = int(max(1, speaker_realtime_visible_samples))
+        self._speaker_realtime_refresh_alpha = float(max(0.0, min(1.0, speaker_realtime_refresh_alpha)))
+        self._speaker_realtime_refresh_assign_threshold = float(
+            max(0.0, min(0.999, speaker_realtime_refresh_assign_threshold))
+        )
+        self._speaker_realtime_refresh_min_cluster_seconds = float(max(0.0, speaker_realtime_refresh_min_cluster_seconds))
+        self._speaker_realtime_refresh_merge = bool(speaker_realtime_refresh_merge)
+        refresh_match_mode = str(speaker_realtime_refresh_match_mode or "argmax").strip().lower()
+        self._speaker_realtime_refresh_match_mode = "mutual" if refresh_match_mode == "mutual" else "argmax"
         self._speaker_profile_reconcile_threshold = float(
             max(0.0, min(0.999, speaker_profile_reconcile_threshold))
         )
@@ -226,6 +240,11 @@ class WhisperXTranscriber:
         self._speaker_embedding_inference = None
         self._speaker_embedding_disabled_reason: str | None = None
         self._speaker_identity_engine: SpeakerIdentityEngine | None = None
+        # Guards concurrent use of the shared whole-file-diarization pipeline instance. Round
+        # 0046's refresh_speaker_inventory (background thread) and round 0048's
+        # resolve_local_speaker (synchronous, loop thread) both acquire this non-blocking, so if
+        # one is mid-call the other skips this cycle (None/skip) rather than racing pyannote.
+        self._speaker_inventory_refresh_lock = threading.Lock()
         self._last_speaker_profile_stats: dict[str, object] = {}
         self._last_transcription_meta: dict[str, object] = {}
         self._last_alignment_timing: dict[str, object] = {}
@@ -261,6 +280,11 @@ class WhisperXTranscriber:
                     realtime_update_match_threshold=self._speaker_realtime_update_match_threshold,
                     realtime_visible_seconds=self._speaker_realtime_visible_seconds,
                     realtime_visible_samples=self._speaker_realtime_visible_samples,
+                    realtime_refresh_alpha=self._speaker_realtime_refresh_alpha,
+                    realtime_refresh_assign_threshold=self._speaker_realtime_refresh_assign_threshold,
+                    realtime_refresh_min_cluster_seconds=self._speaker_realtime_refresh_min_cluster_seconds,
+                    realtime_refresh_merge=self._speaker_realtime_refresh_merge,
+                    realtime_refresh_match_mode=self._speaker_realtime_refresh_match_mode,
                     reconcile_threshold=self._speaker_profile_reconcile_threshold,
                     model_root=str(self._model_root),
                     device=self._diarization_device,
@@ -1255,7 +1279,13 @@ class WhisperXTranscriber:
         self._emit("whole-file diarization pipeline initialized (CPU).")
         return self._whole_file_diarization_pipeline
 
-    def diarize_whole_file_turns(self, chunk, channel_mode: str = "mono") -> list[dict[str, object]]:
+    def diarize_whole_file_turns(
+        self,
+        chunk,
+        channel_mode: str = "mono",
+        *,
+        emit_status: bool = True,
+    ) -> list[dict[str, object]]:
         """Run ONE diarization pass over the whole audio and return global turns.
 
         Returns ``[{"start", "end", "speaker"}, ...]`` (absolute seconds, labels like
@@ -1292,15 +1322,226 @@ class WhisperXTranscriber:
                 if speaker and end > start:
                     turns.append({"start": start, "end": end, "speaker": speaker})
             turns.sort(key=lambda t: (float(t["start"]), float(t["end"])))
-            self._emit(
-                "[speaker-turn] whole-file diarization: "
-                f"turns={len(turns)}; speakers={len({t['speaker'] for t in turns})}; "
-                f"elapsed={time.perf_counter() - started_at:.1f}s"
-            )
+            if emit_status:
+                self._emit(
+                    "[speaker-turn] whole-file diarization: "
+                    f"turns={len(turns)}; speakers={len({t['speaker'] for t in turns})}; "
+                    f"elapsed={time.perf_counter() - started_at:.1f}s"
+                )
             return turns
         except Exception as exc:  # noqa: BLE001
-            self._emit(f"WhisperX whole-file diarization failed: {exc}")
+            if emit_status:
+                self._emit(f"WhisperX whole-file diarization failed: {exc}")
             return []
+
+    def refresh_speaker_inventory(self, chunk, channel_mode: str = "mono") -> dict[str, object]:
+        if not self._speaker_inventory_refresh_lock.acquire(blocking=False):
+            return {"status": "skip_in_flight"}
+        try:
+            try:
+                if not self._enable_diarization or self._speaker_identity_engine is None:
+                    return {"status": "skip_disabled"}
+                audio = pcm16_to_mono_float(chunk.pcm16, chunk.channels, channel_mode=channel_mode)
+                if getattr(chunk, "sample_rate", 16000) != 16000 and audio.size:
+                    audio = resample(audio, chunk.sample_rate, 16000)
+                audio_f32 = np.asarray(audio, dtype=np.float32).reshape(-1)
+                if audio_f32.size < 1600:
+                    return {"status": "skip_audio_too_short"}
+                if not np.isfinite(audio_f32).all():
+                    audio_f32 = np.nan_to_num(audio_f32, nan=0.0, posinf=1.0, neginf=-1.0)
+                turns = self.diarize_whole_file_turns(chunk, channel_mode=channel_mode, emit_status=False)
+                if not turns:
+                    return {"status": "skip_no_turns"}
+                spans_by_speaker: dict[str, list[tuple[float, float]]] = {}
+                for turn in turns:
+                    try:
+                        start = float(turn.get("start"))
+                        end = float(turn.get("end"))
+                        speaker = str(turn.get("speaker") or "").strip()
+                    except Exception:
+                        continue
+                    if speaker and end > start:
+                        spans_by_speaker.setdefault(speaker, []).append((start, end))
+                if not spans_by_speaker:
+                    return {"status": "skip_no_speaker_spans"}
+                cluster_centroids: dict[str, dict[str, object]] = {}
+                backend = self._speaker_identity_engine._backend
+                for speaker, spans in spans_by_speaker.items():
+                    clip = self._speaker_identity_engine._collect_speaker_clip(audio_f32, spans)
+                    duration_seconds = float(clip.size) / 16000.0
+                    if duration_seconds < self._speaker_realtime_refresh_min_cluster_seconds:
+                        continue
+                    embedding = backend.extract_embedding(clip)
+                    if embedding is None:
+                        continue
+                    cluster_centroids[str(speaker)] = {
+                        "centroid": embedding,
+                        "duration_seconds": float(duration_seconds),
+                    }
+                if not cluster_centroids:
+                    return {"status": "skip_no_cluster_embeddings"}
+                refresh_stats = self._speaker_identity_engine.refresh_inventory(cluster_centroids)
+                self._emit(
+                    "[speaker-refresh] forward inventory refresh: "
+                    f"turns={len(turns)}; clusters={len(cluster_centroids)}; "
+                    f"status={refresh_stats.get('status', '?')}; "
+                    f"refreshed={refresh_stats.get('refreshed_count', 0)}; "
+                    f"merged={refresh_stats.get('merged_count', 0)}; "
+                    f"profiles={refresh_stats.get('profile_count', 0)}; "
+                    f"elapsed={float(refresh_stats.get('elapsed_seconds', 0.0) or 0.0):.1f}s"
+                )
+                return refresh_stats
+            except Exception:
+                return {"status": "skip_failed"}
+        finally:
+            self._speaker_inventory_refresh_lock.release()
+
+    def resolve_local_speaker(
+        self,
+        chunk,
+        channel_mode: str = "mono",
+        *,
+        sliver_floor_seconds: float = 1.5,
+        assign_threshold: float = 0.65,
+        target_start_seconds: float | None = None,
+        target_end_seconds: float | None = None,
+        stats: dict | None = None,
+    ) -> str | None:
+        """Round 0048: resolve a speaker id for a short (pre-commit, still-mutable) subtitle
+        batch via ONE local diarization pass over its surrounding context window, READ-ONLY
+        against the persisted profile store. Never mutates the store. Returns None on any
+        failure, disabled state, no confident match, or a degenerate (all-sliver) window --
+        the caller (assembler) treats None as "keep the existing label", so this always
+        degrades to at-least-as-good-as-today.
+
+        `chunk` is the full context window (the spike-validated ~20s, not just the batch's own
+        few seconds); `target_start_seconds`/`target_end_seconds` locate the batch inside it.
+        Borrow-the-partition: the local diarization decides the grouping over the whole window,
+        the batch inherits the cluster that overlaps its span the most, and that cluster's
+        audio across the WHOLE window feeds the profile-space embedding (a 2s batch alone is
+        too little speech for a trustworthy cosine). When the target span is omitted, falls
+        back to the window-dominant cluster.
+
+        Non-blocking on the shared whole-file-diarization pipeline lock (also used by round
+        0046's refresh_speaker_inventory): if that pipeline is busy, skip this relabel cycle.
+
+        `stats`, when given, receives a `reason` code describing why the call resolved or
+        bailed (observability only; never changes the return value). Consecutive drains at one
+        sentence break slice the same context window, so the diarization turns are memoised on
+        the exact chunk bytes (single-entry cache).
+        """
+
+        def _reason(code: str) -> None:
+            if stats is not None:
+                stats["reason"] = code
+
+        if not self._speaker_inventory_refresh_lock.acquire(blocking=False):
+            _reason("lock-busy")
+            return None
+        try:
+            try:
+                if not self._enable_diarization or self._speaker_identity_engine is None:
+                    _reason("diarization-disabled")
+                    return None
+                audio = pcm16_to_mono_float(chunk.pcm16, chunk.channels, channel_mode=channel_mode)
+                if getattr(chunk, "sample_rate", 16000) != 16000 and audio.size:
+                    audio = resample(audio, chunk.sample_rate, 16000)
+                audio_f32 = np.asarray(audio, dtype=np.float32).reshape(-1)
+                if audio_f32.size < 1600:
+                    _reason("short-audio")
+                    return None
+                if not np.isfinite(audio_f32).all():
+                    audio_f32 = np.nan_to_num(audio_f32, nan=0.0, posinf=1.0, neginf=-1.0)
+                diar_started_at = time.perf_counter()
+                turns = self._relabel_turns_cached(chunk, channel_mode=channel_mode)
+                if stats is not None:
+                    stats["turns_cached"] = bool(self._last_relabel_turns_cache_hit)
+                    stats["diar_seconds"] = time.perf_counter() - diar_started_at
+                if not turns:
+                    _reason("no-turns")
+                    return None
+                spans_by_speaker: dict[str, list[tuple[float, float]]] = {}
+                seconds_by_speaker: dict[str, float] = {}
+                for turn in turns:
+                    try:
+                        start = float(turn.get("start"))
+                        end = float(turn.get("end"))
+                        speaker = str(turn.get("speaker") or "").strip()
+                    except Exception:
+                        continue
+                    if speaker and end > start:
+                        spans_by_speaker.setdefault(speaker, []).append((start, end))
+                        seconds_by_speaker[speaker] = seconds_by_speaker.get(speaker, 0.0) + (end - start)
+                # Sliver filter (spike-validated, non-negotiable): drop local clusters shorter
+                # than the floor (their total seconds within the window) before any selection --
+                # without this, a noise-driven phantom split can outrank the real speaker.
+                floor = float(max(0.0, sliver_floor_seconds))
+                surviving = {spk: secs for spk, secs in seconds_by_speaker.items() if secs >= floor}
+                if not surviving:
+                    _reason("all-slivers")
+                    return None
+                if target_start_seconds is not None and target_end_seconds is not None:
+                    t_lo = float(target_start_seconds)
+                    t_hi = float(target_end_seconds)
+                    overlap_by_speaker: dict[str, float] = {}
+                    for spk in surviving:
+                        overlap = 0.0
+                        for start, end in spans_by_speaker[spk]:
+                            overlap += max(0.0, min(end, t_hi) - max(start, t_lo))
+                        if overlap > 0.0:
+                            overlap_by_speaker[spk] = overlap
+                    if not overlap_by_speaker:
+                        _reason("no-target-overlap")
+                        return None
+                    dominant_speaker = max(overlap_by_speaker.items(), key=lambda kv: kv[1])[0]
+                else:
+                    dominant_speaker = max(surviving.items(), key=lambda kv: kv[1])[0]
+                clip = self._speaker_identity_engine._collect_speaker_clip(
+                    audio_f32, spans_by_speaker[dominant_speaker]
+                )
+                if clip.size < 1600:
+                    _reason("short-clip")
+                    return None
+                backend = self._speaker_identity_engine._backend
+                embed_started_at = time.perf_counter()
+                embedding = backend.extract_embedding(clip)
+                if stats is not None:
+                    stats["embed_seconds"] = time.perf_counter() - embed_started_at
+                    stats["clip_seconds"] = float(clip.size) / 16000.0
+                if embedding is None:
+                    _reason("no-embedding")
+                    return None
+                resolved = self._speaker_identity_engine.match_profile_readonly(
+                    embedding, threshold=float(assign_threshold)
+                )
+                _reason("matched" if resolved else "below-threshold")
+                return resolved
+            except Exception as exc:
+                _reason(f"error:{type(exc).__name__}")
+                return None
+        finally:
+            self._speaker_inventory_refresh_lock.release()
+
+    def _relabel_turns_cached(self, chunk, *, channel_mode: str) -> list[dict[str, object]]:
+        """Single-entry memo for `resolve_local_speaker`'s diarization turns: batches draining
+        at the same sentence break slice the identical context window, so re-running the
+        pipeline per batch would multiply the dominant cost for byte-identical audio."""
+        pcm = bytes(chunk.pcm16)
+        key = (
+            len(pcm),
+            int(getattr(chunk, "sample_rate", 16000)),
+            int(getattr(chunk, "channels", 1)),
+            zlib.crc32(pcm[:4096]),
+            zlib.crc32(pcm[-4096:]),
+        )
+        cached = getattr(self, "_relabel_turns_cache", None)
+        if cached is not None and cached[0] == key:
+            self._last_relabel_turns_cache_hit = True
+            return cached[1]
+        self._last_relabel_turns_cache_hit = False
+        turns = self.diarize_whole_file_turns(chunk, channel_mode=channel_mode, emit_status=False)
+        self._relabel_turns_cache = (key, turns)
+        return turns
 
     def _attach_speaker_labels(self, audio, segments: list[dict]) -> list[dict]:
         detail_started_at = time.perf_counter()
