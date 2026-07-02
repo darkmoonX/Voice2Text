@@ -81,7 +81,7 @@ Notes:
 - Its window length now follows `segment_seconds` (same setting used by Python STT windows).
 
 Advanced build parameters and MSVC/MinGW presets:
-- [app/native/audio_bridge/README.md](/D:/Voice2Text/app/native/audio_bridge/README.md)
+- [app/native/audio_bridge/README.md](/D:/project/Voice2Text/app/native/audio_bridge/README.md)
 
 ## Optional whisper.cpp Vulkan Backend
 
@@ -509,7 +509,7 @@ selected backend so a slow/hanging backend can never stall the subtitle loop.
 
 ## Additional Docs
 
-- Operator runbook: [docs/build-and-run.md](/D:/Voice2Text/docs/build-and-run.md)
-- Repo context (consolidated): [docs/context/CONTEXT.md](/D:/Voice2Text/docs/context/CONTEXT.md)
-- AI collaboration workflow: [docs/ai/AI_WORKFLOW.md](/D:/Voice2Text/docs/ai/AI_WORKFLOW.md)
-- Changelog: [docs/changelog.md](/D:/Voice2Text/docs/changelog.md)
+- Operator runbook: [docs/build-and-run.md](/D:/project/Voice2Text/docs/build-and-run.md)
+- Repo context (consolidated): [docs/context/CONTEXT.md](/D:/project/Voice2Text/docs/context/CONTEXT.md)
+- AI collaboration workflow: [docs/ai/AI_WORKFLOW.md](/D:/project/Voice2Text/docs/ai/AI_WORKFLOW.md)
+- Changelog: [docs/changelog.md](/D:/project/Voice2Text/docs/changelog.md)

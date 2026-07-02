@@ -38,15 +38,15 @@ The granular behavior/decision log that previously lived here now lives in:
 2. Build the capture bridge in `app/native/audio_bridge/`.
 3. Run the app from `app/src` (`python main.py`).
 
-Detailed steps: [docs/build-and-run.md](/D:/Voice2Text/docs/build-and-run.md).
+Detailed steps: [docs/build-and-run.md](/D:/project/Voice2Text/docs/build-and-run.md).
 
 ## Documentation
 
-- Documentation index: [docs/README.md](/D:/Voice2Text/docs/README.md)
-- App runtime guide: [app/README.md](/D:/Voice2Text/app/README.md)
-- AI collaboration workflow: [docs/ai/AI_WORKFLOW.md](/D:/Voice2Text/docs/ai/AI_WORKFLOW.md)
-- Repo context: [docs/context/CONTEXT.md](/D:/Voice2Text/docs/context/CONTEXT.md)
-- Architecture constraints: [ARCHITECTURE_NOTES.md](/D:/Voice2Text/ARCHITECTURE_NOTES.md)
-- Compare workflow: [app/src/tests/compare_whisperx_test/WORKFLOW.md](/D:/Voice2Text/app/src/tests/compare_whisperx_test/WORKFLOW.md)
-- Bridge guide: [app/native/audio_bridge/README.md](/D:/Voice2Text/app/native/audio_bridge/README.md)
-- Changelog: [docs/changelog.md](/D:/Voice2Text/docs/changelog.md)
+- Documentation index: [docs/README.md](/D:/project/Voice2Text/docs/README.md)
+- App runtime guide: [app/README.md](/D:/project/Voice2Text/app/README.md)
+- AI collaboration workflow: [docs/ai/AI_WORKFLOW.md](/D:/project/Voice2Text/docs/ai/AI_WORKFLOW.md)
+- Repo context: [docs/context/CONTEXT.md](/D:/project/Voice2Text/docs/context/CONTEXT.md)
+- Architecture constraints: [ARCHITECTURE_NOTES.md](/D:/project/Voice2Text/ARCHITECTURE_NOTES.md)
+- Compare workflow: [app/src/tests/compare_whisperx_test/WORKFLOW.md](/D:/project/Voice2Text/app/src/tests/compare_whisperx_test/WORKFLOW.md)
+- Bridge guide: [app/native/audio_bridge/README.md](/D:/project/Voice2Text/app/native/audio_bridge/README.md)
+- Changelog: [docs/changelog.md](/D:/project/Voice2Text/docs/changelog.md)

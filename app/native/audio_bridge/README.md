@@ -6,7 +6,7 @@ In-repo C++ capture bridge used by Python runtime for:
 - `app` mode (Application Loopback Capture with process targeting)
 
 This document is bridge-specific (build parameters and runtime behavior).
-For full operator workflow, use [docs/build-and-run.md](/D:/Voice2Text/docs/build-and-run.md).
+For full operator workflow, use [docs/build-and-run.md](/D:/project/Voice2Text/docs/build-and-run.md).
 
 ## Stream Behavior
 
