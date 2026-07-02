@@ -112,6 +112,9 @@ class RuntimeConfig:
     subtitle_relabel_window_seconds: float = 20.0
     subtitle_relabel_sliver_floor_seconds: float = 1.5
     subtitle_relabel_assign_threshold: float = 0.65
+    # Round 0052: turn-aware overwrite gate -- a resolved profile only replaces a word's existing
+    # non-empty label when its cosine beats the incumbent label's cosine by this margin.
+    subtitle_relabel_margin: float = 0.05
     # Final display-script fold for the visible/exported subtitle: '' (off, keep
     # per-word original script), 'hant', or 'hans'. Comparison/CER unaffected.
     subtitle_display_script: str = 'hant'

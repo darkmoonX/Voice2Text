@@ -128,10 +128,15 @@ class SubtitleAssembler:
         self._reanchor_majority_min_ratio = 0.6
         # Round 0048: pre-commit local-diarization relabel resolver, injected by the loop via
         # `set_relabel_resolver`. Called once per pending batch, right before it freezes (inside
-        # `_drain_pending_commits`), with the batch's absolute (start, end) span; returns a
-        # resolved speaker id or None (no confident relabel / disabled / any failure -> no-op,
-        # keep the existing label). None = feature off, byte-identical.
-        self._relabel_resolver: Callable[[float, float], str | None] | None = None
+        # `_drain_pending_commits`), with the batch's absolute (start, end) span. Returns either
+        # a resolved speaker id (str, legacy whole-batch overwrite), a list of labeled span dicts
+        # ({"start","end","resolved","resolved_cosine","scores"} -- round 0052 turn-aware
+        # per-word apply with the margin gate), or None (no confident relabel / disabled / any
+        # failure -> no-op, keep existing labels). None resolver = feature off, byte-identical.
+        self._relabel_resolver: Callable[[float, float], object] | None = None
+        # Round 0052 margin gate: a resolved profile only overwrites a word's existing non-empty
+        # label when its cosine beats the incumbent label's own cosine by this margin.
+        self._relabel_margin = 0.05
         # Final display-script fold (one consistent Simplified/Traditional script
         # in the visible/exported text). '' disables. Applied only to the output
         # projection -- never to internal word state or the overlap-comparison
@@ -199,10 +204,21 @@ class SubtitleAssembler:
             except Exception:
                 pass
 
-    def set_relabel_resolver(self, resolver: Callable[[float, float], str | None] | None) -> None:
+    def set_relabel_resolver(
+        self,
+        resolver: Callable[[float, float], object] | None,
+        *,
+        margin: float | None = None,
+    ) -> None:
         """Round 0048: inject the pre-commit local-diarization relabel resolver. `None` disables
-        the feature (default) -- `_drain_pending_commits` skips the relabel call entirely."""
+        the feature (default) -- `_drain_pending_commits` skips the relabel call entirely.
+        `margin` (round 0052) configures the turn-aware overwrite gate; None keeps the current."""
         self._relabel_resolver = resolver
+        if margin is not None:
+            try:
+                self._relabel_margin = max(0.0, min(1.0, float(margin)))
+            except Exception:
+                pass
 
     def set_display_script(self, script: str | None) -> None:
         token = str(script or '').strip().lower()
@@ -1436,11 +1452,11 @@ class SubtitleAssembler:
             self._append_to_rolling_committed_text(batch)
 
     def _apply_relabel_if_configured(self, batch: list[_WordState]) -> None:
-        """Round 0048: right before a batch freezes, let the injected resolver replace its
-        speaker label with one resolved from a local re-diarization pass over the batch's own
-        (still-mutable) audio span. No-op (batch keeps its existing label) unless the resolver is
-        set, returns a non-empty id, and doesn't raise -- any failure here must never break the
-        live merge path."""
+        """Round 0048/0052: right before a batch freezes, let the injected resolver refine its
+        speaker labels from a local re-diarization pass over the batch's (still-mutable) audio
+        span. A str result = legacy whole-batch overwrite (round 0048); a list result = turn-aware
+        per-word apply with the margin gate (round 0052). No-op on None/empty/any exception --
+        any failure here must never break the live merge path."""
         if self._relabel_resolver is None or not batch:
             return
         try:
@@ -1449,11 +1465,51 @@ class SubtitleAssembler:
             resolved = self._relabel_resolver(start, end)
         except Exception:
             return
+        if isinstance(resolved, list):
+            self._apply_turn_aware_relabel(batch, resolved)
+            return
         token = str(resolved or '').strip()
         if not token:
             return
         for w in batch:
             w.speaker = token
+
+    def _apply_turn_aware_relabel(self, batch: list[_WordState], entries: list) -> None:
+        """Round 0052: per-word relabel from labeled local-diar spans. A word inherits the entry
+        containing its midpoint. The margin gate bounds the damage when the profile inventory
+        itself is wrong (the Bn failure mode): a resolved profile only overwrites an existing
+        non-empty label when its cosine beats the incumbent label's own cosine by
+        `_relabel_margin`; empty labels are back-filled on any confident match. Words in
+        unresolved gaps keep their labels."""
+        spans: list[tuple[float, float, str, float, dict]] = []
+        for entry in entries:
+            try:
+                lo = float(entry.get("start"))
+                hi = float(entry.get("end"))
+                token = str(entry.get("resolved") or "").strip()
+                cosine = float(entry.get("resolved_cosine"))
+                scores = entry.get("scores") or {}
+            except Exception:
+                continue
+            if token and hi > lo:
+                spans.append((lo, hi, token, cosine, scores if isinstance(scores, dict) else {}))
+        if not spans:
+            return
+        margin = float(self._relabel_margin)
+        for w in batch:
+            midpoint = (float(w.start) + float(w.end)) / 2.0
+            for (lo, hi, token, cosine, scores) in spans:
+                if lo <= midpoint < hi or (midpoint == hi and lo < hi):
+                    current = str(w.speaker or '').strip()
+                    if not current:
+                        w.speaker = token
+                    elif current == token:
+                        pass
+                    else:
+                        incumbent = scores.get(current)
+                        if incumbent is None or cosine >= float(incumbent) + margin:
+                            w.speaker = token
+                    break
 
     def _normalize_output_text(self, text: str) -> str:
         if not text:

@@ -85,6 +85,9 @@ class TranscriptionLoopEngine:
         relabel_assign_threshold = float(
             max(0.0, min(0.999, getattr(self._deps.config, "subtitle_relabel_assign_threshold", 0.65) or 0.65))
         )
+        relabel_margin = float(
+            max(0.0, min(1.0, getattr(self._deps.config, "subtitle_relabel_margin", 0.05) or 0.0))
+        )
         relabel_buffer: bytearray | None = bytearray() if relabel_enabled else None
         relabel_buffer_start_seconds = 0.0
 
@@ -155,8 +158,12 @@ class TranscriptionLoopEngine:
                 return None
             try:
                 clip_transcriber = self._deps.get_transcriber()
+                # Round 0052: prefer the turn-aware resolver (labeled spans + margin-gate
+                # evidence); fall back to the round-0048 single-token resolver on older
+                # providers. Neither -> skip.
+                turns_fn = getattr(clip_transcriber, "resolve_local_speaker_turns", None)
                 resolve_fn = getattr(clip_transcriber, "resolve_local_speaker", None)
-                if not callable(resolve_fn):
+                if not callable(turns_fn) and not callable(resolve_fn):
                     _emit_relabel("skip=no-resolver")
                     return None
                 buf_start = relabel_buffer_start_seconds
@@ -187,15 +194,33 @@ class TranscriptionLoopEngine:
                 channel_mode = str(getattr(self._deps.config, "source_channel_mode", "mono") or "mono")
                 resolve_stats: dict = {}
                 resolve_started_at = time.perf_counter()
-                resolved = resolve_fn(
-                    span_chunk,
-                    channel_mode=channel_mode,
-                    sliver_floor_seconds=relabel_sliver_floor_seconds,
-                    assign_threshold=relabel_assign_threshold,
-                    target_start_seconds=max(0.0, float(span_start) - ctx_lo),
-                    target_end_seconds=max(0.0, float(span_end) - ctx_lo),
-                    stats=resolve_stats,
-                )
+                if callable(turns_fn):
+                    resolved = turns_fn(
+                        span_chunk,
+                        channel_mode=channel_mode,
+                        sliver_floor_seconds=relabel_sliver_floor_seconds,
+                        assign_threshold=relabel_assign_threshold,
+                        target_start_seconds=max(0.0, float(span_start) - ctx_lo),
+                        target_end_seconds=max(0.0, float(span_end) - ctx_lo),
+                        stats=resolve_stats,
+                    )
+                    if resolved:
+                        # Provider spans are chunk-relative; word timestamps are absolute.
+                        for entry in resolved:
+                            entry["start"] = float(entry["start"]) + ctx_lo
+                            entry["end"] = float(entry["end"]) + ctx_lo
+                    summary = f"spans={len(resolved)}" if resolved else "spans=none"
+                else:
+                    resolved = resolve_fn(
+                        span_chunk,
+                        channel_mode=channel_mode,
+                        sliver_floor_seconds=relabel_sliver_floor_seconds,
+                        assign_threshold=relabel_assign_threshold,
+                        target_start_seconds=max(0.0, float(span_start) - ctx_lo),
+                        target_end_seconds=max(0.0, float(span_end) - ctx_lo),
+                        stats=resolve_stats,
+                    )
+                    summary = f"resolved={resolved or 'none'}"
                 diar_s = resolve_stats.get("diar_seconds")
                 embed_s = resolve_stats.get("embed_seconds")
                 clip_s = resolve_stats.get("clip_seconds")
@@ -205,7 +230,7 @@ class TranscriptionLoopEngine:
                 if embed_s is not None:
                     breakdown += f"; embed={float(embed_s):.3f}s(clip={float(clip_s or 0.0):.1f}s)"
                 _emit_relabel(
-                    f"resolved={resolved or 'none'}; reason={resolve_stats.get('reason', 'unknown')}; "
+                    f"{summary}; reason={resolve_stats.get('reason', 'unknown')}; "
                     f"ctx={ctx_lo:.2f}..{buf_end:.2f}s; cached={resolve_stats.get('turns_cached', False)}{breakdown}",
                     time.perf_counter() - resolve_started_at,
                 )
@@ -214,7 +239,10 @@ class TranscriptionLoopEngine:
                 _emit_relabel(f"skip=error:{type(exc).__name__}")
                 return None
 
-        self._deps.subtitle_assembler.set_relabel_resolver(_resolve_relabel_span if relabel_enabled else None)
+        self._deps.subtitle_assembler.set_relabel_resolver(
+            _resolve_relabel_span if relabel_enabled else None,
+            margin=relabel_margin,
+        )
         last_chunk_at = time.monotonic()
         last_recover_at = 0.0
 

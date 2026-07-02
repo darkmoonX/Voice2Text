@@ -610,6 +610,26 @@ class SpeakerIdentityEngine:
             return best_id
         return None
 
+    def score_profiles_readonly(self, embedding: np.ndarray) -> dict[str, float]:
+        """Round 0052: cosine of one embedding against EVERY persisted profile centroid,
+        READ-ONLY (same non-mutation contract as `match_profile_readonly`). The caller uses the
+        full score map for the relabel margin gate: a resolved profile may only overwrite a word's
+        existing label when its cosine beats the incumbent label's own cosine by a margin -- which
+        requires knowing the incumbent's score, not just the argmax."""
+        if not self._enabled or self._profile_store is None:
+            return {}
+        query = _normalize_embedding(np.asarray(embedding if embedding is not None else [], dtype=np.float32))
+        if query.size == 0:
+            return {}
+        scores: dict[str, float] = {}
+        for profile in self._profile_store.profile_summaries():
+            profile_id = str(profile.get("id") or "")
+            centroid = _normalize_embedding(np.asarray(profile.get("centroid") or [], dtype=np.float32))
+            if not profile_id or centroid.size == 0 or centroid.size != query.size:
+                continue
+            scores[profile_id] = float(np.dot(centroid, query))
+        return scores
+
     def apply(
         self,
         *,

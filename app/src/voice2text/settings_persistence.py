@@ -68,6 +68,7 @@ _PERSIST_KEYS = {
     "subtitle_relabel_window_seconds",
     "subtitle_relabel_sliver_floor_seconds",
     "subtitle_relabel_assign_threshold",
+    "subtitle_relabel_margin",
     "whisperx_speaker_profile_reconcile_threshold",
     "whisperx_speaker_profile_store_path",
     "whisperx_asr_temperatures",
