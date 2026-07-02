@@ -29,6 +29,12 @@ class _WordState:
     local_speaker: str = ''
 
 
+# Round 0052 Phase B: sentinel a relabel resolver returns when its (asynchronous) resolution for
+# the requested span is not ready yet -- the assembler keeps the batch pending and retries on a
+# later drain instead of freezing it with unrefined labels.
+RELABEL_PENDING = object()
+
+
 class SubtitleAssembler:
     _CJK_MAX_COMPACT_CHARS = 18
     _HISTORY_TAIL_DEDUPE_WORDS = 160
@@ -137,6 +143,10 @@ class SubtitleAssembler:
         # Round 0052 margin gate: a resolved profile only overwrites a word's existing non-empty
         # label when its cosine beats the incumbent label's own cosine by this margin.
         self._relabel_margin = 0.05
+        # Round 0052 Phase B: when True the resolver is asynchronous -- sentence breaks route
+        # stable words through the pending buffer (instead of force-draining + direct append) so
+        # batches can wait for their worker resolution while commit order stays monotonic.
+        self._relabel_defer_enabled = False
         # Final display-script fold (one consistent Simplified/Traditional script
         # in the visible/exported text). '' disables. Applied only to the output
         # projection -- never to internal word state or the overlap-comparison
@@ -209,16 +219,21 @@ class SubtitleAssembler:
         resolver: Callable[[float, float], object] | None,
         *,
         margin: float | None = None,
+        defer: bool | None = None,
     ) -> None:
         """Round 0048: inject the pre-commit local-diarization relabel resolver. `None` disables
         the feature (default) -- `_drain_pending_commits` skips the relabel call entirely.
-        `margin` (round 0052) configures the turn-aware overwrite gate; None keeps the current."""
+        `margin` (round 0052) configures the turn-aware overwrite gate; `defer` (Phase B) marks
+        the resolver as asynchronous (may return RELABEL_PENDING; sentence breaks route through
+        the pending buffer). None keeps the current value."""
         self._relabel_resolver = resolver
         if margin is not None:
             try:
                 self._relabel_margin = max(0.0, min(1.0, float(margin)))
             except Exception:
                 pass
+        if defer is not None:
+            self._relabel_defer_enabled = bool(defer)
 
     def set_display_script(self, script: str | None) -> None:
         token = str(script or '').strip().lower()
@@ -565,9 +580,23 @@ class SubtitleAssembler:
         self._last_emitted_source_text = final_text
         return self._project_display_script(final_text)
 
-    def mark_sentence_break(self) -> None:
+    def mark_sentence_break(self, now: float | None = None) -> None:
         # Force current confirmed words into immutable history on sentence break.
         # Drain any older held pending words first so commit order stays monotonic.
+        if self._relabel_resolver is not None and self._relabel_defer_enabled and self._commit_hold_seconds > 0.0:
+            # Round 0052 Phase B: an async resolver may not have this burst's resolutions yet --
+            # don't force-freeze past it. Drain whatever has actually aged past the hold window
+            # (real `now`, not inf -- inf would force-drain everything and defeat the point of
+            # holding), then route the stable words through the pending buffer as one batch (same
+            # FIFO, so commit order stays monotonic while the batch waits on its worker).
+            effective_now = float(now) if now is not None else float(self._rolling_committed_last_end or 0.0)
+            self._reanchor_and_drain_pending(now=effective_now, force_all=False)
+            if self._stable_words:
+                moved = list(self._stable_words)
+                self._append_history_words(moved)
+                self._stable_words = []
+                self._absorb_moved_into_commit(moved)
+            return
         self._reanchor_and_drain_pending(now=float('inf'), force_all=True)
         if self._stable_words:
             moved = list(self._stable_words)
@@ -1447,32 +1476,44 @@ class SubtitleAssembler:
                     ready.append(self._pending_commit_batches.pop(0))
                 else:
                     break
-        for batch in ready:
-            self._apply_relabel_if_configured(batch)
+        for index, batch in enumerate(ready):
+            outcome = self._apply_relabel_if_configured(batch, allow_defer=not force_all)
+            if outcome is RELABEL_PENDING:
+                # Round 0052 Phase B: resolution not ready -- put this batch (and everything
+                # behind it, commit order is FIFO) back at the front and retry on a later drain.
+                self._pending_commit_batches = ready[index:] + self._pending_commit_batches
+                return
             self._append_to_rolling_committed_text(batch)
 
-    def _apply_relabel_if_configured(self, batch: list[_WordState]) -> None:
+    def _apply_relabel_if_configured(self, batch: list[_WordState], *, allow_defer: bool = False):
         """Round 0048/0052: right before a batch freezes, let the injected resolver refine its
         speaker labels from a local re-diarization pass over the batch's (still-mutable) audio
         span. A str result = legacy whole-batch overwrite (round 0048); a list result = turn-aware
-        per-word apply with the margin gate (round 0052). No-op on None/empty/any exception --
-        any failure here must never break the live merge path."""
+        per-word apply with the margin gate (round 0052); `RELABEL_PENDING` (Phase B async, only
+        honoured when `allow_defer`) = resolution in flight -- returned to the caller so the drain
+        can re-queue the batch. No-op on None/empty/any exception -- any failure here must never
+        break the live merge path."""
         if self._relabel_resolver is None or not batch:
-            return
+            return None
         try:
             start = min(float(w.start) for w in batch)
             end = max(float(w.end) for w in batch)
             resolved = self._relabel_resolver(start, end)
         except Exception:
-            return
+            return None
+        if resolved is RELABEL_PENDING:
+            # force_all (finalize / stream end) cannot wait on a worker -- freeze with the
+            # existing labels rather than blocking the pipeline.
+            return RELABEL_PENDING if allow_defer else None
         if isinstance(resolved, list):
             self._apply_turn_aware_relabel(batch, resolved)
-            return
+            return None
         token = str(resolved or '').strip()
         if not token:
-            return
+            return None
         for w in batch:
             w.speaker = token
+        return None
 
     def _apply_turn_aware_relabel(self, batch: list[_WordState], entries: list) -> None:
         """Round 0052: per-word relabel from labeled local-diar spans. A word inherits the entry

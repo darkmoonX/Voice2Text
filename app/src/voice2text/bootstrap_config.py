@@ -124,6 +124,7 @@ def build_runtime_config(args: argparse.Namespace) -> RuntimeConfig:
         subtitle_relabel_sliver_floor_seconds=max(0.0, float(getattr(args, 'subtitle_relabel_sliver_floor_seconds', 1.5) or 0.0)),
         subtitle_relabel_assign_threshold=max(0.0, min(0.999, float(getattr(args, 'subtitle_relabel_assign_threshold', 0.65) or 0.65))),
         subtitle_relabel_margin=max(0.0, min(1.0, float(getattr(args, 'subtitle_relabel_margin', 0.05) or 0.0))),
+        subtitle_relabel_async=bool(getattr(args, 'subtitle_relabel_async', False)),
         source_mode=args.source_mode,
         source_file_path=str(args.source_file or ""),
         source_file_replay_speed=max(0.0, float(args.source_file_replay_speed)),

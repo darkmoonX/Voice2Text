@@ -115,6 +115,10 @@ class RuntimeConfig:
     # Round 0052: turn-aware overwrite gate -- a resolved profile only replaces a word's existing
     # non-empty label when its cosine beats the incumbent label's cosine by this margin.
     subtitle_relabel_margin: float = 0.05
+    # Round 0052 Phase B: resolve relabel spans on a background worker thread instead of the loop
+    # thread (avoids the ~5.2s synchronous diar stall at each sentence-break drain). False = the
+    # original round-0048 synchronous path (byte-identical to before Phase B).
+    subtitle_relabel_async: bool = False
     # Final display-script fold for the visible/exported subtitle: '' (off, keep
     # per-word original script), 'hant', or 'hans'. Comparison/CER unaffected.
     subtitle_display_script: str = 'hant'

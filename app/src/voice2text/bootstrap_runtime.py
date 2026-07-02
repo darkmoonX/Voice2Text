@@ -203,6 +203,8 @@ def build_restart_keys() -> set[str]:
         "whisperx_asr_compression_ratio_threshold",
         "whisperx_asr_no_speech_threshold",
         "subtitle_commit_hold_seconds",
+        "subtitle_relabel_enabled",
+        "subtitle_relabel_async",
         "ffmpeg_dll_dir",
         "source_mode",
         "source_device_indices",

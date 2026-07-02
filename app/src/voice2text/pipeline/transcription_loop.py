@@ -16,7 +16,7 @@ from .audio_windowing import aligned_window_sizes
 from .gpu_telemetry import GpuTelemetryReporter
 from .language_routing import route_source_language
 from .segment_artifacts import SegmentArtifacts
-from .subtitle_assembler import SubtitleAssembler
+from .subtitle_assembler import RELABEL_PENDING, SubtitleAssembler
 from .text_delta_logger import TextDeltaLogger
 from .timing_stats import TimingAggregator, format_stage_breakdown
 
@@ -90,6 +90,14 @@ class TranscriptionLoopEngine:
         )
         relabel_buffer: bytearray | None = bytearray() if relabel_enabled else None
         relabel_buffer_start_seconds = 0.0
+        # Round 0052 Phase B: resolve spans on a background worker instead of the loop thread.
+        # `relabel_async_lock` guards only the in-flight/result bookkeeping below, never the
+        # buffer itself -- the buffer's byte slice is snapshotted synchronously on the loop
+        # thread (same safe pattern as round 0046's refresh_snapshot) before any thread starts.
+        relabel_async_enabled = relabel_enabled and bool(getattr(self._deps.config, "subtitle_relabel_async", False))
+        relabel_async_lock = Lock() if relabel_async_enabled else None
+        relabel_async_results: dict[tuple[float, float], object] = {}
+        relabel_async_inflight: set[tuple[float, float]] = set()
 
         self._deps.subtitle_assembler.set_language_context(self._deps.config.source_language)
         self._deps.subtitle_assembler.set_cjk_no_space_gap_seconds(
@@ -142,55 +150,69 @@ class TranscriptionLoopEngine:
         # margin its span could have just fallen out of the rolling window.
         relabel_retention_seconds = relabel_window_seconds + segment_seconds
 
-        def _resolve_relabel_span(span_start: float, span_end: float) -> str | None:
-            """Round 0048: slice the rolling relabel buffer to [span_start, span_end) and ask
-            the transcriber to resolve a speaker id via local re-diarization (read-only against
-            the profile store). Any failure/empty result -> None (caller keeps the existing
-            label). Runs synchronously on the loop thread by design (see task spec)."""
+        def _prepare_relabel_request(span_start: float, span_end: float):
+            """Round 0048/0052 Phase B: slice the rolling relabel buffer to the spike-validated
+            CONTEXT window covering [span_start, span_end). Must run on the loop thread (the only
+            writer/trimmer of `relabel_buffer`) -- pure byte slicing, cheap, no diarization here.
+            Returns a request tuple for `_execute_relabel_request`, or None (+ emits the skip
+            reason) when the span can't be resolved at all."""
+            def _emit_skip(reason: str) -> None:
+                self._deps.emit_status(
+                    f"[subtitle-relabel] span={float(span_start):.2f}..{float(span_end):.2f}s; skip={reason}"
+                )
+
+            if relabel_buffer is None or not relabel_buffer:
+                _emit_skip("empty-buffer")
+                return None
+            clip_transcriber = self._deps.get_transcriber()
+            # Round 0052: prefer the turn-aware resolver (labeled spans + margin-gate evidence);
+            # fall back to the round-0048 single-token resolver on older providers.
+            turns_fn = getattr(clip_transcriber, "resolve_local_speaker_turns", None)
+            resolve_fn = getattr(clip_transcriber, "resolve_local_speaker", None)
+            if not callable(turns_fn) and not callable(resolve_fn):
+                _emit_skip("no-resolver")
+                return None
+            buf_start = relabel_buffer_start_seconds
+            buf_bytes = bytes(relabel_buffer)
+            buf_end = buf_start + (float(len(buf_bytes)) / float(max(1, bytes_per_second)))
+            if min(float(span_end), buf_end) <= max(float(span_start), buf_start):
+                _emit_skip(f"span-outside-buffer({buf_start:.2f}..{buf_end:.2f}s)")
+                return None
+            # Slice the spike-validated CONTEXT window (buffer tail, ~relabel_window_seconds),
+            # not just the batch's own few seconds: the local partition needs surrounding
+            # speech to cluster against, and the profile-space embedding needs the chosen
+            # cluster's audio across the whole window to yield a trustworthy cosine. Anchor
+            # the window at the buffer's live edge so every batch draining at one sentence
+            # break slices identical bytes (provider memoises the diarization on them).
+            ctx_lo = max(buf_start, min(float(span_start), buf_end - relabel_window_seconds))
+            start_byte = max(0, int(round((ctx_lo - buf_start) * bytes_per_second)))
+            start_byte -= start_byte % max(1, frame_bytes)
+            end_byte = len(buf_bytes) - (len(buf_bytes) % max(1, frame_bytes))
+            if end_byte <= start_byte:
+                _emit_skip("degenerate-slice")
+                return None
+            ctx_lo = buf_start + float(start_byte) / float(max(1, bytes_per_second))
+            span_chunk = AudioChunk(
+                pcm16=buf_bytes[start_byte:end_byte],
+                sample_rate=stream_rate,
+                channels=stream_channels,
+            )
+            return (span_start, span_end, span_chunk, ctx_lo, buf_end, turns_fn, resolve_fn)
+
+        def _execute_relabel_request(request) -> object:
+            """Round 0048/0052: run the (possibly heavy, ~seconds-scale) local re-diarization
+            call against an already-sliced, immutable span_chunk -- safe to run on any thread,
+            never touches the live `relabel_buffer`. Any failure/empty result -> None (caller
+            keeps the existing label)."""
+            (span_start, span_end, span_chunk, ctx_lo, buf_end, turns_fn, resolve_fn) = request
+
             def _emit_relabel(outcome: str, cost_seconds: float | None = None) -> None:
                 cost = f"; cost={cost_seconds:.3f}s" if cost_seconds is not None else ""
                 self._deps.emit_status(
                     f"[subtitle-relabel] span={float(span_start):.2f}..{float(span_end):.2f}s; {outcome}{cost}"
                 )
 
-            if relabel_buffer is None or not relabel_buffer:
-                _emit_relabel("skip=empty-buffer")
-                return None
             try:
-                clip_transcriber = self._deps.get_transcriber()
-                # Round 0052: prefer the turn-aware resolver (labeled spans + margin-gate
-                # evidence); fall back to the round-0048 single-token resolver on older
-                # providers. Neither -> skip.
-                turns_fn = getattr(clip_transcriber, "resolve_local_speaker_turns", None)
-                resolve_fn = getattr(clip_transcriber, "resolve_local_speaker", None)
-                if not callable(turns_fn) and not callable(resolve_fn):
-                    _emit_relabel("skip=no-resolver")
-                    return None
-                buf_start = relabel_buffer_start_seconds
-                buf_bytes = bytes(relabel_buffer)
-                buf_end = buf_start + (float(len(buf_bytes)) / float(max(1, bytes_per_second)))
-                if min(float(span_end), buf_end) <= max(float(span_start), buf_start):
-                    _emit_relabel(f"skip=span-outside-buffer({buf_start:.2f}..{buf_end:.2f}s)")
-                    return None
-                # Slice the spike-validated CONTEXT window (buffer tail, ~relabel_window_seconds),
-                # not just the batch's own few seconds: the local partition needs surrounding
-                # speech to cluster against, and the profile-space embedding needs the chosen
-                # cluster's audio across the whole window to yield a trustworthy cosine. Anchor
-                # the window at the buffer's live edge so every batch draining at one sentence
-                # break slices identical bytes (provider memoises the diarization on them).
-                ctx_lo = max(buf_start, min(float(span_start), buf_end - relabel_window_seconds))
-                start_byte = max(0, int(round((ctx_lo - buf_start) * bytes_per_second)))
-                start_byte -= start_byte % max(1, frame_bytes)
-                end_byte = len(buf_bytes) - (len(buf_bytes) % max(1, frame_bytes))
-                if end_byte <= start_byte:
-                    _emit_relabel("skip=degenerate-slice")
-                    return None
-                ctx_lo = buf_start + float(start_byte) / float(max(1, bytes_per_second))
-                span_chunk = AudioChunk(
-                    pcm16=buf_bytes[start_byte:end_byte],
-                    sample_rate=stream_rate,
-                    channels=stream_channels,
-                )
                 channel_mode = str(getattr(self._deps.config, "source_channel_mode", "mono") or "mono")
                 resolve_stats: dict = {}
                 resolve_started_at = time.perf_counter()
@@ -239,9 +261,49 @@ class TranscriptionLoopEngine:
                 _emit_relabel(f"skip=error:{type(exc).__name__}")
                 return None
 
+        def _resolve_relabel_span_sync(span_start: float, span_end: float) -> object:
+            """Round 0048: original synchronous path -- prepare + execute on the loop thread."""
+            request = _prepare_relabel_request(span_start, span_end)
+            if request is None:
+                return None
+            return _execute_relabel_request(request)
+
+        def _resolve_relabel_span_async(span_start: float, span_end: float) -> object:
+            """Round 0052 Phase B: prepare synchronously (cheap, needs the live buffer), then hand
+            the heavy diarization/embedding call to a background worker so the loop thread never
+            stalls on it. Returns RELABEL_PENDING until the worker's result is ready; the caller
+            (assembler) re-queues the batch and retries on a later drain."""
+            key = (round(float(span_start), 3), round(float(span_end), 3))
+            with relabel_async_lock:
+                if key in relabel_async_results:
+                    return relabel_async_results.pop(key)
+                already_inflight = key in relabel_async_inflight
+            if already_inflight:
+                return RELABEL_PENDING
+            request = _prepare_relabel_request(span_start, span_end)
+            if request is None:
+                return None
+            with relabel_async_lock:
+                relabel_async_inflight.add(key)
+
+            def _run() -> None:
+                try:
+                    result = _execute_relabel_request(request)
+                except Exception:
+                    result = None
+                with relabel_async_lock:
+                    relabel_async_results[key] = result
+                    relabel_async_inflight.discard(key)
+
+            Thread(target=_run, name="subtitle-relabel-worker", daemon=True).start()
+            return RELABEL_PENDING
+
+        _resolve_relabel_span = _resolve_relabel_span_async if relabel_async_enabled else _resolve_relabel_span_sync
+
         self._deps.subtitle_assembler.set_relabel_resolver(
             _resolve_relabel_span if relabel_enabled else None,
             margin=relabel_margin,
+            defer=relabel_async_enabled,
         )
         last_chunk_at = time.monotonic()
         last_recover_at = 0.0
@@ -443,7 +505,7 @@ class TranscriptionLoopEngine:
                         self._silence_hops += 1
                         silence_seconds = self._silence_hops * hop_seconds
                         if self._speech_hops > 0 and silence_seconds >= max(0.8, min(2.4, segment_seconds)):
-                            self._mark_sentence_break()
+                            self._mark_sentence_break(current_window_elapsed)
                         continue
                     self._silence_hops = 0
 
@@ -580,7 +642,7 @@ class TranscriptionLoopEngine:
                     self._deps.emit_subtitle_ready(overlay_source, translated_out)
 
                     if self._speech_hops * hop_seconds >= max(segment_seconds, hop_seconds * 2.0):
-                        self._mark_sentence_break()
+                        self._mark_sentence_break(current_window_elapsed)
         finally:
             self._finalize_stream()
             self._emit_timing_summary()
@@ -872,8 +934,8 @@ class TranscriptionLoopEngine:
         except Exception:
             return fallback
 
-    def _mark_sentence_break(self) -> None:
-        self._deps.subtitle_assembler.mark_sentence_break()
+    def _mark_sentence_break(self, now: float | None = None) -> None:
+        self._deps.subtitle_assembler.mark_sentence_break(now=now)
         self._silence_hops = 0
         self._speech_hops = 0
 
