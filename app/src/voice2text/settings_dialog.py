@@ -265,6 +265,14 @@ class SettingsDialog(QDialog):
         self._whisperx_hf_token_edit = QLineEdit()
         self._whisperx_hf_token_edit.setEchoMode(QLineEdit.EchoMode.Password)
         self._whisperx_speaker_backend_combo = create_whisperx_speaker_backend_combo()
+        # Round 0051: recently-shipped live knobs, previously CLI/JSON-only.
+        self._whisperx_zh_align_wbbbbb_check = QCheckBox()
+        self._asr_temperatures_edit = QLineEdit()
+        self._asr_temperatures_edit.setPlaceholderText("default (0.0,0.2,0.4,0.6,0.8,1.0)")
+        self._commit_hold_spin = QDoubleSpinBox()
+        self._commit_hold_spin.setDecimals(1)
+        self._commit_hold_spin.setRange(0.0, 120.0)
+        self._commit_hold_spin.setSingleStep(1.0)
 
         self._segment_spin = QDoubleSpinBox()
         self._segment_spin.setDecimals(2)
@@ -374,6 +382,7 @@ class SettingsDialog(QDialog):
         form_left.addRow(self._t("whisperx_align_guard"), align_guard_row)
         form_left.addRow("", self._whisperx_align_guard_warning)
         form_left.addRow(self._t("whisperx_align_model"), self._whisperx_align_model_edit)
+        form_left.addRow(self._t("whisperx_zh_align_wbbbbb"), self._whisperx_zh_align_wbbbbb_check)
         # --- Diarization group (kept contiguous) ---
         form_left.addRow(self._t("whisperx_diarization"), self._whisperx_diarization_check)
         form_left.addRow("WhisperX Diarization device", self._whisperx_diar_device_combo)
@@ -384,6 +393,8 @@ class SettingsDialog(QDialog):
 
         form_right.addRow(self._t("segment_seconds"), self._segment_spin)
         form_right.addRow(self._t("hop_seconds"), self._hop_spin)
+        form_right.addRow(self._t("asr_temperatures"), self._asr_temperatures_edit)
+        form_right.addRow(self._t("subtitle_commit_hold_seconds"), self._commit_hold_spin)
         form_right.addRow(self._t("merge_method"), self._merge_method_combo)
         form_right.addRow(self._t("preprocess"), self._preprocess_enabled_check)
         form_right.addRow(self._t("source_language"), self._source_language_combo)
@@ -520,6 +531,9 @@ class SettingsDialog(QDialog):
             self._whisperx_speaker_backend_combo,
             str(getattr(cfg, "whisperx_speaker_profile_backend", "pyannote") or "pyannote"),
         )
+        self._whisperx_zh_align_wbbbbb_check.setChecked(bool(getattr(cfg, "whisperx_zh_align_wbbbbb", False)))
+        self._asr_temperatures_edit.setText(str(getattr(cfg, "whisperx_asr_temperatures", "") or ""))
+        self._commit_hold_spin.setValue(float(getattr(cfg, "subtitle_commit_hold_seconds", 0.0) or 0.0))
         self._segment_spin.setValue(cfg.segment_seconds)
         self._hop_spin.setValue(cfg.hop_seconds)
         self._set_combo_data(self._merge_method_combo, cfg.overlap_merge_method)
@@ -976,6 +990,9 @@ class SettingsDialog(QDialog):
             self._import_audio_btn: "Import an audio/video file and replay it through the realtime subtitle pipeline.",
             self._reset_defaults_btn: "Reset all settings in this dialog back to default values.",
             self._compute_type_combo: "ASR compute type. float16 preserves current default; int8_float16/int8 can reduce load with possible accuracy cost.",
+            self._whisperx_zh_align_wbbbbb_check: "Chinese alignment on GPU via wbbbbb/wav2vec2-large-chinese (~10x faster alignment; slightly worse CER than the CPU default). Needs alignment device=cuda and an empty explicit alignment model.",
+            self._asr_temperatures_edit: "Temperature-fallback schedule for hard windows. Empty=library default (6 steps). Recommended: 0.0,0.2,0.4 — halves worst-case window latency with identical output in A/B.",
+            self._commit_hold_spin: "Delay speaker-label lock-in for committed subtitle text by this many seconds so labels can settle/back-date (text still appears immediately). 0=off (legacy).",
         }
         for (widget, tip) in tips.items():
             try:
@@ -1046,6 +1063,10 @@ class SettingsDialog(QDialog):
             transcript_export_formats=self._transcript_export_formats,
             transcript_export_include_timestamps=bool(self._transcript_export_include_timestamps),
             transcript_export_include_speaker=bool(self._transcript_export_include_speaker),
+            whisperx_zh_align_wbbbbb=self._whisperx_zh_align_wbbbbb_check.isChecked(),
+            whisperx_asr_temperatures=self._asr_temperatures_edit.text(),
+            subtitle_commit_hold_seconds=float(self._commit_hold_spin.value()),
+            asr_temperatures_invalid_message=self._t("asr_temperatures_invalid"),
         )
         return build_settings_updates(
             payload,

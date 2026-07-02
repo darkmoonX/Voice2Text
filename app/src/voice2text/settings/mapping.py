@@ -56,6 +56,11 @@ class SettingsPayloadInput:
     whisper_beam_size: int = 5
     whisperx_speaker_profile_enabled: bool = True
     runtime_preset: str = ""
+    # Round 0051: recently-shipped live knobs surfaced in the dialog (previously CLI/JSON-only).
+    whisperx_zh_align_wbbbbb: bool = False
+    whisperx_asr_temperatures: str = ""
+    subtitle_commit_hold_seconds: float = 0.0
+    asr_temperatures_invalid_message: str = "Invalid ASR temperature schedule."
 
 
 def build_settings_updates(payload: SettingsPayloadInput, *, lang: str, hop_gt_segment_message: str) -> dict[str, object]:
@@ -75,6 +80,22 @@ def build_settings_updates(payload: SettingsPayloadInput, *, lang: str, hop_gt_s
     hop_seconds = float(payload.hop_seconds)
     if hop_seconds > segment_seconds:
         raise ValueError(hop_gt_segment_message)
+
+    # Round 0051: lightweight local validation of the temperature schedule string (mirrors the
+    # provider's parser semantics without importing the heavy STT module into the Qt process).
+    # Empty = library default; garbage is rejected here so the dialog can warn instead of the
+    # provider silently ignoring it at model-load time.
+    asr_temperatures = str(payload.whisperx_asr_temperatures or "").strip()
+    if asr_temperatures:
+        parts = [p.strip() for p in asr_temperatures.split(",") if p.strip()]
+        try:
+            values = [float(p) for p in parts]
+        except ValueError:
+            raise ValueError(payload.asr_temperatures_invalid_message) from None
+        if not values or any((v < 0.0 or v > 1.0) for v in values):
+            raise ValueError(payload.asr_temperatures_invalid_message)
+
+    commit_hold_seconds = float(max(0.0, min(120.0, float(payload.subtitle_commit_hold_seconds or 0.0))))
 
     compute_type = (payload.compute_type or "float16").strip().lower()
     if compute_type not in {"float16", "int8_float16", "int8"}:
@@ -159,6 +180,9 @@ def build_settings_updates(payload: SettingsPayloadInput, *, lang: str, hop_gt_s
         'transcript_export_formats': ",".join(export_formats),
         'transcript_export_include_timestamps': bool(payload.transcript_export_include_timestamps),
         'transcript_export_include_speaker': bool(payload.transcript_export_include_speaker),
+        'whisperx_zh_align_wbbbbb': bool(payload.whisperx_zh_align_wbbbbb),
+        'whisperx_asr_temperatures': asr_temperatures,
+        'subtitle_commit_hold_seconds': commit_hold_seconds,
     }
 
 

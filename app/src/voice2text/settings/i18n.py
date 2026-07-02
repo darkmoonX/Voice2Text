@@ -65,6 +65,10 @@ SETTINGS_I18N: dict[str, dict[str, str]] = {
         'reset_defaults': '恢復預設',
         'hop_gt_segment': 'Hop 秒數不能大於 segment 秒數。',
         'pick_color': '選擇顏色',
+        'whisperx_zh_align_wbbbbb': '中文 GPU 對齊 (wbbbbb)',
+        'asr_temperatures': 'ASR 溫度排程',
+        'asr_temperatures_invalid': 'ASR 溫度排程格式無效：請用逗號分隔的 0~1 數值（例如 0.0,0.2,0.4），或留空使用預設。',
+        'subtitle_commit_hold_seconds': '字幕標籤延遲鎖定（秒）',
     },
     'en': {
         'select_all': 'Select all',
@@ -129,6 +133,10 @@ SETTINGS_I18N: dict[str, dict[str, str]] = {
         'reset_defaults': 'Reset defaults',
         'hop_gt_segment': 'Hop seconds cannot exceed segment seconds.',
         'pick_color': 'Select color',
+        'whisperx_zh_align_wbbbbb': 'Chinese GPU alignment (wbbbbb)',
+        'asr_temperatures': 'ASR temperature schedule',
+        'asr_temperatures_invalid': 'Invalid ASR temperature schedule: use comma-separated values in 0..1 (e.g. 0.0,0.2,0.4), or leave empty for the default.',
+        'subtitle_commit_hold_seconds': 'Subtitle label commit hold (s)',
     },
 }
 

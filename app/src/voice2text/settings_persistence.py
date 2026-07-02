@@ -63,6 +63,7 @@ _PERSIST_KEYS = {
     "whisperx_speaker_realtime_refresh_min_cluster_seconds",
     "whisperx_speaker_realtime_refresh_merge",
     "whisperx_speaker_realtime_refresh_match_mode",
+    "subtitle_commit_hold_seconds",
     "subtitle_relabel_enabled",
     "subtitle_relabel_window_seconds",
     "subtitle_relabel_sliver_floor_seconds",

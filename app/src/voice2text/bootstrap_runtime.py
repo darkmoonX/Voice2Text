@@ -197,6 +197,12 @@ def build_restart_keys() -> set[str]:
         "speaker_marker_style",
         "whisper_beam_size",
         "whisper_batch_size",
+        # Round 0051: ASR-load-time and loop-start-time knobs need a pipeline restart to apply.
+        "whisperx_asr_temperatures",
+        "whisperx_asr_log_prob_threshold",
+        "whisperx_asr_compression_ratio_threshold",
+        "whisperx_asr_no_speech_threshold",
+        "subtitle_commit_hold_seconds",
         "ffmpeg_dll_dir",
         "source_mode",
         "source_device_indices",
