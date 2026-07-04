@@ -79,6 +79,8 @@ class SpeakerIdentityConfig:
     merge_grace_windows: int = 0
     merge_grace_relief: float = 0.10
     merge_preserve_centroid: bool = False
+    max_exemplars: int = 1
+    exemplar_diversity_threshold: float = 0.90
 
 
 class _BaseEmbeddingBackend:
@@ -408,6 +410,10 @@ class SpeakerIdentityEngine:
                 float(max(0.0, getattr(config, "merge_grace_relief", 0.10) or 0.0)),
             )
             self._profile_store.set_merge_preserve_centroid(bool(getattr(config, "merge_preserve_centroid", False)))
+            self._profile_store.set_max_exemplars(
+                int(max(1, getattr(config, "max_exemplars", 1) or 1)),
+                float(max(0.0, getattr(config, "exemplar_diversity_threshold", 0.90) or 0.0)),
+            )
         self._backend = self._build_backend(config)
 
     @property

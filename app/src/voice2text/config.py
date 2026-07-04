@@ -92,6 +92,11 @@ class RuntimeConfig:
     whisperx_speaker_merge_grace_windows: int = 0
     whisperx_speaker_merge_grace_relief: float = 0.10
     whisperx_speaker_merge_preserve_centroid: bool = False
+    # Round 0061 Phase A: bounded multi-exemplar profile representation. 1 = today's
+    # single-centroid behavior (byte-identical). >1 lets a profile keep several distinct
+    # representative embeddings instead of forcing everything into one blended centroid.
+    whisperx_speaker_profile_max_exemplars: int = 1
+    whisperx_speaker_profile_exemplar_diversity_threshold: float = 0.90
     # Round 0023 learn-path quality gate: when on, gibberish / music-tail / degenerate /
     # low-confidence clips can still match an existing profile for display but never update or
     # create a centroid. Default off until the harness A/B confirms it is CER-neutral.

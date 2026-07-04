@@ -203,6 +203,8 @@ def build_restart_keys() -> set[str]:
         "whisperx_speaker_merge_grace_windows",
         "whisperx_speaker_merge_grace_relief",
         "whisperx_speaker_merge_preserve_centroid",
+        "whisperx_speaker_profile_max_exemplars",
+        "whisperx_speaker_profile_exemplar_diversity_threshold",
         "speaker_marker_style",
         "whisper_beam_size",
         "whisper_batch_size",

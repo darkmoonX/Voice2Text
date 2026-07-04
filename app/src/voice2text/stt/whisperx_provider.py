@@ -111,6 +111,8 @@ class WhisperXTranscriber:
         speaker_merge_grace_windows: int = 0,
         speaker_merge_grace_relief: float = 0.10,
         speaker_merge_preserve_centroid: bool = False,
+        speaker_profile_max_exemplars: int = 1,
+        speaker_profile_exemplar_diversity_threshold: float = 0.90,
         speaker_profile_reconcile_threshold: float = 0.52,
         speaker_profile_store_path: str = "",
         speaker_profile_quality_gate_enabled: bool = False,
@@ -236,6 +238,10 @@ class WhisperXTranscriber:
         self._speaker_merge_grace_windows = int(max(0, speaker_merge_grace_windows))
         self._speaker_merge_grace_relief = float(max(0.0, speaker_merge_grace_relief))
         self._speaker_merge_preserve_centroid = bool(speaker_merge_preserve_centroid)
+        self._speaker_profile_max_exemplars = int(max(1, speaker_profile_max_exemplars))
+        self._speaker_profile_exemplar_diversity_threshold = float(
+            max(0.0, min(0.999, speaker_profile_exemplar_diversity_threshold))
+        )
         self._speaker_profile_reconcile_threshold = float(
             max(0.0, min(0.999, speaker_profile_reconcile_threshold))
         )
@@ -346,6 +352,8 @@ class WhisperXTranscriber:
                     merge_grace_windows=self._speaker_merge_grace_windows,
                     merge_grace_relief=self._speaker_merge_grace_relief,
                     merge_preserve_centroid=self._speaker_merge_preserve_centroid,
+                    max_exemplars=self._speaker_profile_max_exemplars,
+                    exemplar_diversity_threshold=self._speaker_profile_exemplar_diversity_threshold,
                     reconcile_threshold=self._speaker_profile_reconcile_threshold,
                     model_root=str(self._model_root),
                     device=self._diarization_device,

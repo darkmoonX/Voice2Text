@@ -125,6 +125,20 @@ def build_runtime_config(args: argparse.Namespace) -> RuntimeConfig:
             ),
         ),
         whisperx_speaker_merge_preserve_centroid=bool(getattr(args, "speaker_merge_preserve_centroid", False)),
+        whisperx_speaker_profile_max_exemplars=max(
+            1,
+            int(
+                1 if getattr(args, "speaker_profile_max_exemplars", None) is None
+                else getattr(args, "speaker_profile_max_exemplars", 1)
+            ),
+        ),
+        whisperx_speaker_profile_exemplar_diversity_threshold=max(
+            0.0,
+            float(
+                0.90 if getattr(args, "speaker_profile_exemplar_diversity_threshold", None) is None
+                else getattr(args, "speaker_profile_exemplar_diversity_threshold", 0.90)
+            ),
+        ),
         whisperx_speaker_profile_quality_gate_enabled=bool(getattr(args, "whisperx_speaker_profile_quality_gate_enabled", False)),
         runtime_preset=str(getattr(args, "preset", "") or ""),
         whisperx_alignment_model=args.whisperx_alignment_model,

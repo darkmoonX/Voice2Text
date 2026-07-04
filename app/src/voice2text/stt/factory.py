@@ -202,6 +202,8 @@ def _build_whisperx(config: RuntimeConfig, *, device_override: Optional[str], co
         speaker_merge_grace_windows=int(max(0, getattr(config, 'whisperx_speaker_merge_grace_windows', 0) or 0)),
         speaker_merge_grace_relief=float(max(0.0, getattr(config, 'whisperx_speaker_merge_grace_relief', 0.10) or 0.0)),
         speaker_merge_preserve_centroid=bool(getattr(config, 'whisperx_speaker_merge_preserve_centroid', False)),
+        speaker_profile_max_exemplars=int(max(1, getattr(config, 'whisperx_speaker_profile_max_exemplars', 1) or 1)),
+        speaker_profile_exemplar_diversity_threshold=float(max(0.0, getattr(config, 'whisperx_speaker_profile_exemplar_diversity_threshold', 0.90) or 0.0)),
         speaker_profile_reconcile_threshold=float(getattr(config, 'whisperx_speaker_profile_reconcile_threshold', 0.52) or 0.52),
         speaker_profile_store_path=str(getattr(config, 'whisperx_speaker_profile_store_path', '') or ''),
         speaker_profile_quality_gate_enabled=bool(getattr(config, 'whisperx_speaker_profile_quality_gate_enabled', False)),

@@ -52,6 +52,8 @@ class SpeakerProfileStore:
         self._merge_grace_windows = 0
         self._merge_grace_relief = 0.10
         self._merge_preserve_centroid = False
+        self._max_exemplars = 1
+        self._exemplar_diversity_threshold = 0.90
         self._lock = threading.Lock()
         self._profiles: list[dict[str, object]] = []
         self._candidates: list[dict[str, object]] = []
@@ -91,13 +93,17 @@ class SpeakerProfileStore:
         with self._lock:
             best_index = -1
             best_similarity = -1.0
-            for idx, profile in enumerate(self._profiles):
-                centroid_raw = profile.get("centroid")
-                centroid = _normalize_embedding(np.asarray(centroid_raw or [], dtype=np.float32))
-                similarity = _cosine_similarity(centroid, normalized)
-                if similarity > best_similarity:
-                    best_similarity = similarity
-                    best_index = idx
+            best_exemplar_index = -1
+            if self._max_exemplars > 1:
+                best_index, best_similarity, best_exemplar_index = self._best_profile_match_locked(normalized)
+            else:
+                for idx, profile in enumerate(self._profiles):
+                    centroid_raw = profile.get("centroid")
+                    centroid = _normalize_embedding(np.asarray(centroid_raw or [], dtype=np.float32))
+                    similarity = _cosine_similarity(centroid, normalized)
+                    if similarity > best_similarity:
+                        best_similarity = similarity
+                        best_index = idx
 
             effective_min_threshold = min_threshold
             if best_index >= 0:
@@ -125,12 +131,21 @@ class SpeakerProfileStore:
                 # Always count the observation (maturity/display), but only blend the embedding
                 # into the centroid when the match is strong enough (>= update threshold).
                 if best_similarity >= effective_update_threshold:
-                    old_centroid = _normalize_embedding(np.asarray(profile.get("centroid") or [], dtype=np.float32))
-                    old_weight = float(profile.get("weight", 0.0) or 0.0)
-                    merged = old_centroid * old_weight + normalized * update_weight
-                    merged = _normalize_embedding(merged)
-                    profile["centroid"] = merged.tolist()
-                    profile["weight"] = float(old_weight + update_weight)
+                    if self._max_exemplars > 1:
+                        self._update_exemplar_locked(
+                            profile,
+                            normalized=normalized,
+                            update_weight=update_weight,
+                            exemplar_index=best_exemplar_index,
+                            similarity=best_similarity,
+                        )
+                    else:
+                        old_centroid = _normalize_embedding(np.asarray(profile.get("centroid") or [], dtype=np.float32))
+                        old_weight = float(profile.get("weight", 0.0) or 0.0)
+                        merged = old_centroid * old_weight + normalized * update_weight
+                        merged = _normalize_embedding(merged)
+                        profile["centroid"] = merged.tolist()
+                        profile["weight"] = float(old_weight + update_weight)
                 profile["samples"] = int(profile.get("samples", 0) or 0) + 1
                 profile["total_seconds"] = float(profile.get("total_seconds", 0.0) or 0.0) + float(max(0.0, duration_seconds))
                 if label:
@@ -194,6 +209,150 @@ class SpeakerProfileStore:
     def set_merge_preserve_centroid(self, enabled: bool) -> None:
         with self._lock:
             self._merge_preserve_centroid = bool(enabled)
+
+    def set_max_exemplars(self, max_exemplars: int, diversity_threshold: float) -> None:
+        with self._lock:
+            self._max_exemplars = max(1, int(max_exemplars))
+            self._exemplar_diversity_threshold = max(0.0, min(0.999, float(diversity_threshold)))
+
+    def _profile_exemplars_locked(self, profile: dict[str, object]) -> list[dict[str, object]]:
+        """Round 0061: a profile's representative embeddings. Falls back to a synthesized
+        single-entry list from the legacy centroid/weight fields for any profile that predates
+        multi-exemplar mode (or was created while it was off) — read-only, does not mutate."""
+        exemplars = profile.get("exemplars")
+        if isinstance(exemplars, list) and exemplars:
+            return exemplars
+        return [
+            {
+                "centroid": profile.get("centroid") or [],
+                "weight": float(profile.get("weight", 0.0) or 0.0),
+            }
+        ]
+
+    def _best_profile_match_locked(self, normalized: np.ndarray) -> tuple[int, float, int]:
+        best_index = -1
+        best_similarity = -1.0
+        best_exemplar_index = -1
+        for idx, profile in enumerate(self._profiles):
+            for ex_idx, exemplar in enumerate(self._profile_exemplars_locked(profile)):
+                centroid = _normalize_embedding(np.asarray(exemplar.get("centroid") or [], dtype=np.float32))
+                similarity = _cosine_similarity(centroid, normalized)
+                if similarity > best_similarity:
+                    best_similarity = similarity
+                    best_index = idx
+                    best_exemplar_index = ex_idx
+        return best_index, best_similarity, best_exemplar_index
+
+    def _best_exemplar_similarity_locked(self, profile: dict[str, object], query: np.ndarray) -> float:
+        best = -1.0
+        for exemplar in self._profile_exemplars_locked(profile):
+            centroid = _normalize_embedding(np.asarray(exemplar.get("centroid") or [], dtype=np.float32))
+            similarity = _cosine_similarity(centroid, query)
+            if similarity > best:
+                best = similarity
+        return best
+
+    def _profile_pair_similarity_locked(self, left: dict[str, object], right: dict[str, object]) -> float:
+        best = -1.0
+        for le in self._profile_exemplars_locked(left):
+            left_centroid = _normalize_embedding(np.asarray(le.get("centroid") or [], dtype=np.float32))
+            for re in self._profile_exemplars_locked(right):
+                right_centroid = _normalize_embedding(np.asarray(re.get("centroid") or [], dtype=np.float32))
+                similarity = _cosine_similarity(left_centroid, right_centroid)
+                if similarity > best:
+                    best = similarity
+        return best
+
+    def _sync_profile_aggregate_from_exemplars(self, profile: dict[str, object]) -> None:
+        """Recompute the legacy top-level centroid/weight fields as a weighted-average
+        aggregate of the profile's exemplars, for backward-compatible display/persistence
+        readers. Matching/update/merge math never reads these fields once exemplars exist —
+        they are derived, not authoritative."""
+        exemplars = profile.get("exemplars")
+        if not isinstance(exemplars, list) or not exemplars:
+            return
+        total_weight = 0.0
+        acc: np.ndarray | None = None
+        for exemplar in exemplars:
+            weight = float(exemplar.get("weight", 0.0) or 0.0)
+            centroid = _normalize_embedding(np.asarray(exemplar.get("centroid") or [], dtype=np.float32))
+            if centroid.size == 0:
+                continue
+            if acc is None:
+                acc = np.zeros_like(centroid)
+            acc = acc + centroid * weight
+            total_weight += weight
+        if acc is None:
+            return
+        profile["centroid"] = _normalize_embedding(acc).tolist()
+        profile["weight"] = float(total_weight)
+
+    def _update_exemplar_locked(
+        self,
+        profile: dict[str, object],
+        *,
+        normalized: np.ndarray,
+        update_weight: float,
+        exemplar_index: int,
+        similarity: float,
+    ) -> None:
+        exemplars = profile.get("exemplars")
+        if not isinstance(exemplars, list) or not exemplars:
+            exemplars = [
+                {
+                    "centroid": list(profile.get("centroid") or []),
+                    "weight": float(profile.get("weight", 0.0) or 0.0),
+                }
+            ]
+            profile["exemplars"] = exemplars
+            exemplar_index = 0
+        exemplar_index = max(0, min(int(exemplar_index), len(exemplars) - 1))
+        if similarity >= self._exemplar_diversity_threshold or len(exemplars) >= self._max_exemplars:
+            target = exemplars[exemplar_index]
+            old_centroid = _normalize_embedding(np.asarray(target.get("centroid") or [], dtype=np.float32))
+            old_weight = float(target.get("weight", 0.0) or 0.0)
+            merged = _normalize_embedding(old_centroid * old_weight + normalized * update_weight)
+            target["centroid"] = merged.tolist()
+            target["weight"] = float(old_weight + update_weight)
+        else:
+            exemplars.append({"centroid": normalized.tolist(), "weight": float(update_weight)})
+        self._sync_profile_aggregate_from_exemplars(profile)
+
+    def _merge_exemplars_locked(self, keep: dict[str, object], drop: dict[str, object]) -> None:
+        """Union both profiles' exemplar sets; if over cap, repeatedly coalesce the most
+        similar PAIR (weighted-average blend, same math as the legacy single-centroid merge)
+        until back within max_exemplars. Ties in "most similar pair" resolve to the first pair
+        found in union order (keep's exemplars first, then drop's, both in their existing
+        order) — a deterministic but otherwise arbitrary tie-break."""
+        union: list[dict[str, object]] = [
+            {"centroid": list(ex.get("centroid") or []), "weight": float(ex.get("weight", 0.0) or 0.0)}
+            for ex in self._profile_exemplars_locked(keep) + self._profile_exemplars_locked(drop)
+        ]
+        while len(union) > self._max_exemplars and len(union) > 1:
+            best_pair: tuple[int, int] | None = None
+            best_similarity = -2.0
+            for i in range(len(union)):
+                centroid_i = _normalize_embedding(np.asarray(union[i].get("centroid") or [], dtype=np.float32))
+                for j in range(i + 1, len(union)):
+                    centroid_j = _normalize_embedding(np.asarray(union[j].get("centroid") or [], dtype=np.float32))
+                    similarity = _cosine_similarity(centroid_i, centroid_j)
+                    if similarity > best_similarity:
+                        best_similarity = similarity
+                        best_pair = (i, j)
+            if best_pair is None:
+                break
+            i, j = best_pair
+            a_weight = float(union[i].get("weight", 0.0) or 0.0)
+            b_weight = float(union[j].get("weight", 0.0) or 0.0)
+            a_centroid = _normalize_embedding(np.asarray(union[i].get("centroid") or [], dtype=np.float32))
+            b_centroid = _normalize_embedding(np.asarray(union[j].get("centroid") or [], dtype=np.float32))
+            merged_centroid = _normalize_embedding(a_centroid * a_weight + b_centroid * b_weight)
+            merged_entry = {"centroid": merged_centroid.tolist(), "weight": float(a_weight + b_weight)}
+            del union[j]
+            del union[i]
+            union.append(merged_entry)
+        keep["exemplars"] = union
+        self._sync_profile_aggregate_from_exemplars(keep)
 
     def _effective_profile_cap_locked(self) -> int:
         if self._soft_speaker_cap <= 0:
@@ -346,8 +505,11 @@ class SpeakerProfileStore:
             best_id = ""
             best_similarity = -1.0
             for profile in mature:
-                centroid = _normalize_embedding(np.asarray(profile.get("centroid") or [], dtype=np.float32))
-                similarity = _cosine_similarity(centroid, query)
+                if self._max_exemplars > 1:
+                    similarity = self._best_exemplar_similarity_locked(profile, query)
+                else:
+                    centroid = _normalize_embedding(np.asarray(profile.get("centroid") or [], dtype=np.float32))
+                    similarity = _cosine_similarity(centroid, query)
                 if similarity > best_similarity:
                     best_similarity = similarity
                     best_id = str(profile.get("id") or "")
@@ -379,11 +541,15 @@ class SpeakerProfileStore:
                 best_pair: tuple[int, int, float] | None = None
                 for i in range(len(self._profiles)):
                     left = self._profiles[i]
-                    left_centroid = _normalize_embedding(np.asarray(left.get("centroid") or [], dtype=np.float32))
+                    if self._max_exemplars <= 1:
+                        left_centroid = _normalize_embedding(np.asarray(left.get("centroid") or [], dtype=np.float32))
                     for j in range(i + 1, len(self._profiles)):
                         right = self._profiles[j]
-                        right_centroid = _normalize_embedding(np.asarray(right.get("centroid") or [], dtype=np.float32))
-                        similarity = _cosine_similarity(left_centroid, right_centroid)
+                        if self._max_exemplars > 1:
+                            similarity = self._profile_pair_similarity_locked(left, right)
+                        else:
+                            right_centroid = _normalize_embedding(np.asarray(right.get("centroid") or [], dtype=np.float32))
+                            similarity = _cosine_similarity(left_centroid, right_centroid)
                         if similarity < min_threshold:
                             continue
                         if best_pair is None or similarity > best_pair[2]:
@@ -437,7 +603,13 @@ class SpeakerProfileStore:
         drop_centroid = _normalize_embedding(np.asarray(drop.get("centroid") or [], dtype=np.float32))
         if keep_centroid.size == 0 or drop_centroid.size == 0 or keep_centroid.size != drop_centroid.size:
             return None
-        if not self._merge_preserve_centroid:
+        # Round 0061: multi-exemplar merge takes precedence over round 0057's
+        # merge-preserve-centroid flag when both are enabled — union-then-coalesce is a
+        # strict superset of "preserve the survivor centroid" (it preserves BOTH inputs as
+        # separate exemplars whenever there's room, only coalescing what doesn't fit).
+        if self._max_exemplars > 1:
+            self._merge_exemplars_locked(keep, drop)
+        elif not self._merge_preserve_centroid:
             merged = _normalize_embedding(keep_centroid * keep_weight + drop_centroid * drop_weight)
             keep["centroid"] = merged.tolist()
         keep["weight"] = float(keep_weight + drop_weight)
@@ -579,6 +751,10 @@ class SpeakerProfileStore:
             "total_seconds": float(max(0.0, duration_seconds)),
             "observed_labels": labels[-12:],
         }
+        if self._max_exemplars > 1:
+            created_profile["exemplars"] = [
+                {"centroid": created_profile["centroid"], "weight": created_profile["weight"]}
+            ]
         self._profiles.append(created_profile)
         self._save_locked()
         return SpeakerMatchResult(
@@ -610,16 +786,34 @@ class SpeakerProfileStore:
             centroid = _normalize_embedding(np.asarray(item.get("centroid") or [], dtype=np.float32))
             if not profile_id or centroid.size == 0:
                 continue
-            loaded_profiles.append(
-                {
-                    "id": profile_id,
-                    "centroid": centroid.tolist(),
-                    "weight": float(item.get("weight", 0.0) or 0.0),
-                    "samples": int(item.get("samples", 0) or 0),
-                    "total_seconds": float(item.get("total_seconds", 0.0) or 0.0),
-                    "observed_labels": list(item.get("observed_labels") or []),
-                }
-            )
+            loaded_profile: dict[str, object] = {
+                "id": profile_id,
+                "centroid": centroid.tolist(),
+                "weight": float(item.get("weight", 0.0) or 0.0),
+                "samples": int(item.get("samples", 0) or 0),
+                "total_seconds": float(item.get("total_seconds", 0.0) or 0.0),
+                "observed_labels": list(item.get("observed_labels") or []),
+            }
+            raw_exemplars = item.get("exemplars")
+            if isinstance(raw_exemplars, list) and raw_exemplars:
+                loaded_exemplars: list[dict[str, object]] = []
+                for raw_exemplar in raw_exemplars:
+                    if not isinstance(raw_exemplar, dict):
+                        continue
+                    exemplar_centroid = _normalize_embedding(
+                        np.asarray(raw_exemplar.get("centroid") or [], dtype=np.float32)
+                    )
+                    if exemplar_centroid.size == 0:
+                        continue
+                    loaded_exemplars.append(
+                        {
+                            "centroid": exemplar_centroid.tolist(),
+                            "weight": float(raw_exemplar.get("weight", 0.0) or 0.0),
+                        }
+                    )
+                if loaded_exemplars:
+                    loaded_profile["exemplars"] = loaded_exemplars
+            loaded_profiles.append(loaded_profile)
             try:
                 suffix = int(profile_id.split("_")[-1])
                 next_index = max(next_index, suffix + 1)
@@ -630,9 +824,15 @@ class SpeakerProfileStore:
         self._emit(f"speaker-profile loaded: profiles={len(self._profiles)}")
 
     def _save_locked(self) -> None:
+        profiles_payload: list[dict[str, object]] = []
+        for profile in self._profiles:
+            item = dict(profile)
+            if isinstance(item.get("exemplars"), list) and item["exemplars"]:
+                self._sync_profile_aggregate_from_exemplars(item)
+            profiles_payload.append(item)
         payload = {
             "version": 1,
-            "profiles": self._profiles,
+            "profiles": profiles_payload,
         }
         self._path.parent.mkdir(parents=True, exist_ok=True)
         temp_path = self._path.with_suffix(self._path.suffix + ".tmp")

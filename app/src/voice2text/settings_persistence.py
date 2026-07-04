@@ -72,6 +72,8 @@ _PERSIST_KEYS = {
     "whisperx_speaker_merge_grace_windows",
     "whisperx_speaker_merge_grace_relief",
     "whisperx_speaker_merge_preserve_centroid",
+    "whisperx_speaker_profile_max_exemplars",
+    "whisperx_speaker_profile_exemplar_diversity_threshold",
     "subtitle_commit_hold_seconds",
     "subtitle_relabel_enabled",
     "subtitle_relabel_window_seconds",
