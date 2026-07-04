@@ -108,6 +108,9 @@ class WhisperXTranscriber:
         speaker_realtime_refresh_min_cluster_seconds: float = 4.0,
         speaker_realtime_refresh_merge: bool = True,
         speaker_realtime_refresh_match_mode: str = "argmax",
+        speaker_merge_grace_windows: int = 0,
+        speaker_merge_grace_relief: float = 0.10,
+        speaker_merge_preserve_centroid: bool = False,
         speaker_profile_reconcile_threshold: float = 0.52,
         speaker_profile_store_path: str = "",
         speaker_profile_quality_gate_enabled: bool = False,
@@ -230,6 +233,9 @@ class WhisperXTranscriber:
         self._speaker_realtime_refresh_merge = bool(speaker_realtime_refresh_merge)
         refresh_match_mode = str(speaker_realtime_refresh_match_mode or "argmax").strip().lower()
         self._speaker_realtime_refresh_match_mode = "mutual" if refresh_match_mode == "mutual" else "argmax"
+        self._speaker_merge_grace_windows = int(max(0, speaker_merge_grace_windows))
+        self._speaker_merge_grace_relief = float(max(0.0, speaker_merge_grace_relief))
+        self._speaker_merge_preserve_centroid = bool(speaker_merge_preserve_centroid)
         self._speaker_profile_reconcile_threshold = float(
             max(0.0, min(0.999, speaker_profile_reconcile_threshold))
         )
@@ -337,6 +343,9 @@ class WhisperXTranscriber:
                     realtime_refresh_merge=self._speaker_realtime_refresh_merge,
                     realtime_refresh_match_mode=self._speaker_realtime_refresh_match_mode,
                     max_speakers_hint=self._diar_max_speakers,
+                    merge_grace_windows=self._speaker_merge_grace_windows,
+                    merge_grace_relief=self._speaker_merge_grace_relief,
+                    merge_preserve_centroid=self._speaker_merge_preserve_centroid,
                     reconcile_threshold=self._speaker_profile_reconcile_threshold,
                     model_root=str(self._model_root),
                     device=self._diarization_device,
@@ -1503,6 +1512,18 @@ class WhisperXTranscriber:
         store = getattr(engine, "_profile_store", None)
         if store is not None:
             store.set_soft_speaker_cap(int(max(0, cap)))
+
+    def get_speaker_profile_count(self) -> int:
+        engine = getattr(self, "_speaker_identity_engine", None)
+        if engine is None:
+            return 0
+        store = getattr(engine, "_profile_store", None)
+        if store is None:
+            return 0
+        try:
+            return int(max(0, store.profile_count()))
+        except Exception:
+            return 0
 
     def resolve_local_speaker(
         self,

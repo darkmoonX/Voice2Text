@@ -503,10 +503,23 @@ class TranscriptionLoopEngine:
                                                     int(max(0, count)),
                                                 )
                                                 if observed_max_speaker_count > 0:
-                                                    effective_cap = (
-                                                        max(operator_max_speaker_count, observed_max_speaker_count)
-                                                        if operator_max_speaker_count > 0
-                                                        else observed_max_speaker_count
+                                                    online_profile_count = 0
+                                                    get_count_fn = getattr(
+                                                        count_hint_transcriber,
+                                                        "get_speaker_profile_count",
+                                                        None,
+                                                    )
+                                                    if callable(get_count_fn):
+                                                        try:
+                                                            online_profile_count = int(
+                                                                max(0, get_count_fn())
+                                                            )
+                                                        except Exception:
+                                                            online_profile_count = 0
+                                                    effective_cap = max(
+                                                        operator_max_speaker_count,
+                                                        observed_max_speaker_count,
+                                                        online_profile_count,
                                                     )
                                                     cap_fn(effective_cap)
                                     except Exception:
@@ -567,7 +580,15 @@ class TranscriptionLoopEngine:
                     if prompt_chars > 0:
                         set_prompt = getattr(transcriber, "set_initial_prompt", None)
                         if callable(set_prompt):
-                            set_prompt(self._deps.subtitle_assembler.get_prompt_tail(prompt_chars))
+                            prompt_tail = self._deps.subtitle_assembler.get_prompt_tail(prompt_chars)
+                            set_prompt(prompt_tail)
+                            if debug_artifacts:
+                                self._deps.emit_status(
+                                    "[rolling-prompt] "
+                                    f"window={int(current_window_index)}; "
+                                    f"chars={len(prompt_tail)}; "
+                                    f"tail={prompt_tail[-200:]!r}"
+                                )
                     try:
                         stage_started_at = time.monotonic()
                         source_text = transcriber.transcribe(

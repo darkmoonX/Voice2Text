@@ -89,6 +89,9 @@ class RuntimeConfig:
     whisperx_speaker_count_hint_seconds: float = 60.0
     whisperx_speaker_count_hint_window_seconds: float = 300.0
     whisperx_speaker_count_hint_sliver_floor_seconds: float = 1.5
+    whisperx_speaker_merge_grace_windows: int = 0
+    whisperx_speaker_merge_grace_relief: float = 0.10
+    whisperx_speaker_merge_preserve_centroid: bool = False
     # Round 0023 learn-path quality gate: when on, gibberish / music-tail / degenerate /
     # low-confidence clips can still match an existing profile for display but never update or
     # create a centroid. Default off until the harness A/B confirms it is CER-neutral.
@@ -170,7 +173,10 @@ class RuntimeConfig:
     # (the hard-window latency source). Empty/None = library defaults (byte-identical).
     # NOTE: the legacy whisper_logprob_thold/whisper_no_speech_thold/whisper_temperature
     # fields above are pre-WhisperX dead knobs (no stt/ consumer) — these are the wired ones.
-    whisperx_asr_temperatures: str = ""
+    # Default trimmed to "0.0,0.2,0.4" (halves the zh worst-case decode tail with
+    # byte-identical output quality per round 0049's GPU A/B) — set to "" to restore
+    # the library's full 6-step schedule.
+    whisperx_asr_temperatures: str = "0.0,0.2,0.4"
     whisperx_asr_log_prob_threshold: Optional[float] = None
     whisperx_asr_compression_ratio_threshold: Optional[float] = None
     whisperx_asr_no_speech_threshold: Optional[float] = None

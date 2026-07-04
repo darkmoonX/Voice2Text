@@ -271,7 +271,7 @@ class SettingsDialog(QDialog):
         # Round 0051: recently-shipped live knobs, previously CLI/JSON-only.
         self._whisperx_zh_align_wbbbbb_check = QCheckBox()
         self._asr_temperatures_edit = QLineEdit()
-        self._asr_temperatures_edit.setPlaceholderText("default (0.0,0.2,0.4,0.6,0.8,1.0)")
+        self._asr_temperatures_edit.setPlaceholderText("empty = full library schedule (0.0,0.2,0.4,0.6,0.8,1.0)")
         self._commit_hold_spin = QDoubleSpinBox()
         self._commit_hold_spin.setDecimals(1)
         self._commit_hold_spin.setRange(0.0, 120.0)
@@ -999,7 +999,7 @@ class SettingsDialog(QDialog):
             self._reset_defaults_btn: "Reset all settings in this dialog back to default values.",
             self._compute_type_combo: "ASR compute type. float16 preserves current default; int8_float16/int8 can reduce load with possible accuracy cost.",
             self._whisperx_zh_align_wbbbbb_check: "Chinese alignment on GPU via wbbbbb/wav2vec2-large-chinese (~10x faster alignment; slightly worse CER than the CPU default). Needs alignment device=cuda and an empty explicit alignment model.",
-            self._asr_temperatures_edit: "Temperature-fallback schedule for hard windows. Empty=library default (6 steps). Recommended: 0.0,0.2,0.4 — halves worst-case window latency with identical output in A/B.",
+            self._asr_temperatures_edit: "Temperature-fallback schedule for hard windows. Default 0.0,0.2,0.4 halves worst-case window latency with identical output in A/B; clear this field to restore the full 6-step library schedule.",
             self._commit_hold_spin: "Delay speaker-label lock-in for committed subtitle text by this many seconds so labels can settle/back-date (text still appears immediately). 0=off (legacy).",
         }
         for (widget, tip) in tips.items():

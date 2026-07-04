@@ -49,6 +49,9 @@ class SpeakerProfileStore:
         self._on_status = on_status
         self._max_profiles = max(1, int(max_profiles))
         self._soft_speaker_cap = 0
+        self._merge_grace_windows = 0
+        self._merge_grace_relief = 0.10
+        self._merge_preserve_centroid = False
         self._lock = threading.Lock()
         self._profiles: list[dict[str, object]] = []
         self._candidates: list[dict[str, object]] = []
@@ -96,11 +99,18 @@ class SpeakerProfileStore:
                     best_similarity = similarity
                     best_index = idx
 
+            effective_min_threshold = min_threshold
+            if best_index >= 0:
+                winner = self._profiles[best_index]
+                if int(winner.get("merge_grace_remaining", 0) or 0) > 0:
+                    effective_min_threshold = max(0.0, min_threshold - float(self._merge_grace_relief))
+
             if not allow_update:
                 # Read-only quality-gate path: identify against an existing centroid for
                 # *display* only. Never average into a centroid, create a profile, or stage a
                 # candidate — so a low-quality clip cannot pollute the learned identities.
-                if best_index >= 0 and best_similarity >= min_threshold:
+                self._decrement_merge_grace_locked()
+                if best_index >= 0 and best_similarity >= effective_min_threshold:
                     profile = self._profiles[best_index]
                     return SpeakerMatchResult(
                         profile_id=str(profile.get("id") or ""),
@@ -109,8 +119,9 @@ class SpeakerProfileStore:
                     )
                 return SpeakerMatchResult(profile_id="", similarity=float(best_similarity), created=False)
 
-            if best_index >= 0 and best_similarity >= min_threshold:
+            if best_index >= 0 and best_similarity >= effective_min_threshold:
                 profile = self._profiles[best_index]
+                self._decrement_merge_grace_locked()
                 # Always count the observation (maturity/display), but only blend the embedding
                 # into the centroid when the match is strong enough (>= update threshold).
                 if best_similarity >= effective_update_threshold:
@@ -136,10 +147,12 @@ class SpeakerProfileStore:
 
             effective_cap = self._effective_profile_cap_locked()
             if len(self._profiles) >= effective_cap:
+                self._decrement_merge_grace_locked()
                 return SpeakerMatchResult(profile_id="", similarity=best_similarity, created=False)
 
             min_candidate_seconds = float(max(0.0, candidate_min_seconds))
             if min_candidate_seconds > 0.0:
+                self._decrement_merge_grace_locked()
                 return self._stage_or_promote_candidate_locked(
                     normalized=normalized,
                     update_weight=update_weight,
@@ -155,6 +168,7 @@ class SpeakerProfileStore:
                     best_profile_similarity=best_similarity,
                 )
 
+            self._decrement_merge_grace_locked()
             return self._create_profile_locked(
                 normalized=normalized,
                 update_weight=update_weight,
@@ -172,10 +186,25 @@ class SpeakerProfileStore:
         with self._lock:
             self._soft_speaker_cap = max(0, int(cap))
 
+    def set_merge_grace(self, windows: int, relief: float) -> None:
+        with self._lock:
+            self._merge_grace_windows = max(0, int(windows))
+            self._merge_grace_relief = max(0.0, float(relief))
+
+    def set_merge_preserve_centroid(self, enabled: bool) -> None:
+        with self._lock:
+            self._merge_preserve_centroid = bool(enabled)
+
     def _effective_profile_cap_locked(self) -> int:
         if self._soft_speaker_cap <= 0:
             return int(self._max_profiles)
         return int(min(self._max_profiles, self._soft_speaker_cap))
+
+    def _decrement_merge_grace_locked(self) -> None:
+        for profile in self._profiles:
+            remaining = int(profile.get("merge_grace_remaining", 0) or 0)
+            if remaining > 0:
+                profile["merge_grace_remaining"] = remaining - 1
 
     def candidate_count(self) -> int:
         with self._lock:
@@ -408,8 +437,9 @@ class SpeakerProfileStore:
         drop_centroid = _normalize_embedding(np.asarray(drop.get("centroid") or [], dtype=np.float32))
         if keep_centroid.size == 0 or drop_centroid.size == 0 or keep_centroid.size != drop_centroid.size:
             return None
-        merged = _normalize_embedding(keep_centroid * keep_weight + drop_centroid * drop_weight)
-        keep["centroid"] = merged.tolist()
+        if not self._merge_preserve_centroid:
+            merged = _normalize_embedding(keep_centroid * keep_weight + drop_centroid * drop_weight)
+            keep["centroid"] = merged.tolist()
         keep["weight"] = float(keep_weight + drop_weight)
         keep["samples"] = int(keep.get("samples", 0) or 0) + int(drop.get("samples", 0) or 0)
         keep["total_seconds"] = (
@@ -421,6 +451,8 @@ class SpeakerProfileStore:
             if label not in labels:
                 labels.append(label)
         keep["observed_labels"] = labels[-12:]
+        if self._merge_grace_windows > 0:
+            keep["merge_grace_remaining"] = int(self._merge_grace_windows)
         del self._profiles[drop_index]
         row: dict[str, object] = {
             "from": str(drop_id),

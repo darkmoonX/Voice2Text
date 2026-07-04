@@ -76,6 +76,9 @@ class SpeakerIdentityConfig:
     realtime_refresh_merge: bool = True
     realtime_refresh_match_mode: str = "argmax"
     max_speakers_hint: int = 0
+    merge_grace_windows: int = 0
+    merge_grace_relief: float = 0.10
+    merge_preserve_centroid: bool = False
 
 
 class _BaseEmbeddingBackend:
@@ -400,6 +403,11 @@ class SpeakerIdentityEngine:
         if self._enabled:
             self._profile_store = SpeakerProfileStore(path=str(config.store_path), on_status=self._on_status)
             self._profile_store.set_soft_speaker_cap(int(max(0, getattr(config, "max_speakers_hint", 0) or 0)))
+            self._profile_store.set_merge_grace(
+                int(max(0, getattr(config, "merge_grace_windows", 0) or 0)),
+                float(max(0.0, getattr(config, "merge_grace_relief", 0.10) or 0.0)),
+            )
+            self._profile_store.set_merge_preserve_centroid(bool(getattr(config, "merge_preserve_centroid", False)))
         self._backend = self._build_backend(config)
 
     @property
