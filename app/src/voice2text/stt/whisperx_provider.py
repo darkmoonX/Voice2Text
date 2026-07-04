@@ -540,6 +540,16 @@ class WhisperXTranscriber:
             provider_timing["diarization_detail"] = {"status": "disabled"}
             provider_timing["speaker_profile_seconds"] = 0.0
         provider_timing["final_segment_count"] = int(len(aligned))
+        if self._trace_enabled and aligned:
+            first_segment = aligned[0] if isinstance(aligned[0], dict) else {}
+            last_segment = aligned[-1] if isinstance(aligned[-1], dict) else {}
+            self._emit(
+                f"[window-boundary] trace={trace_id}; "
+                f"window_s={float(provider_timing['audio_seconds']):.2f}; "
+                f"first_seg_start={first_segment.get('start')}; "
+                f"last_seg_end={last_segment.get('end')}; "
+                f"asr_s={float(provider_timing['asr_seconds']):.3f}"
+            )
 
         stage_started_at = time.perf_counter()
         token_meta: list[dict[str, object]] = []
