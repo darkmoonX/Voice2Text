@@ -91,9 +91,12 @@ The default `server` mode starts a local resident `whisper-server.exe` child pro
 capture starts, and reuses the loaded model for every live window. The older `subprocess` mode still exists as a
 fallback/offline path and runs `whisper-cli.exe` per window.
 
-The whisper.cpp backend emits segment timestamps only; Voice2Text synthesizes per-token timestamps from those
-segment spans and marks `alignment_enabled=False`, reusing the same rolling subtitle merge path as WhisperX
-alignment-off mode.
+The whisper.cpp backend always marks `alignment_enabled=False` (it has no forced-alignment pass). Server mode
+prefers whisper.cpp's own real per-word `words[]` timestamps when available, falling back to synthesized
+per-token timestamps from segment spans only when word timings are absent (subprocess mode always synthesizes).
+Either way it reuses the same rolling subtitle merge path as WhisperX alignment-off mode; rounds 0063/0064 made
+that merge path's CJK cross-window match tolerance alignment-aware specifically because the tight CJK default
+assumed WhisperX-grade alignment precision this backend doesn't have — see the note below.
 
 Build/copy the local Vulkan binaries and runtime DLLs:
 
@@ -123,6 +126,13 @@ merge dedups cleanly. `large-v2` is higher-accuracy but, in local testing, trans
 across overlapping windows, which the text-keyed merge cannot dedup → visible duplication; use it for
 **offline / file-replay** runs, not live. `large-v3` is not recommended at all (slower and more hallucination-prone).
 Note: very low `--hop-seconds` (large overlap) over-stresses the merge even for `medium`; keep the default `hop 2.0`.
+
+Chinese/CJK quality note (rounds 0063/0064): earlier builds lost a large fraction of zh content in the live
+merge because the assembler's cross-window match tolerance assumed WhisperX-grade forced-alignment precision
+for all CJK regardless of whether alignment actually ran. That's fixed — CJK content without alignment now uses
+the same loose tolerance as non-CJK. `medium`'s live zh CER is now roughly 1.3-1.45x WhisperX's (down from ~2-3x),
+which looks like a genuine ASR-quality gap between the two models rather than a merge artifact. There is still no
+diarization/speaker-label support on this backend (a permanent design boundary, not a bug).
 
 Useful overrides:
 
