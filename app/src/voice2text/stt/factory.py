@@ -119,11 +119,94 @@ def _build_whispercpp(config: RuntimeConfig, *, device_override: Optional[str], 
             repetition_similarity=float(getattr(config, "stt_whispercpp_repetition_similarity", 0.92) or 0.92),
             boilerplate_phrases=phrases or WhisperCppQualityGate().boilerplate_phrases,
         )
+        diarizer = None
+        if bool(getattr(config, 'whisperx_enable_diarization', False)):
+            from .whispercpp_diarization import WhisperCppDiarizer
+
+            diarizer = WhisperCppDiarizer(
+                device=device,
+                diarization_device=str(getattr(config, 'whisperx_diarization_device', 'auto') or 'auto'),
+                source_language_hint=str(getattr(config, 'source_language', '') or ''),
+                diarization_model=str(
+                    getattr(
+                        config,
+                        'whisperx_diarization_model',
+                        'pyannote/speaker-diarization-3.1',
+                    )
+                    or 'pyannote/speaker-diarization-3.1'
+                ),
+                diarization_min_speakers=int(max(0, getattr(config, 'whisperx_diarization_min_speakers', 0) or 0)),
+                diarization_max_speakers=int(max(0, getattr(config, 'whisperx_diarization_max_speakers', 0) or 0)),
+                hf_token=str(getattr(config, 'whisperx_hf_token', '') or ''),
+                speaker_profile_enabled=bool(getattr(config, 'whisperx_speaker_profile_enabled', True)),
+                speaker_profile_backend=str(getattr(config, 'whisperx_speaker_profile_backend', 'pyannote') or 'pyannote'),
+                speaker_profile_model=str(getattr(config, 'whisperx_speaker_profile_model', 'pyannote/embedding') or 'pyannote/embedding'),
+                speaker_speechbrain_model=str(
+                    getattr(
+                        config,
+                        'whisperx_speaker_speechbrain_model',
+                        'speechbrain/spkrec-ecapa-voxceleb',
+                    )
+                    or 'speechbrain/spkrec-ecapa-voxceleb'
+                ),
+                speaker_nemo_model=str(
+                    getattr(
+                        config,
+                        'whisperx_speaker_nemo_model',
+                        'nvidia/speakerverification_en_titanet_large',
+                    )
+                    or 'nvidia/speakerverification_en_titanet_large'
+                ),
+                speaker_wespeaker_model=str(
+                    getattr(
+                        config,
+                        'whisperx_speaker_wespeaker_model',
+                        'pyannote/wespeaker-voxceleb-resnet34-lm',
+                    )
+                    or 'pyannote/wespeaker-voxceleb-resnet34-lm'
+                ),
+                speaker_profile_match_threshold=float(getattr(config, 'whisperx_speaker_profile_match_threshold', 0.72) or 0.72),
+                speaker_profile_min_seconds=float(getattr(config, 'whisperx_speaker_profile_min_seconds', 2.0) or 2.0),
+                speaker_realtime_candidate_seconds=float(getattr(config, 'whisperx_speaker_realtime_candidate_seconds', 6.0) or 6.0),
+                speaker_realtime_candidate_samples=int(getattr(config, 'whisperx_speaker_realtime_candidate_samples', 8) or 8),
+                speaker_realtime_candidate_match_threshold=float(getattr(config, 'whisperx_speaker_realtime_candidate_match_threshold', 0.0) or 0.0),
+                speaker_realtime_update_match_threshold=float(getattr(config, 'whisperx_speaker_realtime_update_match_threshold', 0.0) or 0.0),
+                speaker_realtime_visible_seconds=float(getattr(config, 'whisperx_speaker_realtime_visible_seconds', 24.0) or 24.0),
+                speaker_realtime_visible_samples=int(getattr(config, 'whisperx_speaker_realtime_visible_samples', 16) or 16),
+                speaker_realtime_refresh_alpha=float(
+                    0.5 if getattr(config, 'whisperx_speaker_realtime_refresh_alpha', 0.5) is None
+                    else getattr(config, 'whisperx_speaker_realtime_refresh_alpha', 0.5)
+                ),
+                speaker_realtime_refresh_assign_threshold=float(
+                    0.55 if getattr(config, 'whisperx_speaker_realtime_refresh_assign_threshold', 0.55) is None
+                    else getattr(config, 'whisperx_speaker_realtime_refresh_assign_threshold', 0.55)
+                ),
+                speaker_realtime_refresh_min_cluster_seconds=float(
+                    4.0 if getattr(config, 'whisperx_speaker_realtime_refresh_min_cluster_seconds', 4.0) is None
+                    else getattr(config, 'whisperx_speaker_realtime_refresh_min_cluster_seconds', 4.0)
+                ),
+                speaker_realtime_refresh_merge=bool(getattr(config, 'whisperx_speaker_realtime_refresh_merge', True)),
+                speaker_realtime_refresh_match_mode=str(getattr(config, 'whisperx_speaker_realtime_refresh_match_mode', 'argmax') or 'argmax'),
+                speaker_merge_grace_windows=int(max(0, getattr(config, 'whisperx_speaker_merge_grace_windows', 0) or 0)),
+                speaker_merge_grace_relief=float(max(0.0, getattr(config, 'whisperx_speaker_merge_grace_relief', 0.10) or 0.0)),
+                speaker_merge_preserve_centroid=bool(getattr(config, 'whisperx_speaker_merge_preserve_centroid', False)),
+                speaker_profile_max_exemplars=int(max(1, getattr(config, 'whisperx_speaker_profile_max_exemplars', 1) or 1)),
+                speaker_profile_exemplar_diversity_threshold=float(max(0.0, getattr(config, 'whisperx_speaker_profile_exemplar_diversity_threshold', 0.90) or 0.0)),
+                speaker_profile_reconcile_threshold=float(getattr(config, 'whisperx_speaker_profile_reconcile_threshold', 0.52) or 0.52),
+                speaker_profile_store_path=str(getattr(config, 'whisperx_speaker_profile_store_path', '') or ''),
+                speaker_profile_quality_gate_enabled=bool(getattr(config, 'whisperx_speaker_profile_quality_gate_enabled', False)),
+                speaker_profile_quality_min_confidence=float(getattr(config, 'whisperx_speaker_profile_quality_min_confidence', 0.45) or 0.45),
+                speaker_marker_style=str(getattr(config, 'speaker_marker_style', 'spk') or 'spk'),
+                speaker_pause_break_seconds=float(getattr(config, 'speaker_pause_break_seconds', 1.8)),
+                auto_download=bool(config.stt_auto_download),
+                progress_callback=progress_callback,
+            )
         _emit_progress(progress_callback, "whisper.cpp mode: resident whisper-server (live).")
         return WhisperCppServerTranscriber(
             manager=manager,
             fallback_transcriber=fallback,
             quality_gate=gate,
+            diarizer=diarizer,
             progress_callback=progress_callback,
         )
     except Exception as exc:

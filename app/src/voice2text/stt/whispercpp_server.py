@@ -329,11 +329,13 @@ class WhisperCppServerTranscriber:
         manager: WhisperCppServerManager,
         fallback_transcriber,
         quality_gate: WhisperCppQualityGate | None = None,
+        diarizer=None,
         progress_callback: Callable[[str], None] | None = None,
     ) -> None:
         self._manager = manager
         self._fallback = fallback_transcriber
         self._quality_gate = quality_gate or WhisperCppQualityGate()
+        self._diarizer = diarizer
         self._progress_callback = progress_callback
         self._last_transcription_meta: dict[str, object] = {}
 
@@ -342,6 +344,8 @@ class WhisperCppServerTranscriber:
 
     def prewarm(self, language: Optional[str] = None) -> None:
         self._manager.prewarm(language)
+        if self._diarizer is not None:
+            self._diarizer.prewarm()
 
     def transcribe(self, chunk: AudioChunk, language: Optional[str] = None, channel_mode: str = "mono") -> str:
         started_at = time.perf_counter()
@@ -379,6 +383,14 @@ class WhisperCppServerTranscriber:
         timing["dropped_segment_count"] = len(segments) - len(filtered)
         if self._quality_gate.dropped_reasons:
             timing["dropped_segment_reasons"] = ",".join(self._quality_gate.dropped_reasons)
+        speaker_turns: list[dict[str, object]] = []
+        speaker_profile_stats: dict[str, object] | None = None
+        text = join_segment_text(filtered)
+        if self._diarizer is not None:
+            filtered = self._diarizer.apply(audio, filtered)
+            speaker_turns = self._diarizer.build_speaker_turns(filtered)
+            text = self._diarizer.format_display_text(filtered)
+            speaker_profile_stats = dict(getattr(self._diarizer, "speaker_profile_stats", {}) or {})
         timing["total_seconds"] = time.perf_counter() - started_at
         detected_language = str(payload.get("detected_language") or payload.get("language") or ("" if lang == "auto" else lang))
         self._last_transcription_meta = build_transcription_meta(
@@ -386,8 +398,10 @@ class WhisperCppServerTranscriber:
             segments=filtered,
             detected_language=detected_language,
             language_probabilities=payload.get("language_probabilities"),
+            speaker_turns=speaker_turns,
+            speaker_profile_stats=speaker_profile_stats,
         )
-        return join_segment_text(filtered)
+        return text
 
     def get_last_transcription_meta(self) -> dict[str, object]:
         return dict(self._last_transcription_meta)

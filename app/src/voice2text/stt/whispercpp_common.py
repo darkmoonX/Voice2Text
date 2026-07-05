@@ -126,6 +126,8 @@ def build_transcription_meta(
     segments: list[dict[str, object]],
     detected_language: str = "",
     language_probabilities: object = None,
+    speaker_turns: list[dict[str, object]] | None = None,
+    speaker_profile_stats: dict[str, object] | None = None,
 ) -> dict[str, object]:
     token_meta: list[dict[str, object]] = []
     for segment in segments:
@@ -141,10 +143,12 @@ def build_transcription_meta(
         "alignment_enabled": False,
         "token_timestamps": token_meta,
         "detected_language": detected_language,
-        "speaker_turns": [],
-        "speaker_turn_count": 0,
+        "speaker_turns": list(speaker_turns or []),
+        "speaker_turn_count": int(len(speaker_turns or [])),
         "provider_timing": provider_timing,
     }
+    if speaker_profile_stats is not None:
+        meta["speaker_profile_stats"] = dict(speaker_profile_stats)
     if language_probabilities is not None:
         meta["language_probabilities"] = language_probabilities
     return meta
@@ -192,7 +196,7 @@ def _normalize_word_timestamp(item: dict[str, object]) -> dict[str, object] | No
         "start": start,
         "end": end,
         "score": score,
-        "speaker": "",
-        "profile_speaker": "",
-        "local_speaker": "",
+        "speaker": str(item.get("speaker") or ""),
+        "profile_speaker": str(item.get("profile_speaker") or ""),
+        "local_speaker": str(item.get("local_speaker") or ""),
     }
