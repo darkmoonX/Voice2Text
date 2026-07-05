@@ -330,6 +330,8 @@ class WhisperXTranscriber:
         if self._enable_diarization:
             if self._speaker_profile_enabled:
                 self._reset_speaker_profile_store_on_startup()
+            effective_speaker_profile_max_exemplars = self._effective_speaker_profile_max_exemplars()
+            self._emit_speaker_profile_max_exemplar_gate_status(effective_speaker_profile_max_exemplars)
             self._speaker_identity_engine = SpeakerIdentityEngine(
                 SpeakerIdentityConfig(
                     enabled=self._speaker_profile_enabled,
@@ -352,7 +354,7 @@ class WhisperXTranscriber:
                     merge_grace_windows=self._speaker_merge_grace_windows,
                     merge_grace_relief=self._speaker_merge_grace_relief,
                     merge_preserve_centroid=self._speaker_merge_preserve_centroid,
-                    max_exemplars=self._speaker_profile_max_exemplars,
+                    max_exemplars=effective_speaker_profile_max_exemplars,
                     exemplar_diversity_threshold=self._speaker_profile_exemplar_diversity_threshold,
                     reconcile_threshold=self._speaker_profile_reconcile_threshold,
                     model_root=str(self._model_root),
@@ -2792,6 +2794,27 @@ class WhisperXTranscriber:
 
     _ENGLISH_LARGE_ALIGN_BUNDLE = "WAV2VEC2_ASR_LARGE_LV60K_960H"
     _ZH_WBBBBB_ALIGN_MODEL = "wbbbbb/wav2vec2-large-chinese-zh-cn"
+
+    def _effective_speaker_profile_max_exemplars(self) -> int:
+        configured = int(getattr(self, "_speaker_profile_max_exemplars", 1))
+        if configured <= 1:
+            return 1
+        folder_lang = self._normalize_alignment_folder_language(self._source_language_hint)
+        if folder_lang == "zh":
+            return configured
+        return 1
+
+    def _emit_speaker_profile_max_exemplar_gate_status(self, effective_max_exemplars: int) -> None:
+        configured = int(getattr(self, "_speaker_profile_max_exemplars", 1))
+        if configured <= 1 or effective_max_exemplars != 1:
+            return
+        language_hint = str(self._source_language_hint or "auto").strip() or "auto"
+        self._emit(
+            "[speaker-profile] multi-exemplar requested "
+            f"(max_exemplars={configured}) but session language '{language_hint}' is not zh - "
+            "using max_exemplars=1 this session "
+            "(round 0061 evidence: zh-only benefit)."
+        )
 
     def _effective_alignment_model(self, language_code: str) -> str:
         """Effective forced-alignment model id/bundle for a language.
