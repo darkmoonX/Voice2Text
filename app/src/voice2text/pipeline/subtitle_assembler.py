@@ -106,6 +106,7 @@ class SubtitleAssembler:
         # merge jittery English alignment copies of one spoken word into a single
         # accumulating state. IoU disabled (0.0) because English word intervals
         # frequently fail to overlap across windows.
+        self._alignment_enabled = True
         self._non_cjk_match_start_diff = 1.0
         self._non_cjk_match_end_diff = 1.1
         self._non_cjk_match_min_iou = 0.0
@@ -284,6 +285,7 @@ class SubtitleAssembler:
 
         meta = transcription_meta or {}
         elapsed = self._to_float(meta.get('elapsed_seconds', 0.0), 0.0)
+        self._alignment_enabled = bool(meta.get('alignment_enabled', True))
         step_started_at = time.perf_counter()
         incoming = self._extract_incoming_words(meta, elapsed)
         diagnostics['extract_seconds'] = time.perf_counter() - step_started_at
@@ -758,21 +760,24 @@ class SubtitleAssembler:
         max_end_diff: float | None = None,
         min_iou: float | None = None,
     ) -> bool:
-        # Tolerances are script-aware. CJK alignment is tight and stable, so the
-        # same word in adjacent windows lands within ~0.25s with high interval
-        # overlap. English/Latin wav2vec2 alignment jitters far more (up to ~1s)
-        # and its word intervals often barely overlap, so the tight CJK gate fails
-        # to merge the jittered copies of one spoken word: at agreement count 3
-        # they each under-confirm (dropped words), and if promoted they render as
-        # adjacent duplicates (`completely completely`). A loose non-CJK gate with
-        # IoU disabled merges those copies into one accumulating state -> complete
-        # AND duplicate-free. (Replay: vskw 71%/9dup -> 95%/0dup; mdqm 72% -> 86%.)
+        # Tolerances are script- and alignment-aware. CJK forced alignment is
+        # tight and stable, so the same word in adjacent windows lands within
+        # ~0.25s with high interval overlap; round 0063 found CJK without forced
+        # alignment can jitter like the loose-tolerance cases. English/Latin
+        # wav2vec2 alignment jitters far more (up to ~1s) and its word intervals
+        # often barely overlap, so the tight CJK gate fails to merge the jittered
+        # copies of one spoken word: at agreement count 3 they each under-confirm
+        # (dropped words), and if promoted they render as adjacent duplicates
+        # (`completely completely`). A loose non-CJK gate with IoU disabled merges
+        # those copies into one accumulating state -> complete AND duplicate-free.
+        # (Replay: vskw 71%/9dup -> 95%/0dup; mdqm 72% -> 86%.)
+        use_tight_cjk_tolerance = self._is_cjk_source and self._alignment_enabled
         if max_start_diff is None:
-            max_start_diff = 0.25 if self._is_cjk_source else self._non_cjk_match_start_diff
+            max_start_diff = 0.25 if use_tight_cjk_tolerance else self._non_cjk_match_start_diff
         if max_end_diff is None:
-            max_end_diff = 0.35 if self._is_cjk_source else self._non_cjk_match_end_diff
+            max_end_diff = 0.35 if use_tight_cjk_tolerance else self._non_cjk_match_end_diff
         if min_iou is None:
-            min_iou = 0.30 if self._is_cjk_source else self._non_cjk_match_min_iou
+            min_iou = 0.30 if use_tight_cjk_tolerance else self._non_cjk_match_min_iou
         if self._normalize_word(a.word) != self._normalize_word(b.word):
             return False
         if abs(a.start - b.start) > max_start_diff:
