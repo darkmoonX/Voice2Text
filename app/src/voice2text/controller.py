@@ -674,6 +674,13 @@ class TranscriptionController(QObject):
             return None
 
     def _effective_model_label(self) -> str:
+        if normalize_stt_provider(self._config.stt_provider) == 'whispercpp':
+            explicit = str(getattr(self._config, 'stt_whispercpp_model_path', '') or '').strip()
+            if explicit:
+                return explicit
+            if self._config.stt_model_path.strip():
+                return self._config.stt_model_path.strip()
+            return (self._config.stt_whispercpp_model_size or '').strip() or 'unknown'
         if self._config.stt_model_path.strip():
             return self._config.stt_model_path.strip()
         return (self._config.model_size or '').strip() or 'unknown'

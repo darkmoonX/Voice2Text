@@ -124,9 +124,14 @@ python main.py --stt-provider whispercpp --whispercpp-model-size medium
 ```
 
 `medium` is the recommended live model — realtime (~0.45x at `seg10/hop2`) and cross-window stable, so the rolling
-merge dedups cleanly. `large-v2` is higher-accuracy but, in local testing, transcribes the same audio differently
-across overlapping windows, which the text-keyed merge cannot dedup → visible duplication; use it for
-**offline / file-replay** runs, not live. `large-v3` is not recommended at all (slower and more hallucination-prone).
+merge dedups cleanly, and it is the most thoroughly validated path across every round. `large-v2` is higher-accuracy
+and was found in round 0033 (2026-06-19) to transcribe the same audio differently across overlapping windows, which
+the text-keyed merge couldn't dedup → visible duplication (`large-v2` was documented as offline/file-replay only,
+not live, as a result). **Revalidated in round 0068 (2026-07-07)**: re-running the real controller with `large-v2`
+live at the shipped default `seg10/hop2` on all 3 standard reference clips (with and without diarization) no longer
+reproduces the duplication — most likely fixed as a side effect of later cross-window match-tolerance work (rounds
+0034/0064). `large-v2` live is therefore a reasonable higher-accuracy option now, not a discouraged one; `medium`
+remains the safe default. `large-v3` is not recommended at all (slower and more hallucination-prone).
 Note: very low `--hop-seconds` (large overlap) over-stresses the merge even for `medium`; keep the default `hop 2.0`.
 
 Chinese/CJK quality note (rounds 0063/0064): earlier builds lost a large fraction of zh content in the live
