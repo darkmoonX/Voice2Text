@@ -697,19 +697,19 @@ class SettingsDialog(QDialog):
         self._stt_auto_download_check.setEnabled(True)
 
         is_whispercpp = provider == "whispercpp"
+        # whisper.cpp has no forced-alignment pass (CLAUDE.md hard constraint), so the
+        # alignment-only controls stay disabled for it. Diarization/speaker-profile
+        # controls are NOT alignment-specific: round 0065 added an independent
+        # diarization module for whisper.cpp's live/server path that honors the same
+        # whisperx_diarization_*/whisperx_speaker_* config keys, so those fields must
+        # stay enabled regardless of provider.
         for field in (
             self._whisperx_vad_check,
-            self._whisperx_diarization_check,
             self._whisperx_align_language_combo,
             self._whisperx_align_device_combo,
             self._whisperx_align_guard_combo,
             self._whisperx_align_guard_revert_btn,
-            self._whisperx_diar_device_combo,
             self._whisperx_align_model_edit,
-            self._whisperx_diar_model_edit,
-            self._whisperx_hf_token_edit,
-            self._whisperx_speaker_profile_check,
-            self._whisperx_speaker_backend_combo,
         ):
             field.setEnabled(not is_whispercpp)
         if is_whispercpp:
@@ -963,7 +963,7 @@ class SettingsDialog(QDialog):
         tips = {
             self._mode_combo: "Choose audio source mode: loopback, microphone, or selected app sessions.",
             self._select_source_btn: "Open source picker to choose capture devices or app sessions.",
-            self._stt_provider_combo: "Speech-to-text backend. WhisperX is default; whisper.cpp uses resident whisper-server for live Vulkan ASR and has no diarization/speaker labels.",
+            self._stt_provider_combo: "Speech-to-text backend. WhisperX is default and is the only backend with forced alignment; whisper.cpp uses resident whisper-server for live Vulkan ASR and supports live diarization/speaker labels via its own module (no forced alignment).",
             self._stt_variant_combo: "Execution preference (Auto/CPU/GPU).",
             self._stt_model_path_edit: "Custom model: WhisperX accepts a model name (downloaded if absent) or a local path; whisper.cpp expects a local ggml file/dir.",
             self._stt_auto_download_check: "Auto-download missing models.",
