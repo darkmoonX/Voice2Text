@@ -86,7 +86,9 @@ Advanced build parameters and MSVC/MinGW presets:
 ## Optional whisper.cpp Vulkan Backend
 
 `whispercpp` is an alternative ASR backend for non-CUDA GPU acceleration through whisper.cpp's Vulkan path.
-WhisperX remains the default and is still the only backend with forced alignment, diarization, and speaker labels.
+WhisperX remains the default and is still the only backend with forced alignment. Live diarization/speaker
+labels are also available on this backend (round 0065) via its own independent module, gated by the same
+`whisperx_enable_diarization`/`whisperx_diarization_*`/`whisperx_speaker_*` settings — see the note below.
 The default `server` mode starts a local resident `whisper-server.exe` child process on `127.0.0.1`, warms it before
 capture starts, and reuses the loaded model for every live window. The older `subprocess` mode still exists as a
 fallback/offline path and runs `whisper-cli.exe` per window.
@@ -131,8 +133,15 @@ Chinese/CJK quality note (rounds 0063/0064): earlier builds lost a large fractio
 merge because the assembler's cross-window match tolerance assumed WhisperX-grade forced-alignment precision
 for all CJK regardless of whether alignment actually ran. That's fixed — CJK content without alignment now uses
 the same loose tolerance as non-CJK. `medium`'s live zh CER is now roughly 1.3-1.45x WhisperX's (down from ~2-3x),
-which looks like a genuine ASR-quality gap between the two models rather than a merge artifact. There is still no
-diarization/speaker-label support on this backend (a permanent design boundary, not a bug).
+which looks like a genuine ASR-quality gap between the two models rather than a merge artifact.
+
+Live diarization/speaker labels (round 0065): the server/live path supports opt-in speaker diarization via a
+standalone module (`stt/whispercpp_diarization.py`) that reuses `SpeakerIdentityEngine` and the `whisperx`
+package's `assign_word_speakers` utility directly, without sharing code with the WhisperX provider's own
+diarization machinery. Enable it the same way as WhisperX diarization (`whisperx_enable_diarization` +
+`whisperx_diarization_device`); GPU-validated speaker accuracy against ground truth is in the same range as
+WhisperX's own numbers on the standard reference clips. The whole-file/import diarization path and the
+subprocess (non-server) fallback path do not have diarization yet.
 
 Useful overrides:
 
