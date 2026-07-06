@@ -84,6 +84,7 @@ class WhisperCppDiarizer:
         os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
         self._diarization_device = self._resolve_diarization_device()
         self._diarization_pipeline = None
+        self._whole_file_diarization_pipeline = None
         self._pipeline_factory = pipeline_factory
         self._assign_word_speakers = assign_word_speakers
         self._diarization_disabled_reason: str | None = None
@@ -300,6 +301,77 @@ class WhisperCppDiarizer:
         self._emit("whisper.cpp diarization pipeline initialized.")
         self._emit("[download] whispercpp-diarization ready.")
         self._warmup_diarization_cuda_context()
+
+    def _ensure_whole_file_diarization_pipeline(self):
+        """Return a CPU-pinned diarization pipeline for the whole-file direct/import pass.
+
+        Round 0066: a single continuous whole-file diarization pass is a large sustained
+        GPU compute burst with known crash risk under sustained load (round 0041), so this
+        is deliberately pinned to CPU regardless of the live `diarization_device` setting,
+        mirroring `whisperx_provider.py`'s `_ensure_whole_file_diarization_pipeline`. Reuses
+        the live pipeline when it already runs on CPU; otherwise builds and caches a
+        separate CPU pipeline (the live/GPU pipeline, if any, is left untouched).
+        """
+        if str(self._diarization_device) == "cpu":
+            self._ensure_diarization_pipeline_loaded()
+            return self._diarization_pipeline
+        if self._whole_file_diarization_pipeline is not None:
+            return self._whole_file_diarization_pipeline
+        self._emit("[download] whole-file whispercpp-diarization preparing (CPU)")
+        self._sanitize_broken_proxy_env()
+        resolved_hf_token = self._resolve_hf_token()
+        self._apply_hf_token_env(resolved_hf_token)
+        model_name_for_pipeline = self._resolve_diarization_model_for_pipeline(
+            model_name=self._diarization_model,
+            hf_token=resolved_hf_token,
+        )
+        self._whole_file_diarization_pipeline = self._create_diarization_pipeline(
+            model_name=model_name_for_pipeline,
+            device="cpu",
+            hf_token=resolved_hf_token,
+        )
+        self._emit("whole-file whispercpp-diarization pipeline initialized (CPU).")
+        return self._whole_file_diarization_pipeline
+
+    def diarize_whole_file_turns_from_audio(self, audio_f32: np.ndarray) -> list[dict[str, object]]:
+        """Run ONE diarization pass over the whole audio and return global turns.
+
+        Returns ``[{"start", "end", "speaker"}, ...]`` (absolute seconds within the given
+        audio, sorted by start time). Unlike the per-window `_attach_speaker_labels` path,
+        these labels are globally consistent across the whole file, so the direct/import
+        path can assign them to tokens by time overlap
+        (`direct_transcription._assign_global_speakers`) and skip the cross-window profile
+        re-cluster entirely. Returns ``[]`` on any failure or unusable input (caller
+        degrades to no speaker labels rather than crashing the whole direct pass).
+        """
+        try:
+            audio = np.asarray(audio_f32, dtype=np.float32).reshape(-1)
+        except Exception:
+            return []
+        if audio.size < 1600:
+            return []
+        if not np.isfinite(audio).all():
+            audio = np.nan_to_num(audio, nan=0.0, posinf=1.0, neginf=-1.0)
+        try:
+            pipeline = self._ensure_whole_file_diarization_pipeline()
+            if pipeline is None:
+                return []
+            diarize_segments = pipeline(audio, **self._diar_speaker_count_kwargs())
+            turns: list[dict[str, object]] = []
+            for row in diarize_segments.itertuples(index=False):
+                try:
+                    start = float(getattr(row, "start"))
+                    end = float(getattr(row, "end"))
+                    speaker = str(getattr(row, "speaker") or "").strip()
+                except Exception:
+                    continue
+                if speaker and end > start:
+                    turns.append({"start": start, "end": end, "speaker": speaker})
+            turns.sort(key=lambda t: (float(t["start"]), float(t["end"])))
+            return turns
+        except Exception as exc:
+            self._emit(f"whisper.cpp whole-file diarization failed: {exc}")
+            return []
 
     def _create_diarization_pipeline(self, *, model_name: str, device: str, hf_token: str | None):
         if self._pipeline_factory is not None:

@@ -10,7 +10,6 @@ from typing import Callable
 
 from ..capture import AudioChunk
 from ..config import RuntimeConfig
-from ..stt.registry import normalize_stt_provider
 
 ProgressCallback = Callable[[float, float], None]
 StatusCallback = Callable[[str], None]
@@ -255,10 +254,6 @@ def run_direct_transcription(
     labels afterwards. This avoids the chunked-diarization + weaker ``pyannote/embedding``
     collapse that merged distinct speakers (e.g. zh Bn 3 voices -> 1).
     """
-    provider = normalize_stt_provider(str(getattr(cfg, "stt_provider", "whisperx") or "whisperx"))
-    if provider == "whispercpp" and on_status is not None:
-        on_status("direct mode: whispercpp has no diarization - single-pass, no speaker labels")
-
     set_suppressed = getattr(transcriber, "set_diarization_suppressed", None)
     diarize_whole_file = getattr(transcriber, "diarize_whole_file_turns", None)
     supports_whole_file = bool(getattr(transcriber, "supports_whole_file_diarization", lambda: False)())

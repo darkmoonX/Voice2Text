@@ -338,6 +338,10 @@ class WhisperCppServerTranscriber:
         self._diarizer = diarizer
         self._progress_callback = progress_callback
         self._last_transcription_meta: dict[str, object] = {}
+        # Round 0066: while an external whole-file diarization pass (direct/import) owns
+        # speaker assignment, transcribe() must emit pure ASR output with no per-chunk
+        # speaker labels, mirroring whisperx_provider.py's set_diarization_suppressed.
+        self._diarization_suppressed = False
 
     def has_enough_signal(self, chunk: AudioChunk, threshold: float = 0.008, channel_mode: str = "mono") -> bool:
         return has_enough_signal(chunk, threshold=threshold, channel_mode=channel_mode)
@@ -386,7 +390,7 @@ class WhisperCppServerTranscriber:
         speaker_turns: list[dict[str, object]] = []
         speaker_profile_stats: dict[str, object] | None = None
         text = join_segment_text(filtered)
-        if self._diarizer is not None:
+        if self._diarizer is not None and not self._diarization_suppressed:
             filtered = self._diarizer.apply(audio, filtered)
             speaker_turns = self._diarizer.build_speaker_turns(filtered)
             text = self._diarizer.format_display_text(filtered)
@@ -405,6 +409,51 @@ class WhisperCppServerTranscriber:
 
     def get_last_transcription_meta(self) -> dict[str, object]:
         return dict(self._last_transcription_meta)
+
+    def supports_whole_file_diarization(self) -> bool:
+        return self._diarizer is not None
+
+    def set_diarization_suppressed(self, suppressed: bool) -> None:
+        """Toggle per-chunk diarization inside transcribe() (round 0066).
+
+        Used by the direct/import whole-file diarization path
+        (`pipeline/direct_transcription.py`): while an external whole-file pass owns
+        speaker assignment, transcribe() must emit pure ASR output with no per-chunk
+        speaker labels, mirroring `whisperx_provider.py`'s equivalent method.
+        """
+        self._diarization_suppressed = bool(suppressed)
+
+    def diarize_whole_file_turns(
+        self,
+        chunk: AudioChunk,
+        channel_mode: str = "mono",
+        *,
+        emit_status: bool = True,
+    ) -> list[dict[str, object]]:
+        """Run ONE diarization pass over the whole audio and return global turns.
+
+        Returns ``[{"start", "end", "speaker"}, ...]`` (absolute seconds, consistent across
+        the entire file) or ``[]`` if no diarizer is configured or diarization fails.
+        """
+        if self._diarizer is None:
+            return []
+        audio = pcm16_to_mono_float(chunk.pcm16, chunk.channels, channel_mode=channel_mode)
+        if audio.size == 0:
+            return []
+        if int(getattr(chunk, "sample_rate", 16000) or 16000) != 16000:
+            audio = resample(audio, int(chunk.sample_rate), 16000)
+        if audio.size == 0:
+            return []
+        started_at = time.perf_counter()
+        turns = self._diarizer.diarize_whole_file_turns_from_audio(audio)
+        if emit_status:
+            speakers = len({str(t.get("speaker") or "") for t in turns})
+            self._emit(
+                "[speaker-turn] whole-file diarization: "
+                f"turns={len(turns)}; speakers={speakers}; "
+                f"elapsed={time.perf_counter() - started_at:.1f}s"
+            )
+        return turns
 
     def close(self) -> None:
         self._manager.shutdown()
