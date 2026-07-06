@@ -140,8 +140,14 @@ standalone module (`stt/whispercpp_diarization.py`) that reuses `SpeakerIdentity
 package's `assign_word_speakers` utility directly, without sharing code with the WhisperX provider's own
 diarization machinery. Enable it the same way as WhisperX diarization (`whisperx_enable_diarization` +
 `whisperx_diarization_device`); GPU-validated speaker accuracy against ground truth is in the same range as
-WhisperX's own numbers on the standard reference clips. The whole-file/import diarization path and the
-subprocess (non-server) fallback path do not have diarization yet.
+WhisperX's own numbers on the standard reference clips.
+
+Whole-file/import diarization (round 0066): the direct/import path
+(`pipeline/direct_transcription.py::run_direct_transcription`, used by both the manual "import audio -> direct
+mode" action and the session-finalize direct-relabel background job) now also supports speaker diarization for
+`whispercpp`, via a CPU-pinned whole-file diarization pass (same CPU-pinning design as WhisperX's, since a
+sustained whole-file GPU diarization pass has crash risk). No new config surface; gated by the same
+`whisperx_enable_diarization` keys. The subprocess (non-server) fallback path still has no diarization.
 
 Useful overrides:
 
