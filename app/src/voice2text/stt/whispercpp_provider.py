@@ -32,6 +32,7 @@ class WhisperCppTranscriber:
         device: str = "vulkan",
         cpu_threads: int = 0,
         beam_size: int = 5,
+        diarizer=None,
         progress_callback: Callable[[str], None] | None = None,
     ) -> None:
         self._binary_path = Path(binary_path)
@@ -39,6 +40,11 @@ class WhisperCppTranscriber:
         self._device = "cpu" if str(device or "").strip().lower().startswith("cpu") else "vulkan"
         self._cpu_threads = max(0, int(cpu_threads or 0))
         self._beam_size = max(1, int(beam_size or 5))
+        self._diarizer = diarizer
+        # Round 0067: while an external whole-file diarization pass (direct/import) owns
+        # speaker assignment, transcribe() must emit pure ASR output with no per-chunk
+        # speaker labels, mirroring whispercpp_server.py's set_diarization_suppressed.
+        self._diarization_suppressed = False
         self._progress_callback = progress_callback
         self._last_transcription_meta: dict[str, object] = {}
         if not self._binary_path.exists():
@@ -54,6 +60,10 @@ class WhisperCppTranscriber:
 
     def has_enough_signal(self, chunk: AudioChunk, threshold: float = 0.008, channel_mode: str = "mono") -> bool:
         return has_enough_signal(chunk, threshold=threshold, channel_mode=channel_mode)
+
+    def prewarm(self, language: Optional[str] = None) -> None:
+        if self._diarizer is not None:
+            self._diarizer.prewarm()
 
     def transcribe(self, chunk: AudioChunk, language: Optional[str] = None, channel_mode: str = "mono") -> str:
         started_at = time.perf_counter()
@@ -90,17 +100,65 @@ class WhisperCppTranscriber:
                 raise RuntimeError(f"whisper.cpp transcription failed (exit={result.returncode}): {detail}")
             payload = read_json_object(out_prefix.with_suffix(".json"), label="whisper.cpp")
         segments = parse_cli_segments(payload)
+        speaker_turns: list[dict[str, object]] = []
+        speaker_profile_stats: dict[str, object] | None = None
         text = join_segment_text(segments)
+        if self._diarizer is not None and not self._diarization_suppressed:
+            segments = self._diarizer.apply(audio, segments)
+            speaker_turns = self._diarizer.build_speaker_turns(segments)
+            text = self._diarizer.format_display_text(segments)
+            speaker_profile_stats = dict(getattr(self._diarizer, "speaker_profile_stats", {}) or {})
         timing["total_seconds"] = time.perf_counter() - started_at
         self._last_transcription_meta = build_transcription_meta(
             provider_timing=timing,
             segments=segments,
             detected_language="" if lang == "auto" else lang,
+            speaker_turns=speaker_turns,
+            speaker_profile_stats=speaker_profile_stats,
         )
         return text
 
     def get_last_transcription_meta(self) -> dict[str, object]:
         return dict(self._last_transcription_meta)
+
+    def supports_whole_file_diarization(self) -> bool:
+        return self._diarizer is not None
+
+    def set_diarization_suppressed(self, suppressed: bool) -> None:
+        """Toggle per-chunk diarization inside transcribe() (round 0067, mirrors
+        WhisperCppServerTranscriber's equivalent method from round 0066)."""
+        self._diarization_suppressed = bool(suppressed)
+
+    def diarize_whole_file_turns(
+        self,
+        chunk: AudioChunk,
+        channel_mode: str = "mono",
+        *,
+        emit_status: bool = True,
+    ) -> list[dict[str, object]]:
+        """Run ONE diarization pass over the whole audio and return global turns.
+
+        Mirrors WhisperCppServerTranscriber.diarize_whole_file_turns (round 0066).
+        """
+        if self._diarizer is None:
+            return []
+        audio = pcm16_to_mono_float(chunk.pcm16, chunk.channels, channel_mode=channel_mode)
+        if audio.size == 0:
+            return []
+        if int(getattr(chunk, "sample_rate", 16000) or 16000) != 16000:
+            audio = resample(audio, int(chunk.sample_rate), 16000)
+        if audio.size == 0:
+            return []
+        started_at = time.perf_counter()
+        turns = self._diarizer.diarize_whole_file_turns_from_audio(audio)
+        if emit_status:
+            speakers = len({str(t.get("speaker") or "") for t in turns})
+            self._emit(
+                "[speaker-turn] whole-file diarization: "
+                f"turns={len(turns)}; speakers={speakers}; "
+                f"elapsed={time.perf_counter() - started_at:.1f}s"
+            )
+        return turns
 
     def _run_cli(self, wav_path: Path, out_prefix: Path, lang: str, *, use_cpu: bool) -> subprocess.CompletedProcess[str]:
         cmd = [

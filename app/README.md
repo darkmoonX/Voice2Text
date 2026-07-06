@@ -147,7 +147,15 @@ Whole-file/import diarization (round 0066): the direct/import path
 mode" action and the session-finalize direct-relabel background job) now also supports speaker diarization for
 `whispercpp`, via a CPU-pinned whole-file diarization pass (same CPU-pinning design as WhisperX's, since a
 sustained whole-file GPU diarization pass has crash risk). No new config surface; gated by the same
-`whisperx_enable_diarization` keys. The subprocess (non-server) fallback path still has no diarization.
+`whisperx_enable_diarization` keys.
+
+Subprocess (non-server) diarization (round 0067): the CLI-subprocess transcriber (`--whispercpp-mode
+subprocess`, and also used automatically as the server transcriber's mid-session fallback if the resident
+server becomes unavailable) now has the same diarization coverage as the server path above — live/per-chunk
+diarization and whole-file/import diarization both work. `factory.py` builds one shared diarizer instance for
+both transcribers, so the server's automatic fallback keeps the same live speaker-profile state rather than
+starting a second, independent one. This closes the whisper.cpp diarization feature family across all three
+execution paths (live/server, whole-file/import, subprocess).
 
 Useful overrides:
 
