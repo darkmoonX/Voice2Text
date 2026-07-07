@@ -16,12 +16,17 @@ app/src/segments/
 app/src/runtime_settings.json
 app/src/__pycache__/
 app/native/audio_bridge/build*
-app/src/tests/
-app/scripts/
+app/src/tests/**
+!app/src/tests/*.py
+app/scripts/**
+!app/scripts/diagnostics/
+!app/scripts/diagnostics/*.py
 
 ./docs/tasks
 
 test_data
+
+*.stackdump
 
 *.obj
 *.pdb
