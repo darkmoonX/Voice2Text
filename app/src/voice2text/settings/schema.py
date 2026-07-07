@@ -17,7 +17,9 @@ def default_stt_model(provider: str) -> str:
     normalized = normalize_stt_provider(provider)
     if normalized == 'whispercpp':
         return 'medium'
-    return 'small'
+    # 'auto' resolves by effective device at transcriber build time:
+    # large-v3 on CUDA, small on CPU (round 0072).
+    return 'auto'
 
 
 def is_path_like(value: str) -> bool:

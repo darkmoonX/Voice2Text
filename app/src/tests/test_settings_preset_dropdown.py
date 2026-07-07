@@ -110,7 +110,7 @@ class PresetDropdownDialogTests(unittest.TestCase):
     def test_high_accuracy_preset_fills_widgets(self) -> None:
         dlg = self._dialog()
         dlg._preset_combo.setCurrentIndex(dlg._preset_combo.findData("high-accuracy"))
-        self.assertEqual(dlg._model_size_combo.currentText(), "large-v2")
+        self.assertEqual(dlg._model_size_combo.currentText(), "large-v3")
         self.assertEqual(dlg._beam_spin.value(), 5)
         self.assertEqual(float(dlg._segment_spin.value()), 10.0)
         self.assertEqual(float(dlg._hop_spin.value()), 2.0)
@@ -118,7 +118,7 @@ class PresetDropdownDialogTests(unittest.TestCase):
         self.assertTrue(dlg._whisperx_speaker_profile_check.isChecked())
 
         updates = dlg._collect_updates()
-        self.assertEqual(updates["model_size"], "large-v2")
+        self.assertEqual(updates["model_size"], "large-v3")
         self.assertEqual(updates["runtime_preset"], "high-accuracy")
         self.assertEqual(updates["whisper_beam_size"], 5)
         self.assertTrue(updates["whisperx_enable_diarization"])
@@ -147,7 +147,7 @@ class PresetDropdownDialogTests(unittest.TestCase):
         self.assertEqual(updates["whisper_beam_size"], 3)
         self.assertEqual(updates["runtime_preset"], "")
         # the explicit model_size from the preset still stands (override semantics)
-        self.assertEqual(updates["model_size"], "large-v2")
+        self.assertEqual(updates["model_size"], "large-v3")
 
     def test_sync_from_config_reflects_preset_and_model(self) -> None:
         from voice2text.settings_dialog import SettingsDialog

@@ -23,6 +23,8 @@ from .pipeline.text_delta_logger import TextDeltaLogger
 from .pipeline.transcription_loop import TranscriptionLoopDeps, TranscriptionLoopEngine
 from .status_routing import should_surface_overlay_status
 from .stt import STTTranscriber, create_stt_transcriber, normalize_stt_provider
+from .stt.model_resolution import is_auto_model, resolve_model_size
+from .stt.registry import normalize_stt_variant
 from .stt.preprocessing import AudioPreprocessingPipeline, create_audio_preprocessing_pipeline
 from .translation import TranslationEngine, build_translation_engine
 
@@ -685,7 +687,13 @@ class TranscriptionController(QObject):
             return (self._config.stt_whispercpp_model_size or '').strip() or 'unknown'
         if self._config.stt_model_path.strip():
             return self._config.stt_model_path.strip()
-        return (self._config.model_size or '').strip() or 'unknown'
+        size = (self._config.model_size or '').strip()
+        if is_auto_model(size):
+            # Best-effort device guess for display; the factory resolves against the
+            # post-fallback device, but variant/model_device covers the normal cases.
+            device = 'cpu' if normalize_stt_variant(self._config.stt_variant) == 'cpu' else self._config.model_device
+            return f'auto({resolve_model_size(size, device)})'
+        return size or 'unknown'
 
     def _recover_from_runtime_transcription_error(self, raw_message: str) -> bool:
         recovery = WhisperRuntimeRecovery(state=self._runtime_recovery_state, provider_name=normalize_stt_provider(self._config.stt_provider), model_device=self._config.model_device, cpu_fallback_on_cuda_error=self._config.cpu_fallback_on_cuda_error, try_prepare_cuda_compat_alias=self._try_prepare_cuda_compat_alias, rebuild_transcriber_cuda=lambda: self._build_stt_transcriber(), rebuild_transcriber_cpu=lambda: self._build_stt_transcriber(device_override='cpu', compute_type_override='int8'), emit_status=self._emit_status, emit_error=self._emit_error)

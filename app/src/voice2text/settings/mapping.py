@@ -53,7 +53,7 @@ class SettingsPayloadInput:
     transcript_export_include_speaker: bool
     # Preset-bundled runtime knobs now editable from the dialog (round 0015 Phase C).
     # Defaulted so older callers/tests that omit them keep working.
-    model_size: str = "small"
+    model_size: str = "auto"
     whisper_beam_size: int = 5
     whisperx_speaker_profile_enabled: bool = True
     runtime_preset: str = ""
@@ -135,8 +135,10 @@ def build_settings_updates(payload: SettingsPayloadInput, *, lang: str, hop_gt_s
         'stt_provider': stt_provider,
         'runtime_preset': (payload.runtime_preset or '').strip(),
         'stt_variant': payload.stt_variant or 'auto',
-        'model_size': (payload.model_size or 'small').strip() or 'small',
-        'stt_whispercpp_model_size': (payload.model_size or 'medium').strip() or 'medium',
+        'model_size': (payload.model_size or 'auto').strip() or 'auto',
+        # whisper.cpp resolves ggml-<size>.bin from this literal name, so the whisperx-only
+        # 'auto' sentinel must never leak through (it would look for ggml-auto.bin).
+        'stt_whispercpp_model_size': _whispercpp_model_size(payload.model_size),
         'stt_whispercpp_model_path': whispercpp_model_path,
         'whisper_beam_size': max(1, int(payload.whisper_beam_size or 5)),
         'whisperx_speaker_profile_enabled': bool(payload.whisperx_speaker_profile_enabled),
@@ -195,6 +197,14 @@ def _normalize_translation_backend(value: str) -> str:
     if token in {"argos", "nllb", "llm", "cloud"}:
         return token
     return "argos"
+
+
+def _whispercpp_model_size(value: str) -> str:
+    """whisper.cpp size from the shared model field; 'auto' is whisperx-only (round 0072)."""
+    token = str(value or "").strip()
+    if not token or token.lower() == "auto":
+        return "medium"
+    return token
 
 
 def _is_whispercpp_model_path(value: str) -> bool:

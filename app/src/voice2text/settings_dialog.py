@@ -218,7 +218,9 @@ class SettingsDialog(QDialog):
         self._preset_combo.currentIndexChanged.connect(self._on_preset_changed)
 
         self._model_size_combo = QComboBox()
-        for _m in ("tiny", "base", "small", "medium", "large-v2", "large-v3"):
+        # 'auto' resolves by effective device at build time: large-v3 on CUDA, small on
+        # CPU (round 0072). whisper.cpp sessions ignore it (mapping pins medium).
+        for _m in ("auto", "tiny", "base", "small", "medium", "large-v2", "large-v3"):
             self._model_size_combo.addItem(_m, _m)
         # "Other…" reveals a single custom field (model name OR local path) so size and
         # custom path are a mutually-exclusive choice — never two path-like fields at once.
@@ -491,7 +493,7 @@ class SettingsDialog(QDialog):
         self._set_combo_data(self._stt_provider_combo, str(getattr(cfg, "stt_provider", "whisperx") or "whisperx"))
         self._set_combo_data(self._preset_combo, normalize_preset(str(getattr(cfg, "runtime_preset", "") or "")))
         self._set_combo_data(self._stt_variant_combo, cfg.stt_variant)
-        self._set_model_size(str(getattr(cfg, "model_size", "small") or "small"))
+        self._set_model_size(str(getattr(cfg, "model_size", "auto") or "auto"))
         self._beam_spin.setValue(int(getattr(cfg, "whisper_beam_size", 5) or 5))
         self._whisperx_speaker_profile_check.setChecked(bool(getattr(cfg, "whisperx_speaker_profile_enabled", True)))
         self._set_combo_data(self._compute_type_combo, str(getattr(cfg, "compute_type", "float16") or "float16"))
@@ -502,14 +504,16 @@ class SettingsDialog(QDialog):
         # also migrates legacy settings that stashed a bare alias in stt_model_path.
         whisperx_effective = (
             str(getattr(cfg, "stt_model_path", "") or "").strip()
-            or str(getattr(cfg, "model_size", "small") or "small").strip()
-            or "small"
+            or str(getattr(cfg, "model_size", "auto") or "auto").strip()
+            or "auto"
         )
         whispercpp_effective = (
             str(getattr(cfg, "stt_whispercpp_model_path", "") or getattr(cfg, "stt_model_path", "") or "").strip()
             or str(getattr(cfg, "stt_whispercpp_model_size", "") or getattr(cfg, "model_size", "medium") or "medium").strip()
             or "medium"
         )
+        if whispercpp_effective.lower() == "auto":
+            whispercpp_effective = "medium"  # 'auto' is whisperx-only (round 0072)
         if provider == "whispercpp":
             self._set_model_size(whispercpp_effective)
         else:

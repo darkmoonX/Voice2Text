@@ -40,7 +40,7 @@ class PresetTableTests(unittest.TestCase):
     def test_apply_preset_sets_bundle_and_leaves_others(self) -> None:
         cfg = types.SimpleNamespace(runtime_preset="", unrelated=123)
         applied = apply_preset(cfg, "high-accuracy")
-        self.assertEqual(cfg.model_size, "large-v2")
+        self.assertEqual(cfg.model_size, "large-v3")
         self.assertEqual(cfg.compute_type, "float16")
         self.assertEqual(cfg.whisper_beam_size, 5)
         self.assertEqual(cfg.segment_seconds, 10.0)
@@ -57,7 +57,7 @@ class PresetTableTests(unittest.TestCase):
 
     def test_preset_arg_defaults_maps_to_dests(self) -> None:
         d = preset_arg_defaults("high-accuracy")
-        self.assertEqual(d["model"], "large-v2")
+        self.assertEqual(d["model"], "large-v3")
         self.assertEqual(d["beam_size"], 5)
         self.assertEqual(d["segment_seconds"], 10.0)
         self.assertTrue(d["whisperx_diarization"])
@@ -78,17 +78,18 @@ class PresetCliTests(unittest.TestCase):
 
     def test_balanced_matches_bare_default_except_model(self) -> None:
         # round 0014 set the bare seg/hop/beam/compute default to the balanced point;
-        # only model_size differs (bare default stays the no-download 'small').
+        # only model_size differs (round 0072: bare default is the device-resolved
+        # 'auto' sentinel — large-v3 on CUDA, small on CPU).
         base = build_runtime_config(_parse([]))
         balanced = build_runtime_config(_parse(["--preset", "balanced"]))
         for field in ("compute_type", "whisper_beam_size", "segment_seconds", "hop_seconds"):
             self.assertEqual(getattr(balanced, field), getattr(base, field), field)
-        self.assertEqual(base.model_size, "small")
+        self.assertEqual(base.model_size, "auto")
         self.assertEqual(balanced.model_size, "medium")
 
     def test_high_accuracy_bundle_applied(self) -> None:
         cfg = build_runtime_config(_parse(["--preset", "high-accuracy"]))
-        self.assertEqual(cfg.model_size, "large-v2")
+        self.assertEqual(cfg.model_size, "large-v3")
         self.assertEqual(cfg.segment_seconds, 10.0)
         self.assertEqual(cfg.hop_seconds, 2.0)
         self.assertEqual(cfg.whisper_beam_size, 5)
@@ -100,7 +101,7 @@ class PresetCliTests(unittest.TestCase):
     def test_explicit_flag_overrides_preset(self) -> None:
         cfg = build_runtime_config(_parse(["--preset", "high-accuracy", "--beam-size", "1"]))
         self.assertEqual(cfg.whisper_beam_size, 1)  # explicit wins
-        self.assertEqual(cfg.model_size, "large-v2")  # from preset
+        self.assertEqual(cfg.model_size, "large-v3")  # from preset
 
     def test_explicit_bool_flag_overrides_preset(self) -> None:
         cfg = build_runtime_config(

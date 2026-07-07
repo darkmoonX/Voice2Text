@@ -52,10 +52,14 @@ PRESETS: dict[str, dict[str, object]] = {
         "whisperx_speaker_profile_enabled": True,
     },
     "high-accuracy": {
-        # Best quality (large-v2, CER 0.136 vs balanced 0.147) but rtf ~2.1x: it
-        # does NOT sustain live realtime -- intended for imported-file processing
-        # or users who accept lag.
-        "model_size": "large-v2",
+        # Round 0072: large-v3 (was large-v2). On the current stack (torch 2.8 /
+        # ctranslate2 4.8, RTX 3060-class GPU) paced live replay with diarization
+        # KEEPS UP (zh truth CER 19.1%->15.0%, en 15.5%->13.7%, completeness up on
+        # every baseline case) -- the round-0015 "rtf ~2.1x, not live-realtime"
+        # note predates those stack upgrades. Weaker GPUs may still lag; the bare
+        # default model 'auto' resolves to large-v3 on CUDA anyway, so this preset
+        # now mainly adds diarization on top.
+        "model_size": "large-v3",
         "compute_type": "float16",
         "whisper_beam_size": 5,
         "segment_seconds": 10.0,

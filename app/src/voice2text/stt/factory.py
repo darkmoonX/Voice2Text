@@ -226,9 +226,9 @@ def _build_whispercpp(config: RuntimeConfig, *, device_override: Optional[str], 
 
 
 def _build_whisperx(config: RuntimeConfig, *, device_override: Optional[str], compute_type_override: Optional[str], progress_callback: Callable[[str], None] | None) -> STTTranscriber:
+    from .model_resolution import is_auto_model, resolve_model_size
     from .whisperx_provider import WhisperXTranscriber
 
-    model_ref = config.stt_model_path.strip() or config.model_size
     (device, compute_type) = _resolve_whisper_runtime(config, device_override=device_override, compute_type_override=compute_type_override, progress_callback=progress_callback)
     if str(device).lower().startswith('cuda') and (not _has_torch_cuda()):
         if _whisperx_needs_torch_cuda(config):
@@ -237,6 +237,13 @@ def _build_whisperx(config: RuntimeConfig, *, device_override: Optional[str], co
             compute_type = 'int8'
         else:
             _emit_progress(progress_callback, 'Torch CUDA unavailable, but WhisperX is running ASR-only mode. Keep device=cuda for CTranslate2 ASR.')
+    # Model resolution happens AFTER the device fallbacks above so 'auto' never picks
+    # large-v3 for a session that just fell back to CPU (round 0072).
+    model_ref = config.stt_model_path.strip()
+    if not model_ref:
+        model_ref = resolve_model_size(config.model_size, device)
+        if is_auto_model(config.model_size):
+            _emit_progress(progress_callback, f"STT model 'auto' resolved to {model_ref} for device={device}.")
     return WhisperXTranscriber(
         model_ref=model_ref,
         device=device,

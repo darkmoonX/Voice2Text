@@ -5,7 +5,7 @@ from typing import Optional
 
 @dataclass
 class RuntimeConfig:
-    model_size: str = 'small'
+    model_size: str = 'auto'
     model_device: str = 'cuda'
     compute_type: str = 'float16'
     cpu_threads: int = 0
