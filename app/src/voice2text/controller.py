@@ -432,6 +432,7 @@ class TranscriptionController(QObject):
             output_dir=output_dir,
             display_text_only=bool(getattr(self._config, "transcript_export_display_text_only", False)),
             include_confidence=bool(getattr(self._config, "transcript_export_include_confidence", True)),
+            txt_confidence_annotations=bool(getattr(self._config, "transcript_export_txt_confidence_annotations", False)),
         )
         return TranscriptExporterSession(options, on_status=self._emit_status)
 
@@ -557,6 +558,7 @@ class TranscriptionController(QObject):
             include_speaker=bool(getattr(self._config, "transcript_export_include_speaker", True)),
             output_dir=str(out_dir / "direct_relabel"),
             include_confidence=bool(getattr(self._config, "transcript_export_include_confidence", True)),
+            txt_confidence_annotations=bool(getattr(self._config, "transcript_export_txt_confidence_annotations", False)),
         )
         return TranscriptExporterSession(options, on_status=self._emit_status)
 

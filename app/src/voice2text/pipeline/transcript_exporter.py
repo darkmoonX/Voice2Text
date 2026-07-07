@@ -44,6 +44,7 @@ class TranscriptExportOptions:
     output_dir: str
     display_text_only: bool = False
     include_confidence: bool = True
+    txt_confidence_annotations: bool = False
 
 
 class TranscriptExporterSession:
@@ -643,6 +644,8 @@ class TranscriptExporterSession:
                     line = f"[{speaker}] {line}"
             if use_timestamps:
                 line = f"[{self._fmt_time_txt(float(cue.get('start') or 0.0))} -> {self._fmt_time_txt(float(cue.get('end') or 0.0))}] {line}"
+            if self._options.txt_confidence_annotations and "confidence" in cue:
+                line = f"{line} (conf={float(cue['confidence']):.2f})"
             lines.append(line)
         return "\n".join(lines).strip() + "\n"
 

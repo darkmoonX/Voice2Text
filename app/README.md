@@ -228,6 +228,11 @@ provider's `stability_ratio`). The fields:
 
 `txt` and `srt` are unaffected — they only render `text/speaker/start/end`, so the extra cue keys never reach them.
 
+Optional (round 0069): `transcript_export_txt_confidence_annotations` (default off, config-only, no CLI/settings-UI
+wiring — same minimal-footprint choice as `transcript_export_include_confidence`) appends a compact `(conf=0.87)`
+suffix to each `txt` line using the cue's `confidence` field. A no-op when `include_confidence` is off (no
+`confidence` field to append). `srt`/`json` are unaffected regardless.
+
 #### JSON export schema — separated speaker labels (round 0027)
 
 A subtitle line has three distinct speaker labels that are normally conflated; the `json` export keeps them
@@ -254,8 +259,15 @@ raw label the profile remapped) is visible in the log.
 model/alignment cache**, each with a `fix` hint when not ok (the HF token is reported presence-only — never
 echoed). The cache check uses `stt/model_cache.py`, a headless scanner of `models/whisperx/` (`stt/<model>` +
 `align/<bucket>/<lang>/<model>`) that reports per-folder size + readiness, totals (`cache_summary`), and a
-root-guarded `delete_cache_entry`. (A Qt wizard + cache-manager dialog on top of these is the round-0022 Phase B
-follow-up.)
+root-guarded `delete_cache_entry`.
+
+A Qt wizard + cache-manager dialog on top of these cores are available from the tray menu ("Runtime
+health check…" / "Model / cache manager…"): both run their scan on a background thread and stream
+results back via queued Qt signals, so the UI never blocks. The cache-manager dialog also has a
+**predownload** control (round 0069): pick a language and click "Predownload model" to warm/download
+that language's ASR + alignment models via the same background-threaded product path used at real
+session start (byte-progress status messages stream into the dialog), then the cache table
+refreshes automatically.
 
 #### CPU / no-GPU realtime (the `cpu` preset)
 
@@ -450,6 +462,19 @@ Settings window behavior:
 
 ## WhisperX Crash Diagnostics
 
+- **Diagnostics bundle** (`crash_bundle.py`, round 0025 + 0069): a redacted zip (recent logs +
+  debug traces + `python_crash_trace.log` + a redacted `runtime_settings.json` + an environment
+  report: platform, torch/CUDA, ffmpeg, capture-bridge status, model-cache summary, git revision).
+  The HF token is never included. Three ways to get one:
+  - CLI: `python main.py --crash-bundle` (writes the zip and exits).
+  - Tray: "Create diagnostics bundle…" runs it on a background thread, result shown as a tray
+    balloon message.
+  - **Automatic** (round 0069): on an uncaught top-level Python exception, one bundle is written
+    best-effort alongside the existing crash-trace log (gated by config
+    `crash_bundle_on_uncaught_exception`, default on; at most once per process, so a cascading crash
+    loop can't spam bundles). Deliberately not hooked into thread/unraisable exception handlers too
+    — those can fire repeatedly for benign library warnings in some environments.
+  - Bundles are written to `<log_dir>/../crash_bundles/`.
 - Runtime now enables Python `faulthandler`; native crash traces are written to `app/src/logs/python_crash_trace.log`.
 - In debug mode, WhisperX emits per-segment stage markers (`[whisperx-trace] start/asr-done/align-done/text-done`) into `app/src/logs/voice2text.log`.
 - In debug mode, WhisperX now also emits alignment micro-benchmark lines (`[align-bench]`) with per-segment elapsed ms, running average, running max, and sample count.

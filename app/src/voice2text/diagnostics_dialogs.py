@@ -6,6 +6,7 @@ never blocks. `_populate_*` are split out so the rendering is unit-testable with
 """
 from __future__ import annotations
 
+import dataclasses
 import threading
 from typing import Callable
 
@@ -13,6 +14,7 @@ from PySide6.QtCore import QObject, Qt, Signal
 from PySide6.QtGui import QBrush, QColor
 from PySide6.QtWidgets import (
     QAbstractItemView,
+    QComboBox,
     QDialog,
     QHBoxLayout,
     QHeaderView,
@@ -25,6 +27,8 @@ from PySide6.QtWidgets import (
 )
 
 from .config import RuntimeConfig
+
+_PREDOWNLOAD_LANGUAGES = ["en", "zh-hant", "zh-hans", "ja", "ko"]
 
 _I18N = {
     "zh": {
@@ -41,6 +45,9 @@ _I18N = {
         "total": "總計", "folders": "個資料夾", "yes": "是", "no": "否",
         "confirm_delete": "確定刪除這個快取項目嗎？", "freed": "已釋放",
         "failed": "失敗",
+        "predownload": "預先下載模型",
+        "predownloading": "下載中…",
+        "predownload_done": "預先下載完成",
     },
     "en": {
         "health_title": "Runtime Health Check",
@@ -56,6 +63,9 @@ _I18N = {
         "total": "Total", "folders": "folders", "yes": "Yes", "no": "No",
         "confirm_delete": "Delete this cache entry?", "freed": "Freed",
         "failed": "Failed",
+        "predownload": "Predownload model",
+        "predownloading": "Downloading…",
+        "predownload_done": "Predownload complete",
     },
 }
 
@@ -78,6 +88,30 @@ class _Worker(QObject):
     def _run(self) -> None:
         try:
             result = self._fn()
+        except Exception as exc:  # surface to the UI, never crash the thread
+            self.failed.emit(str(exc))
+            return
+        self.done.emit(result)
+
+
+class _ProgressWorker(QObject):
+    """Like `_Worker`, but `fn` also receives a `progress_callback` it can call from the worker
+    thread; each call is marshaled to the UI thread via the queued `progress` signal (round 0069)."""
+
+    done = Signal(object)
+    failed = Signal(str)
+    progress = Signal(str)
+
+    def __init__(self, fn: Callable[[Callable[[str], None]], object]) -> None:
+        super().__init__()
+        self._fn = fn
+
+    def start(self) -> None:
+        threading.Thread(target=self._run, daemon=True).start()
+
+    def _run(self) -> None:
+        try:
+            result = self._fn(self.progress.emit)
         except Exception as exc:  # surface to the UI, never crash the thread
             self.failed.emit(str(exc))
             return
@@ -208,6 +242,23 @@ class ModelCacheDialog(QDialog):
         buttons.addWidget(close_btn)
         layout.addLayout(buttons)
 
+        # Round 0069 (round 0022 Phase C): predownload-from-UI. Reuses the existing product
+        # STT-factory + `prewarm()` warmup path on a background thread (the same path that runs
+        # automatically at session start) -- no new download logic.
+        predownload_row = QHBoxLayout()
+        self._predownload_lang_combo = QComboBox()
+        for lang in _PREDOWNLOAD_LANGUAGES:
+            self._predownload_lang_combo.addItem(lang, lang)
+        self._predownload_btn = QPushButton(self._t["predownload"])
+        self._predownload_btn.clicked.connect(self._start_predownload)
+        self._predownload_status = QLabel("")
+        predownload_row.addWidget(self._predownload_lang_combo)
+        predownload_row.addWidget(self._predownload_btn)
+        predownload_row.addWidget(self._predownload_status, 1)
+        layout.addLayout(predownload_row)
+
+        self._predownload_worker: _ProgressWorker | None = None
+
         self._run()
 
     def _run(self) -> None:
@@ -274,3 +325,41 @@ class ModelCacheDialog(QDialog):
             return
         QMessageBox.information(self, self._t["cache_title"], f"{self._t['freed']}: {human_size(freed)}")
         self._run()
+
+    def _start_predownload(self) -> None:
+        lang = str(self._predownload_lang_combo.currentData() or "")
+        if not lang:
+            return
+        self._predownload_btn.setEnabled(False)
+        self._predownload_status.setText(self._t["predownloading"])
+        config = dataclasses.replace(
+            self._config,
+            stt_provider="whisperx",
+            source_language=lang,
+            whisperx_enable_diarization=False,
+        )
+
+        def work(progress_callback: Callable[[str], None]) -> str:
+            from .stt.factory import create_stt_transcriber
+
+            transcriber = create_stt_transcriber(config, progress_callback=progress_callback)
+            transcriber.prewarm(lang)
+            return lang
+
+        self._predownload_worker = _ProgressWorker(work)
+        self._predownload_worker.progress.connect(self._on_predownload_progress)
+        self._predownload_worker.done.connect(self._on_predownload_done)
+        self._predownload_worker.failed.connect(self._on_predownload_failed)
+        self._predownload_worker.start()
+
+    def _on_predownload_progress(self, message: str) -> None:
+        self._predownload_status.setText(message)
+
+    def _on_predownload_done(self, lang: str) -> None:
+        self._predownload_btn.setEnabled(True)
+        self._predownload_status.setText(f"{self._t['predownload_done']}: {lang}")
+        self._run()
+
+    def _on_predownload_failed(self, message: str) -> None:
+        self._predownload_btn.setEnabled(True)
+        self._predownload_status.setText(f"{self._t['failed']}: {message}")

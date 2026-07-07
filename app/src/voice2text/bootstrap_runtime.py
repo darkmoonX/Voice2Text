@@ -27,6 +27,7 @@ _CRASH_TRACE_LOCK = threading.Lock()
 _PREVIOUS_EXCEPTHOOK = None
 _PREVIOUS_THREADING_EXCEPTHOOK = None
 _PREVIOUS_UNRAISABLEHOOK = None
+_CRASH_BUNDLE_WRITTEN = False
 
 
 def _crash_timestamp() -> str:
@@ -58,7 +59,28 @@ def _write_crash_trace_exception(title: str, exc_type, exc_value, exc_tb) -> Non
             return
 
 
-def _install_python_exception_hooks(logger: logging.Logger) -> None:
+def _write_auto_crash_bundle(cfg: RuntimeConfig, logger: logging.Logger, reason: str) -> None:
+    """Best-effort, once-per-process diagnostics bundle on an uncaught top-level exception.
+
+    Deliberately NOT hooked into threading/unraisable exceptions too: those can fire repeatedly
+    for benign library warnings (e.g. numpy/pyannote runtime warnings promoted by some
+    environments), and a bundle-per-occurrence would spam disk writes. The single top-level
+    `sys.excepthook` case is the genuinely rare "the app is crashing" signal.
+    """
+    global _CRASH_BUNDLE_WRITTEN
+    if _CRASH_BUNDLE_WRITTEN or not bool(getattr(cfg, "crash_bundle_on_uncaught_exception", True)):
+        return
+    _CRASH_BUNDLE_WRITTEN = True
+    try:
+        from .crash_bundle import create_crash_bundle
+
+        path = create_crash_bundle(cfg, reason=reason)
+        logger.info("Crash bundle written: %s", path)
+    except Exception as exc:
+        logger.warning("Failed to write auto crash bundle: %s", exc)
+
+
+def _install_python_exception_hooks(logger: logging.Logger, cfg: RuntimeConfig | None = None) -> None:
     global _PREVIOUS_EXCEPTHOOK, _PREVIOUS_THREADING_EXCEPTHOOK, _PREVIOUS_UNRAISABLEHOOK
     if _PREVIOUS_EXCEPTHOOK is None:
         _PREVIOUS_EXCEPTHOOK = sys.excepthook
@@ -70,6 +92,8 @@ def _install_python_exception_hooks(logger: logging.Logger) -> None:
     def excepthook(exc_type, exc_value, exc_tb) -> None:
         _write_crash_trace_exception("Uncaught Python exception", exc_type, exc_value, exc_tb)
         logger.error("Uncaught Python exception", exc_info=(exc_type, exc_value, exc_tb))
+        if cfg is not None:
+            _write_auto_crash_bundle(cfg, logger, "uncaught Python exception")
         if _PREVIOUS_EXCEPTHOOK is not None and _PREVIOUS_EXCEPTHOOK is not excepthook:
             _PREVIOUS_EXCEPTHOOK(exc_type, exc_value, exc_tb)
 
@@ -271,7 +295,7 @@ def run_qt_app(cfg: RuntimeConfig) -> int:
         _FAULTHANDLER_FILE = open(crash_path, "a", encoding="utf-8", buffering=1)
         _write_crash_trace_line(f"\n=== Voice2Text crash trace session started at {_crash_timestamp()} ===")
         faulthandler.enable(file=_FAULTHANDLER_FILE, all_threads=True)
-        _install_python_exception_hooks(logger)
+        _install_python_exception_hooks(logger, cfg)
         _start_crash_trace_heartbeat(crash_heartbeat_stop)
         logger.info("Python faulthandler enabled: %s", crash_path)
     except Exception as exc:

@@ -237,7 +237,14 @@ class RuntimeConfig:
     transcript_export_include_speaker: bool = True
     transcript_export_display_text_only: bool = False
     transcript_export_include_confidence: bool = True
+    # Round 0069: optional compact "(conf=0.87)" suffix per txt line, off by default (byte-identical
+    # to pre-0069 txt output when disabled). json/srt are unaffected either way.
+    transcript_export_txt_confidence_annotations: bool = False
     transcript_export_dir: str = ''
+    # Round 0069: on an uncaught top-level exception, best-effort write one redacted diagnostics
+    # zip (same collector as `--crash-bundle`) alongside the existing crash-trace log. Once per
+    # process (a cascading crash loop must not spam bundles). Never blocks/raises into the handler.
+    crash_bundle_on_uncaught_exception: bool = True
     import_direct_path: str = ''
     import_direct_chunk_seconds: float = 0.0
     import_direct_language_subchunk_seconds: float = 30.0

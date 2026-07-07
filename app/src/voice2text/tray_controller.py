@@ -1,7 +1,9 @@
 """System tray controller that bridges user actions to overlay/controller runtime updates."""
 from __future__ import annotations
 
-from PySide6.QtCore import QObject
+import threading
+
+from PySide6.QtCore import QObject, Signal
 from PySide6.QtGui import QAction, QColor, QFont, QIcon, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import QApplication, QMenu, QSystemTrayIcon
 
@@ -16,8 +18,12 @@ _I18N = {
         "settings": "設定",
         "health": "執行環境健檢…",
         "cache": "模型 / 快取管理…",
+        "crash_bundle": "建立診斷壓縮包…",
         "exit": "離開",
         "applied": "設定已套用。",
+        "crash_bundle_writing": "正在建立診斷壓縮包…",
+        "crash_bundle_done": "診斷壓縮包已建立",
+        "crash_bundle_failed": "建立診斷壓縮包失敗",
     },
     "en": {
         "show": "Show",
@@ -25,13 +31,20 @@ _I18N = {
         "settings": "Settings",
         "health": "Runtime health check…",
         "cache": "Model / cache manager…",
+        "crash_bundle": "Create diagnostics bundle…",
         "exit": "Exit",
         "applied": "Settings applied.",
+        "crash_bundle_writing": "Writing diagnostics bundle…",
+        "crash_bundle_done": "Diagnostics bundle created",
+        "crash_bundle_failed": "Failed to create diagnostics bundle",
     },
 }
 
 
 class Voice2TextTrayController(QObject):
+    _bundle_created = Signal(str)
+    _bundle_failed = Signal(str)
+
     def __init__(
         self,
         app: QApplication,
@@ -59,6 +72,8 @@ class Voice2TextTrayController(QObject):
         self._tray.setContextMenu(self._build_menu())
         self._tray.activated.connect(self._on_tray_activated)
         self._tray.show()
+        self._bundle_created.connect(self._on_bundle_created)
+        self._bundle_failed.connect(self._on_bundle_failed)
 
     def _lang(self) -> str:
         value = (self._config.ui_language or "zh").strip().lower()
@@ -77,12 +92,14 @@ class Voice2TextTrayController(QObject):
         settings_action = QAction(self._t("settings"), menu)
         health_action = QAction(self._t("health"), menu)
         cache_action = QAction(self._t("cache"), menu)
+        crash_bundle_action = QAction(self._t("crash_bundle"), menu)
         exit_action = QAction(self._t("exit"), menu)
         show_action.triggered.connect(self.show_overlay)
         minimize_action.triggered.connect(self.hide_overlay)
         settings_action.triggered.connect(self.open_settings)
         health_action.triggered.connect(self.open_health_check)
         cache_action.triggered.connect(self.open_cache_manager)
+        crash_bundle_action.triggered.connect(self.create_diagnostics_bundle)
         exit_action.triggered.connect(QApplication.quit)
         menu.addAction(show_action)
         menu.addAction(minimize_action)
@@ -90,6 +107,7 @@ class Voice2TextTrayController(QObject):
         menu.addAction(settings_action)
         menu.addAction(health_action)
         menu.addAction(cache_action)
+        menu.addAction(crash_bundle_action)
         menu.addSeparator()
         menu.addAction(exit_action)
         return menu
@@ -131,6 +149,36 @@ class Voice2TextTrayController(QObject):
         from .diagnostics_dialogs import ModelCacheDialog
 
         ModelCacheDialog(self._config, parent=None).exec()
+
+    def create_diagnostics_bundle(self) -> None:
+        """Manual tray trigger for round 0025 Phase B: build the same redacted diagnostics zip
+        `--crash-bundle` writes, off the UI thread, and surface the result via a tray balloon."""
+        self._tray.showMessage(
+            "Voice2Text", self._t("crash_bundle_writing"), QSystemTrayIcon.MessageIcon.Information, 1800
+        )
+        config = self._config
+
+        def work() -> None:
+            from .crash_bundle import create_crash_bundle
+
+            try:
+                path = create_crash_bundle(config, reason="manual (tray)")
+            except Exception as exc:
+                self._bundle_failed.emit(str(exc))
+                return
+            self._bundle_created.emit(str(path))
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _on_bundle_created(self, path: str) -> None:
+        self._tray.showMessage(
+            "Voice2Text", f"{self._t('crash_bundle_done')}: {path}", QSystemTrayIcon.MessageIcon.Information, 4000
+        )
+
+    def _on_bundle_failed(self, message: str) -> None:
+        self._tray.showMessage(
+            "Voice2Text", f"{self._t('crash_bundle_failed')}: {message}", QSystemTrayIcon.MessageIcon.Warning, 4000
+        )
 
     def _on_tray_activated(self, reason: QSystemTrayIcon.ActivationReason) -> None:
         if reason == QSystemTrayIcon.ActivationReason.Trigger:
