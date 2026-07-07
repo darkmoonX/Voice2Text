@@ -533,8 +533,17 @@ selected backend so a slow/hanging backend can never stall the subtitle loop.
   - `argos`: light offline backend using per-source/target Argos models.
   - `nllb`: offline multilingual backend using a local CTranslate2 NLLB model. It is CPU + int8 by default and
     only uses CUDA if explicitly configured via `translation_nllb_device='cuda'`.
-  - `llm`/`cloud`: reserved registry slots that resolve to a disabled stub with a clear "not yet implemented"
-    status. No cloud translation service is used.
+  - `llm` (round 0074): local llama.cpp server — best quality, still fully offline. The backend manages a
+    resident `llama-server` subprocess (or reuses one already listening on the configured port) and translates
+    one subtitle line per OpenAI-compatible chat completion at temperature 0, with a keep-numbers-verbatim
+    prompt guard. Configure in `runtime_settings.json`: `translation_llm_server_path` (llama-server.exe) and
+    `translation_llm_model_path` (a chat-tuned GGUF; Qwen3-4B-Instruct-2507 Q4_K_M is the validated reference)
+    — both must exist or the backend reports why it is unavailable and subtitles stay source-only. Optional:
+    `translation_llm_port` (8474), `translation_llm_context_size` (4096; drop to 2048 if VRAM-tight),
+    `translation_llm_gpu_layers` (99), `translation_llm_max_output_tokens` (256),
+    `translation_llm_request_timeout_seconds` (10). Validated on an RTX 3060: ~0.3 s/line alongside the
+    large-v3 ASR + diarization live stack (peak ~11.9/12 GB).
+  - `cloud`: reserved registry slot that resolves to a disabled stub. No cloud translation service is used.
   An unknown name degrades to `argos` with a warning.
 - **NLLB model/dependencies** — install `requirements-translation-extra.txt` for `transformers`/`sentencepiece`.
   The default cache path is `app/src/models/translation/nllb/`. On first use, the backend can download the
