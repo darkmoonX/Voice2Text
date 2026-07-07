@@ -296,10 +296,12 @@ python main.py --list-app-sessions
 python main.py --source-mode app --app-names msedge.exe
 python main.py --source-mode app --app-names msedge.exe,vlc.exe   # capture multiple apps at once (mixed)
 
+# Model default is `auto` (round 0072): resolves to large-v3 on CUDA, small on CPU,
+# decided AFTER any CUDA-availability fallback. Explicit --model always wins.
 python main.py --model small --stt-variant gpu
-python main.py --stt-provider whisperx --model large-v2 --no-whisperx-vad
-python main.py --model large-v2 --segment-seconds 6.0 --hop-seconds 1.5
-python main.py --model large-v2 --whisperx-alignment-device cpu
+python main.py --stt-provider whisperx --model large-v3 --no-whisperx-vad
+python main.py --model large-v3 --segment-seconds 6.0 --hop-seconds 1.5
+python main.py --model large-v3 --whisperx-alignment-device cpu
 
 python main.py --source-language zh-hant --cjk-no-space-gap-seconds 0.2
 python main.py --debug-mode
