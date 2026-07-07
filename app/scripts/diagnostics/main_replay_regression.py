@@ -131,7 +131,7 @@ def _base_cfg(args, clip: Path, log_dir: Path, *, diarization: bool) -> RuntimeC
     cfg.model_device = args.device
     cfg.stt_variant = "auto"
     cfg.source_mode = "loopback"  # import_audio_file flips this to file
-    cfg.source_file_replay_speed = 0.0
+    cfg.source_file_replay_speed = max(0.0, float(getattr(args, "replay_speed", 0.0) or 0.0))
     cfg.source_file_chunk_seconds = 0.25
     cfg.whisperx_enable_diarization = bool(diarization)
     cfg.stt_provider = str(getattr(args, "stt_provider", "whisperx") or "whisperx")
@@ -211,6 +211,7 @@ def main() -> int:
     ap.add_argument("--stt-provider", default="whisperx", choices=["whisperx", "whispercpp"], help="STT provider for the realtime pass (round 0065: whispercpp now supports live diarization too)")
     ap.add_argument("--whispercpp-model-size", default="medium", help="whisper.cpp ggml model size, used only when --stt-provider whispercpp")
     ap.add_argument("--whispercpp-mode", default="server", choices=["server", "subprocess"], help="whisper.cpp execution mode, used only when --stt-provider whispercpp")
+    ap.add_argument("--replay-speed", type=float, default=0.0, help="file replay pacing (0 = unpaced/max speed, 1.0 = realtime). Pass 1.0 for GPU diarization runs (round 0041: the pyannote crash was unpaced-replay-specific)")
     ap.add_argument("--commit-hold", type=float, default=0.0, help="delayed-freeze speaker re-anchor hold seconds (0 = legacy immediate freeze)")
     ap.add_argument("--accurate-speakers", action="store_true", help="use the harness --profile accurate speaker-profile tuning (match 0.65 / min_seconds 2.0 / reconcile 0.52)")
     ap.add_argument("--skip-direct", action="store_true", help="skip the direct baseline (no completeness ratio)")
