@@ -187,6 +187,24 @@ class MatrixFloorTests(unittest.TestCase):
                 self.assertEqual(spec.min_completeness, 0.85)
 
 
+class BuildRunCommandTests(unittest.TestCase):
+    def test_whisperx_model_override_passed_only_for_whisperx(self) -> None:
+        wx = qb.QUICK_MATRIX[0]   # whisperx case
+        cpp = qb.QUICK_MATRIX[2]  # whispercpp case
+        cmd_wx = qb.build_run_command(wx, device="cuda", out_dir=Path("x"),
+                                      python_exe="py", whisperx_model="large-v3-turbo")
+        self.assertIn("--whisperx-model-size", cmd_wx)
+        self.assertIn("large-v3-turbo", cmd_wx)
+        cmd_cpp = qb.build_run_command(cpp, device="cuda", out_dir=Path("x"),
+                                       python_exe="py", whisperx_model="large-v3-turbo")
+        self.assertNotIn("--whisperx-model-size", cmd_cpp)
+
+    def test_no_override_flag_when_model_empty(self) -> None:
+        cmd = qb.build_run_command(qb.QUICK_MATRIX[0], device="cuda", out_dir=Path("x"),
+                                   python_exe="py")
+        self.assertNotIn("--whisperx-model-size", cmd)
+
+
 class FindPreviousBaselineTests(unittest.TestCase):
     def test_picks_latest_same_tier_excluding_current(self) -> None:
         with tempfile.TemporaryDirectory() as td:
@@ -208,6 +226,31 @@ class FindPreviousBaselineTests(unittest.TestCase):
     def test_none_when_no_previous(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             self.assertIsNone(qb.find_previous_baseline(Path(td), "quick", Path(td) / "x"))
+
+    def test_model_eval_baselines_never_match_default(self) -> None:
+        # round 0072: a large-v3-turbo eval baseline must not become the compare
+        # reference for default-model runs, and vice versa (different populations).
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            for name, model in [("20260101T000000Z_full", ""),
+                                ("20260601T000000Z_full", "large-v3-turbo")]:
+                d = root / name
+                d.mkdir()
+                (d / "baseline.json").write_text(
+                    json.dumps({"meta": {"whisperx_model": model, "tag": name}, "runs": []}),
+                    encoding="utf-8")
+            default_ref = qb.find_previous_baseline(root, "full", root / "x")
+            self.assertEqual(default_ref["meta"]["tag"], "20260101T000000Z_full")
+            turbo_ref = qb.find_previous_baseline(root, "full", root / "x",
+                                                  whisperx_model="large-v3-turbo")
+            self.assertEqual(turbo_ref["meta"]["tag"], "20260601T000000Z_full")
+        # legacy baselines predate the key entirely -> treated as default-model
+        legacy = {"meta": {"tag": "legacy"}, "runs": []}
+        with tempfile.TemporaryDirectory() as td:
+            d = Path(td) / "20260101T000000Z_full"
+            d.mkdir()
+            (d / "baseline.json").write_text(json.dumps(legacy), encoding="utf-8")
+            self.assertIsNotNone(qb.find_previous_baseline(Path(td), "full", Path(td) / "x"))
 
     def test_partial_probe_baselines_skipped(self) -> None:
         # round 0071: an --only probe run left a newer partial *_full baseline; it must

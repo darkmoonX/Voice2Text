@@ -202,7 +202,8 @@ def _slice_truth_srt(srt: str, seconds: float) -> str:
 # --- run + aggregate -----------------------------------------------------------
 
 
-def run_one(spec: RunSpec, *, device: str, out_dir: Path, python_exe: str) -> dict:
+def build_run_command(spec: RunSpec, *, device: str, out_dir: Path, python_exe: str,
+                      whisperx_model: str = "") -> list[str]:
     clip = INPUT_ROOT / spec.clip_dir / "voice.m4a"
     cmd = [
         python_exe, str(REGRESSION_DRIVER),
@@ -219,9 +220,17 @@ def run_one(spec: RunSpec, *, device: str, out_dir: Path, python_exe: str) -> di
     if spec.provider == "whispercpp":
         cmd += ["--whispercpp-model-size", spec.whispercpp_model_size,
                 "--whispercpp-mode", spec.whispercpp_mode]
+    elif whisperx_model:
+        cmd += ["--whisperx-model-size", whisperx_model]
     if spec.diarization:
         cmd.append("--diarization")
+    return cmd
 
+
+def run_one(spec: RunSpec, *, device: str, out_dir: Path, python_exe: str,
+            whisperx_model: str = "") -> dict:
+    cmd = build_run_command(spec, device=device, out_dir=out_dir, python_exe=python_exe,
+                            whisperx_model=whisperx_model)
     out_dir.mkdir(parents=True, exist_ok=True)
     log_path = out_dir / "runner_console.log"
     started = time.monotonic()
@@ -292,7 +301,8 @@ def compare_baselines(current: dict, previous: dict | None) -> list[str]:
     return findings
 
 
-def find_previous_baseline(root: Path, tier: str, current_dir: Path) -> dict | None:
+def find_previous_baseline(root: Path, tier: str, current_dir: Path,
+                           whisperx_model: str = "") -> dict | None:
     candidates = sorted(
         (p for p in root.glob(f"*_{tier}/baseline.json") if p.parent != current_dir),
         key=lambda p: p.parent.name,
@@ -300,8 +310,11 @@ def find_previous_baseline(root: Path, tier: str, current_dir: Path) -> dict | N
     )
     for path in candidates:
         data = json.loads(path.read_text(encoding="utf-8"))
-        if (data.get("meta") or {}).get("partial"):
+        meta = data.get("meta") or {}
+        if meta.get("partial"):
             continue  # --only probe runs are not valid compare references
+        if str(meta.get("whisperx_model") or "") != whisperx_model:
+            continue  # different-model baselines are different populations
         return data
     return None
 
@@ -351,7 +364,12 @@ def main() -> int:
     ap.add_argument("--baseline-root", default=str(DEFAULT_BASELINE_ROOT))
     ap.add_argument("--only", default="", help="substring filter on case_id (debugging)")
     ap.add_argument("--skip-compare", action="store_true")
+    ap.add_argument("--whisperx-model", default="", help="whisperx model override for evals (e.g. large-v3-turbo). Requires a non-default --baseline-root so eval runs never pollute the real baselines.")
     args = ap.parse_args()
+
+    if args.whisperx_model and Path(args.baseline_root).resolve() == DEFAULT_BASELINE_ROOT.resolve():
+        print("[fatal] --whisperx-model requires a dedicated --baseline-root (model evals must not pollute the real baselines)")
+        return 2
 
     specs = [s for s in MATRICES[args.tier] if args.only in s.case_id]
     if not specs:
@@ -374,7 +392,7 @@ def main() -> int:
               f"(provider={spec.provider} diar={spec.diarization} "
               f"pace={spec.replay_speed} seconds={spec.seconds or 'full'})", flush=True)
         entry = run_one(spec, device=args.device, out_dir=run_dir / spec.case_id,
-                        python_exe=sys.executable)
+                        python_exe=sys.executable, whisperx_model=args.whisperx_model)
         c = ((entry.get("report") or {}).get("correctness") or {})
         comp = c.get("completeness")
         print("[baseline]   -> {} wall={}s completeness={} dup={} cer={}".format(
@@ -394,6 +412,7 @@ def main() -> int:
             "device": args.device,
             "driver": "main_replay_regression.py",
             "cer_norm_version": CER_NORM_VERSION,
+            "whisperx_model": args.whisperx_model,
             # A probe run (--only subset) must never become a future compare reference.
             "partial": len(specs) != len(MATRICES[args.tier]),
         },
@@ -402,7 +421,8 @@ def main() -> int:
     (run_dir / "baseline.json").write_text(
         json.dumps(baseline, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
-    previous = None if args.skip_compare else find_previous_baseline(root, args.tier, run_dir)
+    previous = None if args.skip_compare else find_previous_baseline(
+        root, args.tier, run_dir, whisperx_model=args.whisperx_model)
     findings = compare_baselines(baseline, previous)
     prev_label = previous["meta"]["created_utc"] if previous else "none (first baseline of this tier)"
     write_summary(run_dir / "summary.md", baseline, findings, prev_label)

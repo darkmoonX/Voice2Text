@@ -142,6 +142,10 @@ def _base_cfg(args, clip: Path, log_dir: Path, *, diarization: bool) -> RuntimeC
         cfg.stt_model_path = ""
         cfg.stt_whispercpp_model_size = str(getattr(args, "whispercpp_model_size", "medium") or "medium")
         cfg.stt_whispercpp_mode = str(getattr(args, "whispercpp_mode", "server") or "server")
+    else:
+        wx_model = str(getattr(args, "whisperx_model_size", "") or "").strip()
+        if wx_model:
+            cfg.model_size = wx_model
     cfg.transcript_export_enabled = False  # we write realtime artifacts ourselves
     cfg.session_record_enabled = False
     cfg.source_language = (str(args.language).strip() or None) if args.language else None
@@ -209,6 +213,7 @@ def main() -> int:
     ap.add_argument("--language", default="", help="pin source language (e.g. zh / en); empty = auto-detect")
     ap.add_argument("--diarization", action="store_true", help="enable diarization in the realtime pass (speaker markers)")
     ap.add_argument("--stt-provider", default="whisperx", choices=["whisperx", "whispercpp"], help="STT provider for the realtime pass (round 0065: whispercpp now supports live diarization too)")
+    ap.add_argument("--whisperx-model-size", default="", help="override cfg.model_size for the whisperx provider (round 0072 model eval; empty = config default)")
     ap.add_argument("--whispercpp-model-size", default="medium", help="whisper.cpp ggml model size, used only when --stt-provider whispercpp")
     ap.add_argument("--whispercpp-mode", default="server", choices=["server", "subprocess"], help="whisper.cpp execution mode, used only when --stt-provider whispercpp")
     ap.add_argument("--replay-speed", type=float, default=0.0, help="file replay pacing (0 = unpaced/max speed, 1.0 = realtime). Pass 1.0 for GPU diarization runs (round 0041: the pyannote crash was unpaced-replay-specific)")
