@@ -44,6 +44,12 @@ INPUT_ROOT = APP_ROOT / "src" / "tests" / "compare_whisperx_test" / "input"
 DEFAULT_BASELINE_ROOT = APP_ROOT / "src" / "tests" / "claude_output" / "quality_baseline"
 REGRESSION_DRIVER = _THIS.parent / "main_replay_regression.py"
 
+# Regression thresholds vs the previous same-tier baseline.
+COMPLETENESS_DROP_PP = 0.03      # completeness ratio drop > 3 percentage points
+TRUTH_CER_RISE_PP = 0.02         # truth CER rise > 2 percentage points
+CJK_SPACES_ABS = 5               # CJK mid-space regression needs BOTH: +5 absolute
+CJK_SPACES_REL = 0.5             #   ... and +50 % relative
+
 
 @dataclasses.dataclass(frozen=True)
 class RunSpec:
@@ -61,8 +67,13 @@ class RunSpec:
     # Absolute completeness sanity floor for the driver verdict. 0.85 is calibrated on the
     # standard clips; Bn (hard multi-speaker) sits at ~0.80 from the known per-window merge
     # ceiling (diffuse small merge-drops, NOT lost sections/speakers — verified round 0070).
-    # Trend regression (>3pp drop vs previous baseline) is enforced separately regardless.
+    # Trend regression (drop vs previous baseline) is enforced separately regardless.
     min_completeness: float = 0.85
+    # Per-case completeness trend tolerance (pp drop vs previous baseline before flagging).
+    # vskw's whispercpp DIRECT pass is a coin flip on the music intro (~327 chars appear in
+    # ~1 of 5 runs), swinging the ratio by ~3.7 pp with a byte-identical realtime side —
+    # round 0071 determinism probes. Cases with known denominator noise get a wider band.
+    completeness_trend_tolerance: float = COMPLETENESS_DROP_PP
 
     def timeout_seconds(self) -> float:
         """Per-pass driver timeout: paced replay needs at least the audio length; give
@@ -84,16 +95,11 @@ FULL_MATRIX: list[RunSpec] = [
     RunSpec("f3-bn-zh-whisperx-diar", "YT_Bn_7OcZYwrI", "zh", "whisperx", True, 1.0, 600.0, 600.0,
             min_completeness=0.75),
     RunSpec("f4-axqbr2-zh-whispercpp-diar", "YT_aXqBRYQSGp0_2", "zh", "whispercpp", True, 1.0, 0.0, 181.0, "zh-CN.srt"),
-    RunSpec("f5-vskw-en-whispercpp", "YT_A-VskwEu8u4", "en", "whispercpp", False, 0.0, 0.0, 464.0, "en.srt"),
+    RunSpec("f5-vskw-en-whispercpp", "YT_A-VskwEu8u4", "en", "whispercpp", False, 0.0, 0.0, 464.0, "en.srt",
+            completeness_trend_tolerance=0.05),
 ]
 
 MATRICES = {"quick": QUICK_MATRIX, "full": FULL_MATRIX}
-
-# Regression thresholds vs the previous same-tier baseline.
-COMPLETENESS_DROP_PP = 0.03      # completeness ratio drop > 3 percentage points
-TRUTH_CER_RISE_PP = 0.02         # truth CER rise > 2 percentage points
-CJK_SPACES_ABS = 5               # CJK mid-space regression needs BOTH: +5 absolute
-CJK_SPACES_REL = 0.5             #   ... and +50 % relative
 
 
 # --- truth CER -----------------------------------------------------------------
@@ -269,7 +275,9 @@ def compare_baselines(current: dict, previous: dict | None) -> list[str]:
         prv_c = ((prev.get("report") or {}).get("correctness") or {})
         cur_comp, prv_comp = cur_c.get("completeness"), prv_c.get("completeness")
         if isinstance(cur_comp, (int, float)) and isinstance(prv_comp, (int, float)):
-            if prv_comp - cur_comp > COMPLETENESS_DROP_PP:
+            tolerance = float(
+                (run.get("spec") or {}).get("completeness_trend_tolerance", COMPLETENESS_DROP_PP))
+            if prv_comp - cur_comp > tolerance:
                 findings.append(f"{cid}: completeness {prv_comp:.1%} -> {cur_comp:.1%}")
         if cur_c.get("dup") and not prv_c.get("dup"):
             findings.append(f"{cid}: NEW dup-stacking: {cur_c['dup']!r}")
@@ -288,10 +296,14 @@ def find_previous_baseline(root: Path, tier: str, current_dir: Path) -> dict | N
     candidates = sorted(
         (p for p in root.glob(f"*_{tier}/baseline.json") if p.parent != current_dir),
         key=lambda p: p.parent.name,
+        reverse=True,
     )
-    if not candidates:
-        return None
-    return json.loads(candidates[-1].read_text(encoding="utf-8"))
+    for path in candidates:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        if (data.get("meta") or {}).get("partial"):
+            continue  # --only probe runs are not valid compare references
+        return data
+    return None
 
 
 def _git_commit() -> str:
@@ -382,6 +394,8 @@ def main() -> int:
             "device": args.device,
             "driver": "main_replay_regression.py",
             "cer_norm_version": CER_NORM_VERSION,
+            # A probe run (--only subset) must never become a future compare reference.
+            "partial": len(specs) != len(MATRICES[args.tier]),
         },
         "runs": runs,
     }

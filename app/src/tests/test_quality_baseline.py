@@ -72,8 +72,9 @@ class SrtAndCerTests(unittest.TestCase):
 
 
 def _mk_run(case_id: str, *, exit_code: int = 0, completeness: float | None = 0.95,
-            dup: str = "", cjk: int = 0, cer: float | None = 0.10) -> dict:
-    return {
+            dup: str = "", cjk: int = 0, cer: float | None = 0.10,
+            trend_tolerance: float | None = None) -> dict:
+    run = {
         "case_id": case_id,
         "exit_code": exit_code,
         "truth_cer": cer,
@@ -82,6 +83,9 @@ def _mk_run(case_id: str, *, exit_code: int = 0, completeness: float | None = 0.
             "markers": 0, "bad_anchor": 0,
         }},
     }
+    if trend_tolerance is not None:
+        run["spec"] = {"completeness_trend_tolerance": trend_tolerance}
+    return run
 
 
 def _baseline(runs: list[dict], *, cer_norm: str = "v2-opencc-t2s") -> dict:
@@ -143,6 +147,21 @@ class CompareBaselinesTests(unittest.TestCase):
         prev = _baseline([_mk_run("a")])
         self.assertEqual(qb.compare_baselines(cur, prev), [])
 
+    def test_per_case_trend_tolerance_widens_the_band(self) -> None:
+        # round 0071: f5's direct denominator flips ~3.7pp run-to-run (music intro);
+        # a 5pp per-case tolerance must absorb that while the default 3pp still flags it.
+        prev = _baseline([_mk_run("a", completeness=0.943)])
+        drop = _baseline([_mk_run("a", completeness=0.906, trend_tolerance=0.05)])
+        self.assertEqual(qb.compare_baselines(drop, prev), [])
+        drop_default = _baseline([_mk_run("a", completeness=0.906)])
+        self.assertTrue(any("completeness" in f for f in qb.compare_baselines(drop_default, prev)))
+
+    def test_f5_matrix_has_widened_tolerance(self) -> None:
+        by_id = {s.case_id: s for s in qb.FULL_MATRIX}
+        self.assertEqual(by_id["f5-vskw-en-whispercpp"].completeness_trend_tolerance, 0.05)
+        self.assertEqual(by_id["f1-axqbr2-zh-whisperx-diar"].completeness_trend_tolerance,
+                         qb.COMPLETENESS_DROP_PP)
+
 
 class TimeoutSecondsTests(unittest.TestCase):
     def test_paced_long_clip_gets_headroom(self) -> None:
@@ -189,6 +208,22 @@ class FindPreviousBaselineTests(unittest.TestCase):
     def test_none_when_no_previous(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             self.assertIsNone(qb.find_previous_baseline(Path(td), "quick", Path(td) / "x"))
+
+    def test_partial_probe_baselines_skipped(self) -> None:
+        # round 0071: an --only probe run left a newer partial *_full baseline; it must
+        # never become the compare reference (missing cases would silently skip checks).
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            for name, partial in [("20260101T000000Z_full", False),
+                                  ("20260601T000000Z_full", True)]:
+                d = root / name
+                d.mkdir()
+                (d / "baseline.json").write_text(
+                    json.dumps({"meta": {"partial": partial, "tag": name}, "runs": []}),
+                    encoding="utf-8")
+            found = qb.find_previous_baseline(root, "full", root / "x")
+            self.assertIsNotNone(found)
+            self.assertEqual(found["meta"]["tag"], "20260101T000000Z_full")
 
 
 if __name__ == "__main__":
