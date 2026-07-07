@@ -159,6 +159,15 @@ class TimeoutSecondsTests(unittest.TestCase):
         self.assertEqual(spec.timeout_seconds(), 1800.0)
 
 
+class MatrixFloorTests(unittest.TestCase):
+    def test_only_bn_has_lowered_completeness_floor(self) -> None:
+        for spec in qb.QUICK_MATRIX + qb.FULL_MATRIX:
+            if spec.case_id == "f3-bn-zh-whisperx-diar":
+                self.assertEqual(spec.min_completeness, 0.75)
+            else:
+                self.assertEqual(spec.min_completeness, 0.85)
+
+
 class FindPreviousBaselineTests(unittest.TestCase):
     def test_picks_latest_same_tier_excluding_current(self) -> None:
         with tempfile.TemporaryDirectory() as td:

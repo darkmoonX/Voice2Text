@@ -60,7 +60,7 @@ def _max_adjacent_repeat(text: str, n: int = 8) -> str:
     return ""
 
 
-def check(case_dir: Path, label: str | None = None) -> dict:
+def check(case_dir: Path, label: str | None = None, *, min_completeness: float = 0.85) -> dict:
     label = label or case_dir.name
     proj = case_dir / "realtime_project.txt"
     if not proj.exists():
@@ -87,7 +87,7 @@ def check(case_dir: Path, label: str | None = None) -> dict:
                     bad_anchor += 1
 
     comp_str = f"{completeness:.1%}" if completeness is not None else "n/a"
-    comp_flag = "OK" if (completeness is None or completeness >= 0.85) else "LOW"
+    comp_flag = "OK" if (completeness is None or completeness >= min_completeness) else "LOW"
     print(f"[{label}]")
     print(f"   completeness   : realtime {r_chars} / direct {d_chars} = {comp_str}  {comp_flag}")
     print(f"   dup-stacking   : {'NONE' if not dup else 'FOUND ' + dup}")
@@ -97,8 +97,9 @@ def check(case_dir: Path, label: str | None = None) -> dict:
     print(f"   speaker markers: {len(markers)} present; bad-anchored: {bad_anchor}")
     print()
     return {
-        "ok": (not dup) and (completeness is None or completeness >= 0.85) and bad_anchor == 0,
+        "ok": (not dup) and (completeness is None or completeness >= min_completeness) and bad_anchor == 0,
         "completeness": completeness,
+        "min_completeness": min_completeness,
         "dup": dup,
         "cjk_mid_spaces": len(spaces),
         "markers": len(markers),

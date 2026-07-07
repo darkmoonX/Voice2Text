@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import importlib.util
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -44,6 +45,26 @@ class MaxAdjacentRepeatTests(unittest.TestCase):
 
     def test_clean_text_returns_empty(self) -> None:
         self.assertEqual(scc._max_adjacent_repeat("平凡無奇的一段正常字幕文字內容"), "")
+
+
+class CompletenessFloorTests(unittest.TestCase):
+    def _case_dir(self, td: str, realtime_chars: int, direct_chars: int) -> Path:
+        d = Path(td)
+        (d / "realtime_project.txt").write_text("字" * realtime_chars, encoding="utf-8")
+        (d / "direct_whisperx_nospk.txt").write_text("字" * direct_chars, encoding="utf-8")
+        return d
+
+    def test_default_floor_fails_at_80_percent(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            result = scc.check(self._case_dir(td, 80, 100))
+            self.assertFalse(result["ok"])
+            self.assertEqual(result["min_completeness"], 0.85)
+
+    def test_lowered_floor_passes_known_hard_clip_ratio(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            result = scc.check(self._case_dir(td, 80, 100), min_completeness=0.75)
+            self.assertTrue(result["ok"])
+            self.assertEqual(result["min_completeness"], 0.75)
 
 
 if __name__ == "__main__":

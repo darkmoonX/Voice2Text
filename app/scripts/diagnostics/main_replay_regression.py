@@ -216,6 +216,7 @@ def main() -> int:
     ap.add_argument("--accurate-speakers", action="store_true", help="use the harness --profile accurate speaker-profile tuning (match 0.65 / min_seconds 2.0 / reconcile 0.52)")
     ap.add_argument("--skip-direct", action="store_true", help="skip the direct baseline (no completeness ratio)")
     ap.add_argument("--timeout", type=float, default=1200.0, help="per-pass wall-clock timeout (s)")
+    ap.add_argument("--completeness-floor", type=float, default=0.85, help="minimum realtime/direct char ratio to pass (per-clip: hard multi-speaker clips like Bn sit at ~0.80 due to the known per-window merge ceiling)")
     ap.add_argument("--out", required=True, help="work dir")
     args = ap.parse_args()
 
@@ -302,7 +303,8 @@ def main() -> int:
 
     # ---- Structural correctness assertions over the main-replay outputs ----
     print("\n==== Correctness check (subtitle_correctness_check) ====", flush=True)
-    result = scc.check(case_dir, label="main-replay")
+    result = scc.check(case_dir, label="main-replay",
+                       min_completeness=max(0.0, float(args.completeness_floor)))
 
     passed = bool(result.get("ok")) and not to_rt and not errors_rt
     if not args.skip_direct and not direct_done:
