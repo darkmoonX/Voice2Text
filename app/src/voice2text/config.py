@@ -203,7 +203,8 @@ class RuntimeConfig:
     translation_from: str = 'auto'
     translation_to: str = 'zh'
     # Round 0026/0030 pluggable translation backend + off-thread engine policy.
-    # backend: 'argos' (default) or 'nllb'; 'llm'/'cloud' are reserved (disabled stubs).
+    # backend: 'argos' (default), 'nllb', or 'llm' (round 0074, local llama.cpp server);
+    # 'cloud' remains a reserved disabled stub.
     translation_backend: str = 'argos'
     translation_nllb_model_path: str = ''
     translation_nllb_model_repo: str = 'facebook/nllb-200-distilled-600M'
@@ -211,6 +212,15 @@ class RuntimeConfig:
     translation_nllb_auto_convert: bool = True
     translation_nllb_device: str = 'cpu'
     translation_nllb_compute_type: str = 'int8'
+    # Round 0074 local-LLM backend (llama.cpp): both paths must exist or the backend
+    # reports unavailable and subtitles stay source-only (no-translation fallback intact).
+    translation_llm_server_path: str = ''
+    translation_llm_model_path: str = ''
+    translation_llm_port: int = 8474
+    translation_llm_context_size: int = 4096
+    translation_llm_gpu_layers: int = 99
+    translation_llm_max_output_tokens: int = 256
+    translation_llm_request_timeout_seconds: float = 10.0
     # Engine policy. queue_max <= 0 keeps the engine in inline-passthrough mode (byte-identical
     # to the historical direct backend call); > 0 moves translation onto a bounded background
     # worker with a per-request timeout + bounded retry so a slow backend never stalls the loop.

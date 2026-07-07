@@ -59,6 +59,10 @@ def create_translation_backend_combo() -> QComboBox:
     combo = QComboBox()
     combo.addItem("Argos", "argos")
     combo.addItem("NLLB (offline, CPU)", "nllb")
+    # Round 0074: local llama.cpp server. Needs translation_llm_server_path +
+    # translation_llm_model_path in runtime_settings.json; the backend reports why it is
+    # unavailable otherwise and subtitles stay source-only.
+    combo.addItem("LLM (local llama.cpp)", "llm")
     return combo
 
 

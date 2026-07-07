@@ -990,7 +990,7 @@ class SettingsDialog(QDialog):
             self._source_language_combo: "Source language hint for STT input.",
             self._translation_enabled_check: "Enable live translation.",
             self._bilingual_combo: "Subtitle style: stacked bilingual or translation-only.",
-            self._translation_backend_combo: "Translation backend: Argos is lighter; NLLB is offline multilingual and CPU-first.",
+            self._translation_backend_combo: "Translation backend: Argos is lighter; NLLB is offline multilingual and CPU-first; LLM is a local llama.cpp server (best quality, GPU recommended).",
             self._translation_language_combo: "Translation target language.",
             self._font_size_spin: "Subtitle font size.",
             self._opacity_slider: "Overlay opacity.",

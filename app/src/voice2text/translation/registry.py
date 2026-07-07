@@ -11,12 +11,14 @@ from typing import Callable, Optional
 
 from .argos_backend import ArgosTranslator
 from .base import TranslationBackend, TranslationState
+from .llm_backend import LlmTranslator
 from .nllb_backend import NllbTranslator
 
 
-# Backend names recognized by the registry. "llm"/"cloud" are placeholders.
+# Backend names recognized by the registry. "cloud" remains a placeholder;
+# "llm" is real since round 0074 (local llama.cpp server).
 KNOWN_BACKENDS = ("argos", "nllb", "llm", "cloud")
-_NOT_IMPLEMENTED = ("llm", "cloud")
+_NOT_IMPLEMENTED = ("cloud",)
 
 
 class UnavailableBackend:
@@ -66,6 +68,9 @@ def build_backend(
 
     if token == "nllb":
         return NllbTranslator.from_config(config, on_status=on_status)
+
+    if token == "llm":
+        return LlmTranslator.from_config(config, on_status=on_status)
 
     if token in _NOT_IMPLEMENTED:
         return UnavailableBackend(

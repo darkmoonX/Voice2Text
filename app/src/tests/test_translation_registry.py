@@ -32,7 +32,8 @@ class RegistryTests(unittest.TestCase):
         self.assertIsInstance(build_backend("", _config()), ArgosTranslator)
 
     def test_reserved_backends_are_disabled_stubs(self):
-        for name in ("llm", "cloud"):
+        # round 0074: 'llm' became a real backend (LlmTranslator); only 'cloud' remains reserved.
+        for name in ("cloud",):
             backend = build_backend(name, _config())
             self.assertIsInstance(backend, UnavailableBackend)
             self.assertEqual(backend.name, name)
@@ -41,6 +42,13 @@ class RegistryTests(unittest.TestCase):
             self.assertIn("not yet implemented", backend.state.message)
             # translate never raises — returns None so the loop is unaffected.
             self.assertIsNone(backend.translate("hello", "en"))
+
+    def test_llm_token_builds_real_backend(self):
+        from voice2text.translation.llm_backend import LlmTranslator
+
+        backend = build_backend("llm", _config())
+        self.assertIsInstance(backend, LlmTranslator)
+        self.assertEqual(backend.name, "llm")
 
     def test_unknown_falls_back_to_argos_with_warning(self):
         warnings: list[str] = []
