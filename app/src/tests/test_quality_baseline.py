@@ -144,6 +144,21 @@ class CompareBaselinesTests(unittest.TestCase):
         self.assertEqual(qb.compare_baselines(cur, prev), [])
 
 
+class TimeoutSecondsTests(unittest.TestCase):
+    def test_paced_long_clip_gets_headroom(self) -> None:
+        spec = qb.RunSpec("x", "d", "zh", "whisperx", True, 1.0, 600.0, 600.0)
+        # 600 s paced blew the fixed 1200 s default on the founding full run
+        self.assertEqual(spec.timeout_seconds(), 600.0 * 2 + 600.0)
+
+    def test_paced_short_clip_keeps_default_floor(self) -> None:
+        spec = qb.RunSpec("x", "d", "zh", "whisperx", True, 1.0, 90.0, 90.0)
+        self.assertEqual(spec.timeout_seconds(), 1200.0)
+
+    def test_unpaced_uses_flat_timeout(self) -> None:
+        spec = qb.RunSpec("x", "d", "en", "whispercpp", False, 0.0, 0.0, 464.0)
+        self.assertEqual(spec.timeout_seconds(), 1800.0)
+
+
 class FindPreviousBaselineTests(unittest.TestCase):
     def test_picks_latest_same_tier_excluding_current(self) -> None:
         with tempfile.TemporaryDirectory() as td:

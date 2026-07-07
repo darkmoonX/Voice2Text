@@ -50,6 +50,11 @@ def _max_adjacent_repeat(text: str, n: int = 8) -> str:
     t = re.sub(r"\s+", "", text)
     for i in range(len(t) - n + 1):
         g = t[i:i + n]
+        if len(set(g)) == 1:
+            # A monotone run (e.g. 64x 哈 for laughter) is legitimate ASR output, not
+            # cross-window duplicate stacking — stacking duplicates phrases, and a
+            # single-character gram carries no phrase evidence (round 0070 false positive).
+            continue
         if t[i + n:i + 2 * n] == g:
             return g
     return ""

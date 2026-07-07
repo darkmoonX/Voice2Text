@@ -54,23 +54,31 @@ class RunSpec:
     diarization: bool
     replay_speed: float      # 0 = unpaced, 1.0 = realtime pacing
     seconds: float           # slice length; 0 = whole file
+    clip_seconds: float      # effective audio length actually replayed (slice or full)
     truth_srt: str = ""      # reference srt filename inside clip_dir ("" = no truth CER)
     whispercpp_model_size: str = "medium"
     whispercpp_mode: str = "server"
 
+    def timeout_seconds(self) -> float:
+        """Per-pass driver timeout: paced replay needs at least the audio length; give
+        2x + setup margin (round 0070: Bn 600 s paced blew the fixed 1200 s default)."""
+        if self.replay_speed > 0:
+            return max(1200.0, self.clip_seconds / self.replay_speed * 2.0 + 600.0)
+        return 1800.0
+
 
 QUICK_MATRIX: list[RunSpec] = [
-    RunSpec("q1-axqbr2-zh-whisperx-diar", "YT_aXqBRYQSGp0_2", "zh", "whisperx", True, 1.0, 90.0, "zh-CN.srt"),
-    RunSpec("q2-vskw-en-whisperx", "YT_A-VskwEu8u4", "en", "whisperx", False, 0.0, 90.0, "en.srt"),
-    RunSpec("q3-axqbr2-zh-whispercpp", "YT_aXqBRYQSGp0_2", "zh", "whispercpp", False, 0.0, 90.0, "zh-CN.srt"),
+    RunSpec("q1-axqbr2-zh-whisperx-diar", "YT_aXqBRYQSGp0_2", "zh", "whisperx", True, 1.0, 90.0, 90.0, "zh-CN.srt"),
+    RunSpec("q2-vskw-en-whisperx", "YT_A-VskwEu8u4", "en", "whisperx", False, 0.0, 90.0, 90.0, "en.srt"),
+    RunSpec("q3-axqbr2-zh-whispercpp", "YT_aXqBRYQSGp0_2", "zh", "whispercpp", False, 0.0, 90.0, 90.0, "zh-CN.srt"),
 ]
 
 FULL_MATRIX: list[RunSpec] = [
-    RunSpec("f1-axqbr2-zh-whisperx-diar", "YT_aXqBRYQSGp0_2", "zh", "whisperx", True, 1.0, 0.0, "zh-CN.srt"),
-    RunSpec("f2-vskw-en-whisperx-diar", "YT_A-VskwEu8u4", "en", "whisperx", True, 1.0, 0.0, "en.srt"),
-    RunSpec("f3-bn-zh-whisperx-diar", "YT_Bn_7OcZYwrI", "zh", "whisperx", True, 1.0, 600.0),
-    RunSpec("f4-axqbr2-zh-whispercpp-diar", "YT_aXqBRYQSGp0_2", "zh", "whispercpp", True, 1.0, 0.0, "zh-CN.srt"),
-    RunSpec("f5-vskw-en-whispercpp", "YT_A-VskwEu8u4", "en", "whispercpp", False, 0.0, 0.0, "en.srt"),
+    RunSpec("f1-axqbr2-zh-whisperx-diar", "YT_aXqBRYQSGp0_2", "zh", "whisperx", True, 1.0, 0.0, 181.0, "zh-CN.srt"),
+    RunSpec("f2-vskw-en-whisperx-diar", "YT_A-VskwEu8u4", "en", "whisperx", True, 1.0, 0.0, 464.0, "en.srt"),
+    RunSpec("f3-bn-zh-whisperx-diar", "YT_Bn_7OcZYwrI", "zh", "whisperx", True, 1.0, 600.0, 600.0),
+    RunSpec("f4-axqbr2-zh-whispercpp-diar", "YT_aXqBRYQSGp0_2", "zh", "whispercpp", True, 1.0, 0.0, 181.0, "zh-CN.srt"),
+    RunSpec("f5-vskw-en-whispercpp", "YT_A-VskwEu8u4", "en", "whispercpp", False, 0.0, 0.0, 464.0, "en.srt"),
 ]
 
 MATRICES = {"quick": QUICK_MATRIX, "full": FULL_MATRIX}
@@ -192,6 +200,7 @@ def run_one(spec: RunSpec, *, device: str, out_dir: Path, python_exe: str) -> di
         "--language", spec.language,
         "--replay-speed", str(spec.replay_speed),
         "--stt-provider", spec.provider,
+        "--timeout", str(spec.timeout_seconds()),
         "--out", str(out_dir),
     ]
     if spec.provider == "whispercpp":
