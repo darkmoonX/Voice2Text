@@ -539,10 +539,15 @@ selected backend so a slow/hanging backend can never stall the subtitle loop.
     prompt guard. Configure in `runtime_settings.json`: `translation_llm_server_path` (llama-server.exe) and
     `translation_llm_model_path` (a chat-tuned GGUF; Qwen3-4B-Instruct-2507 Q4_K_M is the validated reference)
     — both must exist or the backend reports why it is unavailable and subtitles stay source-only. Optional:
-    `translation_llm_port` (8474), `translation_llm_context_size` (4096; drop to 2048 if VRAM-tight),
+    `translation_llm_port` (8474), `translation_llm_context_size` (**0 = auto**, round 0075: probes free
+    VRAM at warmup, reserves for the ASR stack, and picks the largest fitting context tier 4096/2048/1024
+    with CPU fallback below that; a positive value is a manual pin that auto-sizing never changes),
     `translation_llm_gpu_layers` (99), `translation_llm_max_output_tokens` (256),
-    `translation_llm_request_timeout_seconds` (10). Validated on an RTX 3060: ~0.3 s/line alongside the
-    large-v3 ASR + diarization live stack (peak ~11.9/12 GB).
+    `translation_llm_request_timeout_seconds` (10). OOM resilience: if llama-server dies at startup the
+    backend retries at degraded tiers automatically (pinned context only degrades GPU layers, never the
+    context); if it dies mid-session it restarts once at the next tier down, and a second death disables
+    translation with a clear status (subtitles stay source-only). Validated on an RTX 3060: ~0.3 s/line
+    alongside the large-v3 ASR + diarization live stack (peak ~11.9/12 GB).
   - `cloud`: reserved registry slot that resolves to a disabled stub. No cloud translation service is used.
   An unknown name degrades to `argos` with a warning.
 - **NLLB model/dependencies** — install `requirements-translation-extra.txt` for `transformers`/`sentencepiece`.
