@@ -18,7 +18,6 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLineEdit,
-    QMenu,
     QMessageBox,
     QPushButton,
     QSlider,
@@ -894,50 +893,73 @@ class SettingsDialog(QDialog):
     def _refresh_alignment_model_suggestions(self) -> None:
         current = self._whisperx_align_model_edit.currentText().strip()
         lang = self._current_alignment_language()
+        lang_key = normalize_alignment_folder_language(lang)
+        default_repo = self._alignment_model_defaults.get(lang_key, "") if lang_key else ""
         repos = alignment_repos_for_language(lang)
         self._whisperx_align_model_edit.blockSignals(True)
         self._whisperx_align_model_edit.clear()
         self._whisperx_align_model_edit.addItem("")
         for repo in repos:
             self._whisperx_align_model_edit.addItem(repo)
+        # Round 0077: mark each real suggestion checkable and tick the language's current
+        # default (if any) — right-click toggles the tick directly, no popup menu. "" (auto)
+        # stays non-checkable: it's not a candidate, it's "no pin".
+        model = self._whisperx_align_model_edit.model()
+        for row in range(1, self._whisperx_align_model_edit.count()):
+            item = model.item(row)
+            if item is None:
+                continue
+            item.setCheckable(True)
+            item.setCheckState(
+                Qt.CheckState.Checked if item.text().strip() == default_repo else Qt.CheckState.Unchecked
+            )
         self._whisperx_align_model_edit.blockSignals(False)
         self._set_alignment_model_value(current)
 
     def _on_align_model_suggestion_context_menu(self, pos) -> None:
-        # Round 0077: right-click a candidate in the alignment-model dropdown to set/clear it
-        # as the per-language default (whisperx_alignment_model_defaults), instead of a one-off
-        # pin. The "" (auto) row and empty language have nothing to set as default.
+        # Round 0077: right-click a candidate to toggle it as the per-language default
+        # (whisperx_alignment_model_defaults) directly — a plain tick-mark flip, no popup menu.
+        # At most one item per language stays ticked; toggling flips in place without rebuilding
+        # the list, so it's safe to call while the popup is still open.
         view = self._whisperx_align_model_edit.view()
         index = view.indexAt(pos)
         if not index.isValid():
             return
-        repo = str(index.data() or "").strip()
+        model = self._whisperx_align_model_edit.model()
+        item = model.itemFromIndex(index)
+        if item is None or not item.isCheckable():
+            return
+        repo = item.text().strip()
         if not repo:
             return
         lang_key = normalize_alignment_folder_language(self._current_alignment_language())
         if not lang_key:
             return
-        menu = QMenu(view)
-        set_action = menu.addAction(self._t("align_model_set_default").format(lang=lang_key))
-        clear_action = None
-        if self._alignment_model_defaults.get(lang_key):
-            clear_action = menu.addAction(self._t("align_model_clear_default").format(lang=lang_key))
-        chosen = menu.exec(view.viewport().mapToGlobal(pos))
-        if chosen is set_action:
-            self._set_alignment_default_for_language(lang_key, repo)
-        elif clear_action is not None and chosen is clear_action:
-            self._clear_alignment_default_for_language(lang_key)
+        if item.checkState() == Qt.CheckState.Checked:
+            item.setCheckState(Qt.CheckState.Unchecked)
+            self._clear_alignment_default_for_language(lang_key, rebuild=False)
+            return
+        for row in range(model.rowCount()):
+            sibling = model.item(row)
+            if sibling is not None and sibling is not item:
+                sibling.setCheckState(Qt.CheckState.Unchecked)
+        item.setCheckState(Qt.CheckState.Checked)
+        self._set_alignment_default_for_language(lang_key, repo, rebuild=False)
 
-    def _set_alignment_default_for_language(self, lang_key: str, repo: str) -> None:
+    def _set_alignment_default_for_language(self, lang_key: str, repo: str, *, rebuild: bool = True) -> None:
         self._alignment_model_defaults[lang_key] = repo
         # The default now covers this language automatically; clear any one-off pin so it
         # actually takes effect (an explicit pin always wins over the per-language default).
-        self._set_alignment_model_value("")
-        self._refresh_alignment_model_suggestions()
+        # setCurrentText only touches the line-edit text, so this is safe even while the
+        # suggestion popup is still open (in-place tick-toggle callers pass rebuild=False).
+        self._whisperx_align_model_edit.setCurrentText("")
+        if rebuild:
+            self._refresh_alignment_model_suggestions()
 
-    def _clear_alignment_default_for_language(self, lang_key: str) -> None:
+    def _clear_alignment_default_for_language(self, lang_key: str, *, rebuild: bool = True) -> None:
         self._alignment_model_defaults.pop(lang_key, None)
-        self._refresh_alignment_model_suggestions()
+        if rebuild:
+            self._refresh_alignment_model_suggestions()
 
     def _apply_stt_model_default(self, provider: str, *, previous_provider: str) -> None:
         if provider == previous_provider:
@@ -1052,7 +1074,7 @@ class SettingsDialog(QDialog):
             self._whisperx_align_guard_revert_btn: "Revert the alignment guard back to the safe default.",
             self._whisperx_diar_device_combo: "Diarization device: auto follows ASR device, cpu lowers VRAM pressure, cuda improves throughput.",
             self._whisperx_expected_speakers_spin: "Expected speaker count. 0=unknown/auto; positive values feed diarization and cap live speaker profiles.",
-            self._whisperx_align_model_edit: "Alignment model. Empty=auto (picks this language's default: right-click a suggestion in the dropdown to set/clear it). Choosing a suggestion or typing an HF repo id pins that exact model for this session only, ignoring the per-language default.",
+            self._whisperx_align_model_edit: "Alignment model. Empty=auto (uses this language's ticked default, if any). Right-click a suggestion in the dropdown to tick/untick it as that language's default (at most one tick per language; no tick = the built-in per-language default). Left-clicking a suggestion (or typing an HF repo id) instead pins that exact model for this session only, ignoring the per-language default.",
             self._whisperx_diar_model_edit: "Diarization model id.",
             self._whisperx_hf_token_edit: "Hugging Face token for restricted/private models.",
             self._whisperx_speaker_backend_combo: "Speaker identity backend for profile embeddings.",

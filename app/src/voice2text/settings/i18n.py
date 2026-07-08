@@ -71,8 +71,6 @@ SETTINGS_I18N: dict[str, dict[str, str]] = {
         'subtitle_commit_hold_seconds': '字幕標籤延遲鎖定（秒）',
         'session_record_enabled': '錄製本次會話（供整檔重標）',
         'session_finalize_direct_relabel_enabled': '會話結束後整檔重新標記說話人',
-        'align_model_set_default': '設為 {lang} 的預設對齊模型',
-        'align_model_clear_default': '清除 {lang} 的預設對齊模型',
     },
     'en': {
         'select_all': 'Select all',
@@ -143,8 +141,6 @@ SETTINGS_I18N: dict[str, dict[str, str]] = {
         'subtitle_commit_hold_seconds': 'Subtitle label commit hold (s)',
         'session_record_enabled': 'Record this session (for whole-file relabel)',
         'session_finalize_direct_relabel_enabled': 'Whole-file speaker relabel on session end',
-        'align_model_set_default': 'Set as default alignment model for {lang}',
-        'align_model_clear_default': 'Clear default alignment model for {lang}',
     },
 }
 

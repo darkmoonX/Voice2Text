@@ -204,16 +204,19 @@ python main.py
 - Speaker-profile embedding backend is now selectable in Settings (`pyannote` / `speechbrain-ecapa` / `nemo-titanet`).
 - Alignment model picking (round 0077): the `WhisperX Alignment model` combo suggests candidates for whichever
   language is currently in effect (`WhisperX Alignment language`, or the source language when that's
-  `auto`/`follow-source`) — language is the first level, model the second. Picking a suggestion (or typing an
-  HF repo id) pins that exact model for the current session only. **Right-click** a suggestion in the dropdown
-  to "set/clear as default" for that language instead — this writes `whisperx_alignment_model_defaults`
-  (a persisted language -> model map) and clears any one-off pin, so the choice is remembered and automatically
-  follows language switches / auto-detect from then on, unlike a plain pin. This replaced the old single-language
+  `auto`/`follow-source`) — language is the first level, model the second. **Left-click** a suggestion (or
+  type an HF repo id) to pin that exact model for the current session only. **Right-click** a suggestion
+  instead to tick/untick it directly (no popup) as that language's persisted default —
+  `whisperx_alignment_model_defaults` (a language -> model map), at most one ticked model per language; no
+  tick means the language falls through to its built-in default. Ticking clears any one-off pin so the new
+  default takes effect immediately, and — unlike a plain pin — a ticked default is remembered across
+  restarts and automatically follows language switches / auto-detect. This replaced the old single-language
   `whisperx_zh_align_wbbbbb` checkbox (still a config/CLI-only field, e.g. `--whisperx-zh-align-wbbbbb`; an
   existing `true` value is migrated into the map once on first launch after upgrading). See
   `docs/tasks/0077-alignment-model-defaults.md` for the full mechanism (fallback order: explicit pin > map entry
   for the language > legacy `whisperx_zh_align_wbbbbb`/`whisperx_english_align_large` booleans > WhisperX stock
-  default).
+  default — which, for the two currently-curated languages this replaces, is already the top suggestion in
+  each language's list).
 - Advanced speaker-profile options remain config-driven: `whisperx_speaker_profile_enabled`, `whisperx_speaker_profile_model`, `whisperx_speaker_speechbrain_model`, `whisperx_speaker_nemo_model`, `whisperx_speaker_profile_match_threshold`, `whisperx_speaker_profile_min_seconds`, `whisperx_speaker_profile_store_path`.
 - Speaker-profile learn-path quality gate (`whisperx_speaker_profile_quality_gate_enabled`, default off; CLI `--speaker-profile-quality-gate`): when on, a low-quality speaker clip (empty / music-sound tag / `♪` / degenerate repetition / mean word-score below `whisperx_speaker_profile_quality_min_confidence`) can still match an existing profile for display but never updates or creates an embedding centroid, so gibberish and music tails do not pollute speaker identities. The displayed speaker label for a span is unaffected — only profile *learning* is gated.
 - Transcript export is available in Settings:

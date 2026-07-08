@@ -16,6 +16,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from voice2text.config import RuntimeConfig
 
 try:
+    from PySide6.QtCore import QPoint, Qt
     from PySide6.QtWidgets import QApplication
 
     _APP = QApplication.instance() or QApplication([])
@@ -70,6 +71,90 @@ class AlignmentModelDefaultsDialogTests(unittest.TestCase):
         # Round 0077 removed the single-language checkbox in favor of the generalized map.
         dlg = self._dialog()
         self.assertFalse(hasattr(dlg, "_whisperx_zh_align_wbbbbb_check"))
+
+    @staticmethod
+    def _row_for_repo(dlg, repo: str) -> int:
+        model = dlg._whisperx_align_model_edit.model()
+        for row in range(dlg._whisperx_align_model_edit.count()):
+            item = model.item(row)
+            if item is not None and item.text().strip() == repo:
+                return row
+        raise AssertionError(f"{repo!r} not found in alignment-model suggestions")
+
+    def _right_click_row(self, dlg, row: int) -> None:
+        # Bypass pixel-geometry indexAt() (unreliable offscreen) by monkeypatching it to
+        # return the target row's index directly, exactly what a real click would resolve to.
+        model = dlg._whisperx_align_model_edit.model()
+        view = dlg._whisperx_align_model_edit.view()
+        index = model.index(row, 0)
+        original = view.indexAt
+        view.indexAt = lambda pos: index
+        try:
+            dlg._on_align_model_suggestion_context_menu(QPoint(0, 0))
+        finally:
+            view.indexAt = original
+
+    def test_refresh_ticks_the_current_default(self) -> None:
+        dlg = self._dialog(
+            RuntimeConfig(
+                source_language="zh-hant",
+                whisperx_alignment_model_defaults={"zh": "wbbbbb/wav2vec2-large-chinese-zh-cn"},
+            )
+        )
+        row = self._row_for_repo(dlg, "wbbbbb/wav2vec2-large-chinese-zh-cn")
+        model = dlg._whisperx_align_model_edit.model()
+        self.assertEqual(model.item(row).checkState(), Qt.CheckState.Checked)
+        other_row = self._row_for_repo(dlg, "jonatasgrosman/wav2vec2-large-xlsr-53-chinese-zh-cn")
+        self.assertEqual(model.item(other_row).checkState(), Qt.CheckState.Unchecked)
+
+    def test_right_click_ticks_writes_map_and_clears_pin(self) -> None:
+        dlg = self._dialog(RuntimeConfig(source_language="zh-hant"))
+        dlg._whisperx_align_model_edit.setCurrentText(
+            "jonatasgrosman/wav2vec2-large-xlsr-53-chinese-zh-cn"
+        )
+        row = self._row_for_repo(dlg, "wbbbbb/wav2vec2-large-chinese-zh-cn")
+
+        self._right_click_row(dlg, row)
+
+        self.assertEqual(
+            dlg._alignment_model_defaults.get("zh"), "wbbbbb/wav2vec2-large-chinese-zh-cn"
+        )
+        self.assertEqual(dlg._whisperx_align_model_edit.model().item(row).checkState(), Qt.CheckState.Checked)
+        self.assertEqual(dlg._whisperx_align_model_edit.currentText().strip(), "")
+
+    def test_right_click_again_unticks(self) -> None:
+        dlg = self._dialog(
+            RuntimeConfig(
+                source_language="zh-hant",
+                whisperx_alignment_model_defaults={"zh": "wbbbbb/wav2vec2-large-chinese-zh-cn"},
+            )
+        )
+        row = self._row_for_repo(dlg, "wbbbbb/wav2vec2-large-chinese-zh-cn")
+
+        self._right_click_row(dlg, row)
+
+        self.assertNotIn("zh", dlg._alignment_model_defaults)
+        self.assertEqual(dlg._whisperx_align_model_edit.model().item(row).checkState(), Qt.CheckState.Unchecked)
+
+    def test_at_most_one_tick_per_language(self) -> None:
+        dlg = self._dialog(
+            RuntimeConfig(
+                source_language="zh-hant",
+                whisperx_alignment_model_defaults={"zh": "wbbbbb/wav2vec2-large-chinese-zh-cn"},
+            )
+        )
+        old_row = self._row_for_repo(dlg, "wbbbbb/wav2vec2-large-chinese-zh-cn")
+        new_row = self._row_for_repo(dlg, "jonatasgrosman/wav2vec2-large-xlsr-53-chinese-zh-cn")
+
+        self._right_click_row(dlg, new_row)
+
+        model = dlg._whisperx_align_model_edit.model()
+        self.assertEqual(model.item(new_row).checkState(), Qt.CheckState.Checked)
+        self.assertEqual(model.item(old_row).checkState(), Qt.CheckState.Unchecked)
+        self.assertEqual(
+            dlg._alignment_model_defaults.get("zh"),
+            "jonatasgrosman/wav2vec2-large-xlsr-53-chinese-zh-cn",
+        )
 
 
 if __name__ == "__main__":
