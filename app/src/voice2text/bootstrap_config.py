@@ -6,6 +6,7 @@ from pathlib import Path
 
 from .config import RuntimeConfig
 from .bootstrap_args import parse_int_csv, parse_str_csv
+from .settings_persistence import seed_alignment_model_defaults
 
 
 def default_log_dir() -> str:
@@ -241,4 +242,5 @@ def build_runtime_config(args: argparse.Namespace) -> RuntimeConfig:
     )
     if args.source_language != "auto":
         cfg.source_language = args.source_language
+    seed_alignment_model_defaults(cfg)
     return cfg

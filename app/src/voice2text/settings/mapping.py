@@ -1,7 +1,7 @@
 """Mapping and validation helpers for settings dialog payload."""
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from ..stt.registry import normalize_stt_provider
 
@@ -58,7 +58,6 @@ class SettingsPayloadInput:
     whisperx_speaker_profile_enabled: bool = True
     runtime_preset: str = ""
     # Round 0051: recently-shipped live knobs surfaced in the dialog (previously CLI/JSON-only).
-    whisperx_zh_align_wbbbbb: bool = False
     whisperx_asr_temperatures: str = ""
     subtitle_commit_hold_seconds: float = 0.0
     asr_temperatures_invalid_message: str = "Invalid ASR temperature schedule."
@@ -66,6 +65,9 @@ class SettingsPayloadInput:
     # (previously CLI/JSON-only, round 0047).
     session_record_enabled: bool = False
     session_finalize_direct_relabel_enabled: bool = False
+    # Round 0077: generalized per-language alignment-model preference (replaces the dialog's
+    # old single-language wbbbbb checkbox; see whisperx_alignment_model_defaults on RuntimeConfig).
+    whisperx_alignment_model_defaults: dict[str, str] = field(default_factory=dict)
 
 
 def build_settings_updates(payload: SettingsPayloadInput, *, lang: str, hop_gt_segment_message: str) -> dict[str, object]:
@@ -190,7 +192,7 @@ def build_settings_updates(payload: SettingsPayloadInput, *, lang: str, hop_gt_s
         'transcript_export_formats': ",".join(export_formats),
         'transcript_export_include_timestamps': bool(payload.transcript_export_include_timestamps),
         'transcript_export_include_speaker': bool(payload.transcript_export_include_speaker),
-        'whisperx_zh_align_wbbbbb': bool(payload.whisperx_zh_align_wbbbbb),
+        'whisperx_alignment_model_defaults': dict(payload.whisperx_alignment_model_defaults or {}),
         'whisperx_asr_temperatures': asr_temperatures,
         'subtitle_commit_hold_seconds': commit_hold_seconds,
         'session_record_enabled': bool(payload.session_record_enabled),

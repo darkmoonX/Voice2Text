@@ -25,6 +25,20 @@ def normalize_source_language(source_language: str | None) -> str:
     return token
 
 
+def normalize_alignment_folder_language(value: str | None) -> str:
+    """Fold a language code to the key `whisperx_alignment_model_defaults` is keyed by.
+
+    Mirrors `stt/whisperx_provider.py::_normalize_alignment_folder_language` (duplicated, not
+    imported, so the Settings dialog / bootstrap process never pulls in the heavy STT module).
+    """
+    token = (value or "").strip().lower()
+    if not token:
+        return ""
+    if token in {"zh-hant", "zh-hans", "zh-tw", "zh-cn", "zh-hk", "zh-sg"}:
+        return "zh"
+    return token
+
+
 def alignment_repos_for_language(source_language: str) -> list[str]:
     token = (source_language or "auto").strip().lower()
     if token in {"zh", "zh-hant", "zh-hans"}:

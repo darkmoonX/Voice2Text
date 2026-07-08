@@ -263,6 +263,7 @@ def _build_whisperx(config: RuntimeConfig, *, device_override: Optional[str], co
         alignment_model=str(getattr(config, 'whisperx_alignment_model', '') or ''),
         english_align_large=bool(getattr(config, 'whisperx_english_align_large', True)),
         zh_align_wbbbbb=bool(getattr(config, 'whisperx_zh_align_wbbbbb', False)),
+        alignment_model_defaults=dict(getattr(config, 'whisperx_alignment_model_defaults', None) or {}),
         alignment_language=str(getattr(config, 'whisperx_alignment_language', 'auto') or 'auto'),
         alignment_device=str(getattr(config, 'whisperx_alignment_device', 'auto') or 'auto'),
         align_guard=str(getattr(config, 'whisperx_align_guard', 'safe') or 'safe'),

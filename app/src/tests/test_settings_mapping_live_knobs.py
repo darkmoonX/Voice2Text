@@ -62,7 +62,7 @@ def _build(payload: SettingsPayloadInput) -> dict[str, object]:
 class LiveKnobMappingTests(unittest.TestCase):
     def test_defaults_map_to_byte_identical_values(self) -> None:
         updates = _build(_payload())
-        self.assertEqual(updates["whisperx_zh_align_wbbbbb"], False)
+        self.assertEqual(updates["whisperx_alignment_model_defaults"], {})
         self.assertEqual(updates["whisperx_asr_temperatures"], "")
         self.assertEqual(updates["subtitle_commit_hold_seconds"], 0.0)
         self.assertEqual(updates["whisperx_diarization_min_speakers"], 0)
@@ -71,13 +71,16 @@ class LiveKnobMappingTests(unittest.TestCase):
     def test_values_pass_through(self) -> None:
         updates = _build(
             _payload(
-                whisperx_zh_align_wbbbbb=True,
+                whisperx_alignment_model_defaults={"zh": "wbbbbb/wav2vec2-large-chinese-zh-cn"},
                 whisperx_asr_temperatures="0.0,0.2,0.4",
                 subtitle_commit_hold_seconds=20.0,
                 whisperx_diarization_expected_speakers=3,
             )
         )
-        self.assertEqual(updates["whisperx_zh_align_wbbbbb"], True)
+        self.assertEqual(
+            updates["whisperx_alignment_model_defaults"],
+            {"zh": "wbbbbb/wav2vec2-large-chinese-zh-cn"},
+        )
         self.assertEqual(updates["whisperx_asr_temperatures"], "0.0,0.2,0.4")
         self.assertEqual(updates["subtitle_commit_hold_seconds"], 20.0)
         self.assertEqual(updates["whisperx_diarization_min_speakers"], 3)

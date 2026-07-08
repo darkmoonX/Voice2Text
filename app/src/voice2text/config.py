@@ -35,6 +35,13 @@ class RuntimeConfig:
     whisperx_alignment_model: str = ''
     whisperx_english_align_large: bool = True
     whisperx_zh_align_wbbbbb: bool = False
+    # Round 0077: generalized per-language alignment-model preference (language -> HF repo id
+    # or torchaudio bundle name), settable from the Settings dialog via right-click "set as
+    # default". Takes priority over the two legacy booleans above in _effective_alignment_model;
+    # those remain as CLI-only inputs (--whisperx-zh-align-wbbbbb etc.) migrated into this map
+    # at startup by language_defaults.seed_alignment_model_defaults(), and as the fallback for
+    # languages with no map entry.
+    whisperx_alignment_model_defaults: dict[str, str] = field(default_factory=dict)
     whisperx_alignment_language: str = 'auto'
     whisperx_alignment_device: str = 'auto'
     # Alignment CUDA safety guard: 'safe' (default) downgrades CUDA alignment to CPU on Windows

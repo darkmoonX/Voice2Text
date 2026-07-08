@@ -19,7 +19,12 @@ from .controller import TranscriptionController
 from .debug_window import DebugWindowLogHandler, STTDebugWindow
 from .logging_utils import configure_app_logger, suppress_third_party_console_logging
 from .overlay_window import SubtitleOverlayWindow
-from .settings_persistence import apply_updates_to_config, load_persisted_updates, save_runtime_settings
+from .settings_persistence import (
+    apply_updates_to_config,
+    load_persisted_updates,
+    save_runtime_settings,
+    seed_alignment_model_defaults,
+)
 from .tray_controller import Voice2TextTrayController
 
 _FAULTHANDLER_FILE = None
@@ -203,6 +208,7 @@ def build_restart_keys() -> set[str]:
         "whisperx_enable_diarization",
         "whisperx_alignment_model",
         "whisperx_zh_align_wbbbbb",
+        "whisperx_alignment_model_defaults",
         "whisperx_alignment_language",
         "whisperx_alignment_device",
         "whisperx_align_guard",
@@ -309,6 +315,14 @@ def run_qt_app(cfg: RuntimeConfig) -> int:
         changed_keys = apply_updates_to_config(cfg, persisted_updates)
         if changed_keys:
             logger.info("Loaded persisted settings: %s", sorted(changed_keys))
+
+    # Round 0077: fold the legacy whisperx_zh_align_wbbbbb / whisperx_english_align_large
+    # booleans (just restored from disk above, or set via CLI in build_runtime_config) into the
+    # generalized whisperx_alignment_model_defaults map, so an upgrade preserves an existing
+    # user's alignment preference in the new Settings-dialog-editable form.
+    seeded_align_langs = seed_alignment_model_defaults(cfg)
+    if seeded_align_langs:
+        logger.info("Migrated legacy alignment-model flags into whisperx_alignment_model_defaults: %s", sorted(seeded_align_langs))
 
     # Seed per-language defaults (e.g. zh reconcile_threshold 0.88) for fields the user left at
     # the global default. Runs after CLI + persisted so explicit choices still win.

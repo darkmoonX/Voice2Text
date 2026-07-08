@@ -80,6 +80,7 @@ class WhisperXTranscriber:
         alignment_model: str = "",
         english_align_large: bool = True,
         zh_align_wbbbbb: bool = False,
+        alignment_model_defaults: dict[str, str] | None = None,
         alignment_language: str = "auto",
         alignment_device: str = "auto",
         align_guard: str = "safe",
@@ -195,6 +196,7 @@ class WhisperXTranscriber:
         self._alignment_model = (alignment_model or "").strip()
         self._english_align_large = bool(english_align_large)
         self._zh_align_wbbbbb = bool(zh_align_wbbbbb)
+        self._alignment_model_defaults = dict(alignment_model_defaults or {})
         self._alignment_language = (alignment_language or 'auto').strip().lower()
         self._alignment_device_setting = (alignment_device or "auto").strip().lower()
         self._align_guard = self._normalize_align_guard(align_guard)
@@ -2833,11 +2835,20 @@ class WhisperXTranscriber:
         for the CJK case. It trades a small CER cost (round 0043 gate), so it is opt-in
         (default off) and only worth it when alignment actually runs on GPU. Languages
         other than en/zh are unaffected (returns ``""`` so resolution stays byte-identical).
+
+        Round 0077: ``alignment_model_defaults`` (language -> repo/bundle, Settings-dialog
+        editable) takes priority over the two booleans above for any language present in it —
+        those booleans remain only as CLI-only inputs, migrated into this map at startup
+        (``settings_persistence.seed_alignment_model_defaults``) and as the fallback for en/zh
+        when the map has no entry for that language.
         """
         explicit = self._alignment_model.strip()
         if explicit:
             return explicit
         folder_lang = self._normalize_alignment_folder_language(language_code)
+        mapped = str(getattr(self, "_alignment_model_defaults", {}).get(folder_lang, "") or "").strip()
+        if mapped:
+            return mapped
         if getattr(self, "_english_align_large", True) and folder_lang == "en":
             return self._ENGLISH_LARGE_ALIGN_BUNDLE
         if getattr(self, "_zh_align_wbbbbb", False) and folder_lang == "zh":

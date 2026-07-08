@@ -121,7 +121,46 @@ _PERSIST_KEYS = {
     "transcript_export_include_timestamps",
     "transcript_export_include_speaker",
     "transcript_export_dir",
+    "whisperx_alignment_model_defaults",
 }
+
+# Round 0077: legacy per-language alignment-model booleans, kept as CLI-only inputs
+# (--whisperx-zh-align-wbbbbb / --whisperx-english-align-large). Their built-in target repo
+# for each language mirrors _ENGLISH_LARGE_ALIGN_BUNDLE / _ZH_WBBBBB_ALIGN_MODEL in
+# stt/whisperx_provider.py; kept as plain literals here to avoid importing the (heavy) STT
+# module into the Qt/bootstrap process.
+_LEGACY_ALIGNMENT_MODEL_BOOLEANS: dict[str, tuple[str, bool]] = {
+    # config field -> (target repo/bundle when True, the non-default value that signals intent)
+    "whisperx_zh_align_wbbbbb": ("wbbbbb/wav2vec2-large-chinese-zh-cn", True),
+    "whisperx_english_align_large": ("WAV2VEC2_ASR_BASE_960H", False),
+}
+_LEGACY_ALIGNMENT_MODEL_LANGUAGE = {
+    "whisperx_zh_align_wbbbbb": "zh",
+    "whisperx_english_align_large": "en",
+}
+
+
+def seed_alignment_model_defaults(cfg: RuntimeConfig) -> list[str]:
+    """One-time migration: fold the legacy per-language alignment booleans into
+    ``whisperx_alignment_model_defaults`` so the Settings dialog's generalized
+    language->model map reflects a user's existing CLI/persisted preference (round 0077).
+    Idempotent and additive: only fills a language slot that isn't already in the map, and
+    only when the legacy flag is at its non-default (explicit-intent) value. Returns the
+    languages seeded, for logging.
+    """
+    defaults = dict(getattr(cfg, "whisperx_alignment_model_defaults", None) or {})
+    seeded: list[str] = []
+    for (field_name, (repo, signal_value)) in _LEGACY_ALIGNMENT_MODEL_BOOLEANS.items():
+        lang = _LEGACY_ALIGNMENT_MODEL_LANGUAGE[field_name]
+        if lang in defaults:
+            continue
+        if bool(getattr(cfg, field_name, not signal_value)) != signal_value:
+            continue
+        defaults[lang] = repo
+        seeded.append(lang)
+    if seeded:
+        cfg.whisperx_alignment_model_defaults = defaults
+    return seeded
 
 # Round 0076: settings-dialog-editable but deliberately NOT written to runtime_settings.json
 # (round 0047 precedent: recording is a per-run choice, not something that should silently

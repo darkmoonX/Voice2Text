@@ -28,6 +28,8 @@ class WhisperXAlignmentResolutionTests(unittest.TestCase):
         inst._model_root = model_root
         inst._alignment_model = ""
         inst._english_align_large = True
+        inst._zh_align_wbbbbb = False
+        inst._alignment_model_defaults = {}
         inst._alignment_language = "auto"
         inst._source_language_hint = None
         return inst
@@ -202,6 +204,45 @@ class WhisperXAlignmentResolutionTests(unittest.TestCase):
         with tempfile.TemporaryDirectory(prefix="v2t-align-") as td:
             transcriber = self._new_stub(Path(td))
             self.assertEqual(transcriber._effective_alignment_model("zh"), "")
+
+    def test_alignment_model_defaults_map_wins_over_legacy_booleans(self) -> None:
+        # Round 0077: the generalized per-language map takes priority over the legacy
+        # english_align_large/zh_align_wbbbbb booleans when it has an entry for the language.
+        with tempfile.TemporaryDirectory(prefix="v2t-align-") as td:
+            transcriber = self._new_stub(Path(td))
+            transcriber._alignment_model_defaults = {"en": "WAV2VEC2_ASR_BASE_960H"}
+            self.assertEqual(transcriber._effective_alignment_model("en"), "WAV2VEC2_ASR_BASE_960H")
+
+    def test_alignment_model_defaults_covers_language_with_no_legacy_flag(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="v2t-align-") as td:
+            transcriber = self._new_stub(Path(td))
+            transcriber._alignment_model_defaults = {
+                "ja": "patrickvonplaten/wav2vec2-large-xlsr-53-japanese",
+            }
+            self.assertEqual(
+                transcriber._effective_alignment_model("ja"),
+                "patrickvonplaten/wav2vec2-large-xlsr-53-japanese",
+            )
+
+    def test_alignment_model_defaults_falls_back_to_legacy_boolean_when_no_entry(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="v2t-align-") as td:
+            transcriber = self._new_stub(Path(td))
+            transcriber._zh_align_wbbbbb = True
+            transcriber._alignment_model_defaults = {"en": "WAV2VEC2_ASR_BASE_960H"}
+            self.assertEqual(
+                transcriber._effective_alignment_model("zh"),
+                "wbbbbb/wav2vec2-large-chinese-zh-cn",
+            )
+
+    def test_explicit_pin_wins_over_alignment_model_defaults(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="v2t-align-") as td:
+            transcriber = self._new_stub(Path(td))
+            transcriber._alignment_model = "jonatasgrosman/wav2vec2-large-xlsr-53-chinese-zh-cn"
+            transcriber._alignment_model_defaults = {"zh": "wbbbbb/wav2vec2-large-chinese-zh-cn"}
+            self.assertEqual(
+                transcriber._effective_alignment_model("zh"),
+                "jonatasgrosman/wav2vec2-large-xlsr-53-chinese-zh-cn",
+            )
 
     def test_explicit_model_wins_over_english_upgrade(self) -> None:
         with tempfile.TemporaryDirectory(prefix="v2t-align-") as td:

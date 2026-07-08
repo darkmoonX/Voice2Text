@@ -18,6 +18,7 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QMenu,
     QMessageBox,
     QPushButton,
     QSlider,
@@ -36,6 +37,7 @@ from .settings.presenter import (
     alignment_repos_for_language,
     app_names_from_config,
     loopback_indices_from_config,
+    normalize_alignment_folder_language,
     normalize_source_language,
 )
 from .settings.schema import allowed_stt_variants, default_stt_model
@@ -185,6 +187,9 @@ class SettingsDialog(QDialog):
         # Remember each provider's last model-size selection so switching providers back
         # and forth restores the previous choice instead of snapping to the default.
         self._stt_model_size_by_provider: dict[str, str] = {}
+        # Round 0077: language -> preferred alignment model/bundle, set via right-click "set as
+        # default" on the alignment-model combo (replaces the old single-language wbbbbb checkbox).
+        self._alignment_model_defaults: dict[str, str] = {}
         self._ui_built = False
         self._applying_preset = False
         self._selected_loopback_indices = self._init_loopback_indices()
@@ -266,12 +271,17 @@ class SettingsDialog(QDialog):
         self._whisperx_align_model_edit.setEditable(True)
         self._whisperx_align_model_edit.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
         self._whisperx_align_model_edit.lineEdit().setPlaceholderText("auto (leave empty) or HF repo id")
+        # Round 0077: right-click a suggested model to pin it as this language's default
+        # (writes whisperx_alignment_model_defaults instead of an explicit one-off pin).
+        self._whisperx_align_model_edit.view().setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self._whisperx_align_model_edit.view().customContextMenuRequested.connect(
+            self._on_align_model_suggestion_context_menu
+        )
         self._whisperx_diar_model_edit = QLineEdit()
         self._whisperx_hf_token_edit = QLineEdit()
         self._whisperx_hf_token_edit.setEchoMode(QLineEdit.EchoMode.Password)
         self._whisperx_speaker_backend_combo = create_whisperx_speaker_backend_combo()
         # Round 0051: recently-shipped live knobs, previously CLI/JSON-only.
-        self._whisperx_zh_align_wbbbbb_check = QCheckBox()
         self._asr_temperatures_edit = QLineEdit()
         self._asr_temperatures_edit.setPlaceholderText("empty = full library schedule (0.0,0.2,0.4,0.6,0.8,1.0)")
         self._commit_hold_spin = QDoubleSpinBox()
@@ -392,7 +402,6 @@ class SettingsDialog(QDialog):
         form_left.addRow(self._t("whisperx_align_guard"), align_guard_row)
         form_left.addRow("", self._whisperx_align_guard_warning)
         form_left.addRow(self._t("whisperx_align_model"), self._whisperx_align_model_edit)
-        form_left.addRow(self._t("whisperx_zh_align_wbbbbb"), self._whisperx_zh_align_wbbbbb_check)
         # --- Diarization group (kept contiguous) ---
         form_left.addRow(self._t("whisperx_diarization"), self._whisperx_diarization_check)
         form_left.addRow(self._t("whisperx_expected_speakers"), self._whisperx_expected_speakers_spin)
@@ -552,7 +561,8 @@ class SettingsDialog(QDialog):
             self._whisperx_speaker_backend_combo,
             str(getattr(cfg, "whisperx_speaker_profile_backend", "pyannote") or "pyannote"),
         )
-        self._whisperx_zh_align_wbbbbb_check.setChecked(bool(getattr(cfg, "whisperx_zh_align_wbbbbb", False)))
+        self._alignment_model_defaults = dict(getattr(cfg, "whisperx_alignment_model_defaults", None) or {})
+        self._refresh_alignment_model_suggestions()
         self._asr_temperatures_edit.setText(str(getattr(cfg, "whisperx_asr_temperatures", "") or ""))
         self._commit_hold_spin.setValue(float(getattr(cfg, "subtitle_commit_hold_seconds", 0.0) or 0.0))
         self._session_record_check.setChecked(bool(getattr(cfg, "session_record_enabled", False)))
@@ -875,11 +885,15 @@ class SettingsDialog(QDialog):
         else:
             self._whisperx_align_model_edit.setEditText(raw)
 
+    def _current_alignment_language(self) -> str:
+        lang = str(self._whisperx_align_language_combo.currentData() or 'auto')
+        if lang in {'auto', 'follow-source'}:
+            lang = str(self._source_language_combo.currentData() or 'auto')
+        return lang
+
     def _refresh_alignment_model_suggestions(self) -> None:
         current = self._whisperx_align_model_edit.currentText().strip()
-        lang = str(self._whisperx_align_language_combo.currentData() or 'auto')
-        if lang in {'auto','follow-source'}:
-            lang = str(self._source_language_combo.currentData() or 'auto')
+        lang = self._current_alignment_language()
         repos = alignment_repos_for_language(lang)
         self._whisperx_align_model_edit.blockSignals(True)
         self._whisperx_align_model_edit.clear()
@@ -888,6 +902,42 @@ class SettingsDialog(QDialog):
             self._whisperx_align_model_edit.addItem(repo)
         self._whisperx_align_model_edit.blockSignals(False)
         self._set_alignment_model_value(current)
+
+    def _on_align_model_suggestion_context_menu(self, pos) -> None:
+        # Round 0077: right-click a candidate in the alignment-model dropdown to set/clear it
+        # as the per-language default (whisperx_alignment_model_defaults), instead of a one-off
+        # pin. The "" (auto) row and empty language have nothing to set as default.
+        view = self._whisperx_align_model_edit.view()
+        index = view.indexAt(pos)
+        if not index.isValid():
+            return
+        repo = str(index.data() or "").strip()
+        if not repo:
+            return
+        lang_key = normalize_alignment_folder_language(self._current_alignment_language())
+        if not lang_key:
+            return
+        menu = QMenu(view)
+        set_action = menu.addAction(self._t("align_model_set_default").format(lang=lang_key))
+        clear_action = None
+        if self._alignment_model_defaults.get(lang_key):
+            clear_action = menu.addAction(self._t("align_model_clear_default").format(lang=lang_key))
+        chosen = menu.exec(view.viewport().mapToGlobal(pos))
+        if chosen is set_action:
+            self._set_alignment_default_for_language(lang_key, repo)
+        elif clear_action is not None and chosen is clear_action:
+            self._clear_alignment_default_for_language(lang_key)
+
+    def _set_alignment_default_for_language(self, lang_key: str, repo: str) -> None:
+        self._alignment_model_defaults[lang_key] = repo
+        # The default now covers this language automatically; clear any one-off pin so it
+        # actually takes effect (an explicit pin always wins over the per-language default).
+        self._set_alignment_model_value("")
+        self._refresh_alignment_model_suggestions()
+
+    def _clear_alignment_default_for_language(self, lang_key: str) -> None:
+        self._alignment_model_defaults.pop(lang_key, None)
+        self._refresh_alignment_model_suggestions()
 
     def _apply_stt_model_default(self, provider: str, *, previous_provider: str) -> None:
         if provider == previous_provider:
@@ -1002,7 +1052,7 @@ class SettingsDialog(QDialog):
             self._whisperx_align_guard_revert_btn: "Revert the alignment guard back to the safe default.",
             self._whisperx_diar_device_combo: "Diarization device: auto follows ASR device, cpu lowers VRAM pressure, cuda improves throughput.",
             self._whisperx_expected_speakers_spin: "Expected speaker count. 0=unknown/auto; positive values feed diarization and cap live speaker profiles.",
-            self._whisperx_align_model_edit: "Alignment model. Empty=auto; choose suggestion or type HF repo id.",
+            self._whisperx_align_model_edit: "Alignment model. Empty=auto (picks this language's default: right-click a suggestion in the dropdown to set/clear it). Choosing a suggestion or typing an HF repo id pins that exact model for this session only, ignoring the per-language default.",
             self._whisperx_diar_model_edit: "Diarization model id.",
             self._whisperx_hf_token_edit: "Hugging Face token for restricted/private models.",
             self._whisperx_speaker_backend_combo: "Speaker identity backend for profile embeddings.",
@@ -1025,7 +1075,6 @@ class SettingsDialog(QDialog):
             self._import_audio_btn: "Import an audio/video file and replay it through the realtime subtitle pipeline.",
             self._reset_defaults_btn: "Reset all settings in this dialog back to default values.",
             self._compute_type_combo: "ASR compute type. float16 preserves current default; int8_float16/int8 can reduce load with possible accuracy cost.",
-            self._whisperx_zh_align_wbbbbb_check: "Chinese alignment on GPU via wbbbbb/wav2vec2-large-chinese (~10x faster alignment; slightly worse CER than the CPU default). Needs alignment device=cuda and an empty explicit alignment model.",
             self._asr_temperatures_edit: "Temperature-fallback schedule for hard windows. Default 0.0,0.2,0.4 halves worst-case window latency with identical output in A/B; clear this field to restore the full 6-step library schedule.",
             self._commit_hold_spin: "Delay speaker-label lock-in for committed subtitle text by this many seconds so labels can settle/back-date (text still appears immediately). 0=off (legacy).",
             self._session_record_check: "Record this session's exact PCM audio (WAV + manifest) under recordings/ for deterministic replay and as the input for whole-file relabel below. Off by default: adds disk usage for the session length; the manifest redacts the HF token.",
@@ -1101,12 +1150,12 @@ class SettingsDialog(QDialog):
             transcript_export_formats=self._transcript_export_formats,
             transcript_export_include_timestamps=bool(self._transcript_export_include_timestamps),
             transcript_export_include_speaker=bool(self._transcript_export_include_speaker),
-            whisperx_zh_align_wbbbbb=self._whisperx_zh_align_wbbbbb_check.isChecked(),
             whisperx_asr_temperatures=self._asr_temperatures_edit.text(),
             subtitle_commit_hold_seconds=float(self._commit_hold_spin.value()),
             asr_temperatures_invalid_message=self._t("asr_temperatures_invalid"),
             session_record_enabled=self._session_record_check.isChecked(),
             session_finalize_direct_relabel_enabled=self._session_finalize_relabel_check.isChecked(),
+            whisperx_alignment_model_defaults=dict(self._alignment_model_defaults),
         )
         return build_settings_updates(
             payload,
