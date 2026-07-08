@@ -278,6 +278,11 @@ class SettingsDialog(QDialog):
         self._commit_hold_spin.setDecimals(1)
         self._commit_hold_spin.setRange(0.0, 120.0)
         self._commit_hold_spin.setSingleStep(1.0)
+        # Round 0076: round-0047 session recording + finalize direct-relabel, previously
+        # CLI/JSON-only.
+        self._session_record_check = QCheckBox()
+        self._session_record_check.stateChanged.connect(self._on_session_record_toggle)
+        self._session_finalize_relabel_check = QCheckBox()
 
         self._segment_spin = QDoubleSpinBox()
         self._segment_spin.setDecimals(2)
@@ -430,6 +435,10 @@ class SettingsDialog(QDialog):
         form_right.addRow(self._t("translated_color"), self._translated_color_btn)
         form_right.addRow(self._t("background_color"), self._bg_color_btn)
         form_right.addRow(self._t("debug_mode"), self._debug_mode_check)
+        form_right.addRow(self._t("session_record_enabled"), self._session_record_check)
+        form_right.addRow(
+            self._t("session_finalize_direct_relabel_enabled"), self._session_finalize_relabel_check
+        )
 
         self._opacity_slider.valueChanged.connect(self._update_opacity_label)
         self._update_opacity_label(self._opacity_slider.value())
@@ -457,6 +466,7 @@ class SettingsDialog(QDialog):
         self._on_mode_changed()
         self._on_stt_provider_changed()
         self._on_translation_toggle()
+        self._on_session_record_toggle()
         self._apply_help_tooltips()
 
     @staticmethod
@@ -545,6 +555,11 @@ class SettingsDialog(QDialog):
         self._whisperx_zh_align_wbbbbb_check.setChecked(bool(getattr(cfg, "whisperx_zh_align_wbbbbb", False)))
         self._asr_temperatures_edit.setText(str(getattr(cfg, "whisperx_asr_temperatures", "") or ""))
         self._commit_hold_spin.setValue(float(getattr(cfg, "subtitle_commit_hold_seconds", 0.0) or 0.0))
+        self._session_record_check.setChecked(bool(getattr(cfg, "session_record_enabled", False)))
+        self._session_finalize_relabel_check.setChecked(
+            bool(getattr(cfg, "session_finalize_direct_relabel_enabled", False))
+        )
+        self._on_session_record_toggle()
         self._segment_spin.setValue(cfg.segment_seconds)
         self._hop_spin.setValue(cfg.hop_seconds)
         self._set_combo_data(self._merge_method_combo, cfg.overlap_merge_method)
@@ -963,6 +978,14 @@ class SettingsDialog(QDialog):
         self._translation_language_combo.setEnabled(enabled)
         self._translated_color_btn.setEnabled(enabled)
 
+    def _on_session_record_toggle(self) -> None:
+        # Relabel is a no-op without recording (controller.py: both flags are required),
+        # so keep the dependent checkbox disabled instead of letting it silently do nothing.
+        recording = self._session_record_check.isChecked()
+        self._session_finalize_relabel_check.setEnabled(recording)
+        if not recording:
+            self._session_finalize_relabel_check.setChecked(False)
+
     def _apply_help_tooltips(self) -> None:
         tips = {
             self._mode_combo: "Choose audio source mode: loopback, microphone, or selected app sessions.",
@@ -1005,6 +1028,8 @@ class SettingsDialog(QDialog):
             self._whisperx_zh_align_wbbbbb_check: "Chinese alignment on GPU via wbbbbb/wav2vec2-large-chinese (~10x faster alignment; slightly worse CER than the CPU default). Needs alignment device=cuda and an empty explicit alignment model.",
             self._asr_temperatures_edit: "Temperature-fallback schedule for hard windows. Default 0.0,0.2,0.4 halves worst-case window latency with identical output in A/B; clear this field to restore the full 6-step library schedule.",
             self._commit_hold_spin: "Delay speaker-label lock-in for committed subtitle text by this many seconds so labels can settle/back-date (text still appears immediately). 0=off (legacy).",
+            self._session_record_check: "Record this session's exact PCM audio (WAV + manifest) under recordings/ for deterministic replay and as the input for whole-file relabel below. Off by default: adds disk usage for the session length; the manifest redacts the HF token.",
+            self._session_finalize_relabel_check: "After a genuine session stop (not restart), re-run diarization+transcription over the whole recorded WAV on a background thread and write it as an ADDITIONAL export under recordings/<stamp>/direct_relabel/ (never touches the live overlay or your manual export). Requires 'Record this session' above; sessions under 5s are skipped.",
         }
         for (widget, tip) in tips.items():
             try:
@@ -1080,6 +1105,8 @@ class SettingsDialog(QDialog):
             whisperx_asr_temperatures=self._asr_temperatures_edit.text(),
             subtitle_commit_hold_seconds=float(self._commit_hold_spin.value()),
             asr_temperatures_invalid_message=self._t("asr_temperatures_invalid"),
+            session_record_enabled=self._session_record_check.isChecked(),
+            session_finalize_direct_relabel_enabled=self._session_finalize_relabel_check.isChecked(),
         )
         return build_settings_updates(
             payload,

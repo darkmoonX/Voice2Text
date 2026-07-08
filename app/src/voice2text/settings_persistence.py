@@ -123,6 +123,16 @@ _PERSIST_KEYS = {
     "transcript_export_dir",
 }
 
+# Round 0076: settings-dialog-editable but deliberately NOT written to runtime_settings.json
+# (round 0047 precedent: recording is a per-run choice, not something that should silently
+# persist and re-enable itself across launches). Applied to the live config exactly like a
+# _PERSIST_KEYS entry; just excluded from load/save so each launch defaults back to config.py's
+# False (override per-run via --record-session / --session-finalize-direct-relabel).
+_LIVE_ONLY_KEYS = {
+    "session_record_enabled",
+    "session_finalize_direct_relabel_enabled",
+}
+
 
 def settings_file_path() -> Path:
     return Path(__file__).resolve().parents[1] / _PERSIST_FILE_NAME
@@ -147,8 +157,9 @@ def load_persisted_updates(path: Path | None = None) -> dict[str, object]:
 
 def apply_updates_to_config(cfg: RuntimeConfig, updates: dict[str, object]) -> set[str]:
     changed: set[str] = set()
+    allowed_keys = _PERSIST_KEYS | _LIVE_ONLY_KEYS
     for (key, value) in updates.items():
-        if key not in _PERSIST_KEYS:
+        if key not in allowed_keys:
             continue
         if not hasattr(cfg, key):
             continue

@@ -266,6 +266,10 @@ def build_restart_keys() -> set[str]:
         "transcript_export_include_timestamps",
         "transcript_export_include_speaker",
         "transcript_export_dir",
+        # Round 0076: both gate _build_capture()'s recorder wrapping / stop()-time relabel
+        # kickoff, which only run at capture (re)start.
+        "session_record_enabled",
+        "session_finalize_direct_relabel_enabled",
     }
 
 

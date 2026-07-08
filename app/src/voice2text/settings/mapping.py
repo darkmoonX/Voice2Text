@@ -62,6 +62,10 @@ class SettingsPayloadInput:
     whisperx_asr_temperatures: str = ""
     subtitle_commit_hold_seconds: float = 0.0
     asr_temperatures_invalid_message: str = "Invalid ASR temperature schedule."
+    # Round 0076: session recording + finalize direct-relabel surfaced in the dialog
+    # (previously CLI/JSON-only, round 0047).
+    session_record_enabled: bool = False
+    session_finalize_direct_relabel_enabled: bool = False
 
 
 def build_settings_updates(payload: SettingsPayloadInput, *, lang: str, hop_gt_segment_message: str) -> dict[str, object]:
@@ -189,6 +193,12 @@ def build_settings_updates(payload: SettingsPayloadInput, *, lang: str, hop_gt_s
         'whisperx_zh_align_wbbbbb': bool(payload.whisperx_zh_align_wbbbbb),
         'whisperx_asr_temperatures': asr_temperatures,
         'subtitle_commit_hold_seconds': commit_hold_seconds,
+        'session_record_enabled': bool(payload.session_record_enabled),
+        # Relabel is a no-op without recording; keep it off if recording isn't on so a
+        # stale True in the payload can't silently activate later if recording is re-enabled.
+        'session_finalize_direct_relabel_enabled': bool(
+            payload.session_finalize_direct_relabel_enabled and payload.session_record_enabled
+        ),
     }
 
 

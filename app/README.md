@@ -211,6 +211,8 @@ python main.py
   - include speaker labels
 - Manual `Export Subtitle...` exports the most recent runtime interval: from the last runtime start to the latest pause/stop, or to the export moment if capture is still running.
   - exports are written on runtime stop.
+  - This is always the **live**, incrementally-committed transcript with live speaker labels. It never includes the round 0047 whole-file relabel below — that is a separate, additional export written to its own directory.
+- Session recording + whole-file speaker relabel (round 0047, dialog-wired round 0076): `Record this session` (`session_record_enabled`) records exact PCM audio (WAV + a token-redacted manifest) under `recordings/` for deterministic replay; `Whole-file speaker relabel on session end` (`session_finalize_direct_relabel_enabled`, disabled in the dialog unless recording is on) additionally re-runs direct-quality transcription+diarization over the whole recorded WAV on a background thread after a genuine session stop (not a settings-triggered restart), writing the result to `recordings/<stamp>/direct_relabel/*.{txt,srt,json}` — a separate export, never the manual one above. Sessions under 5s are skipped. **Neither setting is written to `runtime_settings.json`** (deliberate: recording is a per-run choice, not something that should silently keep recording across launches) — both default to off on every launch; set them per run via the dialog, or `--record-session` / `--session-finalize-direct-relabel` on the command line.
 
 #### JSON export schema — confidence / stability fields
 
