@@ -217,7 +217,10 @@ class RuntimeConfig:
     translation_llm_server_path: str = ''
     translation_llm_model_path: str = ''
     translation_llm_port: int = 8474
-    translation_llm_context_size: int = 4096
+    # <= 0 = AUTO (round 0075): probe free VRAM at warmup, reserve for the ASR stack,
+    # pick the largest context tier that fits (4096/2048/1024; CPU fallback below that).
+    # A positive value is a manual pin that auto sizing never changes.
+    translation_llm_context_size: int = 0
     translation_llm_gpu_layers: int = 99
     translation_llm_max_output_tokens: int = 256
     translation_llm_request_timeout_seconds: float = 10.0
