@@ -202,21 +202,40 @@ python main.py
 - `Audio preprocess` is now a direct on/off switch in Settings and persists across restart.
 - Pre-STT VAD Gate has been removed. WhisperX internal VAD (`silero-vad` / `pyannote`) is the only speech gate.
 - Speaker-profile embedding backend is now selectable in Settings (`pyannote` / `speechbrain-ecapa` / `nemo-titanet`).
-- Alignment model picking (round 0077): the `WhisperX Alignment model` combo suggests candidates for whichever
-  language is currently in effect (`WhisperX Alignment language`, or the source language when that's
-  `auto`/`follow-source`) — language is the first level, model the second. **Left-click** a suggestion (or
-  type an HF repo id) to pin that exact model for the current session only. **Right-click** a suggestion
-  instead to tick/untick it directly (no popup) as that language's persisted default —
-  `whisperx_alignment_model_defaults` (a language -> model map), at most one ticked model per language; no
-  tick means the language falls through to its built-in default. Ticking clears any one-off pin so the new
-  default takes effect immediately, and — unlike a plain pin — a ticked default is remembered across
-  restarts and automatically follows language switches / auto-detect. This replaced the old single-language
-  `whisperx_zh_align_wbbbbb` checkbox (still a config/CLI-only field, e.g. `--whisperx-zh-align-wbbbbb`; an
-  existing `true` value is migrated into the map once on first launch after upgrading). See
+- Alignment model picking (round 0077, dropdown regrouped by language round 0079): the `WhisperX Alignment
+  model` combo's dropdown is one flat list grouped by a disabled header row per curated language (en/zh/ja/ko),
+  each language's candidate models listed underneath — every language is visible/settable at once, not just
+  whichever one is currently in effect elsewhere in the dialog. **Left-click** a candidate (or type an HF repo
+  id) to pin that exact model for the current session only. **Right-click** a candidate instead to tick/untick
+  it directly (no popup) as that row's language default — `whisperx_alignment_model_defaults` (a language ->
+  model map). Right-clicking never closes the dropdown, so several languages' defaults can be adjusted in one
+  open/close cycle; at most one ticked model per language, no tick means the language falls through to its
+  built-in default. Ticking clears any one-off pin for the current session so the new default takes effect
+  immediately, and — unlike a plain pin — a ticked default is remembered across restarts and automatically
+  follows language switches / auto-detect. This replaced the old single-language `whisperx_zh_align_wbbbbb`
+  checkbox (still a config/CLI-only field, e.g. `--whisperx-zh-align-wbbbbb`; an existing `true` value is
+  migrated into the map once on first launch after upgrading). See
   `docs/tasks/0077-alignment-model-defaults.md` for the full mechanism (fallback order: explicit pin > map entry
   for the language > legacy `whisperx_zh_align_wbbbbb`/`whisperx_english_align_large` booleans > WhisperX stock
-  default — which, for the two currently-curated languages this replaces, is already the top suggestion in
-  each language's list).
+  default — which, for the currently-curated languages (en/zh/ja/ko) this replaces, is already the top
+  suggestion in each language's list).
+- Alignment model list is dynamic (round 0081): each language's row list is no longer only the static curated
+  set — it also picks up any custom (non-curated) model that has actually been downloaded/used for that
+  language, discovered by scanning `models/whisperx/align/{hf,custom}/*` for a small `.v2t_align_meta.json`
+  sidecar tag (`{"language": ..., "model": ...}`) that `stt/whisperx_provider.py` writes once a repo/bundle
+  finishes loading successfully (`_write_alignment_candidate_tag`, called from
+  `_ensure_alignment_model_loaded`). The Settings dialog reads these back via
+  `settings/presenter.py::discover_custom_alignment_candidates()` (pathlib/json only, no torch/whisperx import)
+  every time it rebuilds the dropdown, so a custom repo you've pinned once shows up as a real, tickable
+  candidate under its language's group next time you open Settings — no separate persisted "custom candidate"
+  registry to drift out of sync with what's actually cached. A persisted `whisperx_alignment_model_defaults`
+  entry that is neither curated nor (yet) discovered on disk is still shown/ticked too, so the setting is never
+  silently invisible. Also fixed as part of this: a persisted per-language default holding a full HF repo id
+  used to fall through to the generic `align/hf/{lang}` folder (only a same-session explicit pin got its own
+  repo-keyed folder before) — two different repo-id defaults set for the same language over time would
+  collide and silently reuse the first-cached model. `_resolve_alignment_local_dir` now keys by the effective
+  model uniformly, so every override (session pin, persisted default, or legacy boolean target) gets its own
+  dedicated cache folder, which is also where the discovery tag gets written.
 - Advanced speaker-profile options remain config-driven: `whisperx_speaker_profile_enabled`, `whisperx_speaker_profile_model`, `whisperx_speaker_speechbrain_model`, `whisperx_speaker_nemo_model`, `whisperx_speaker_profile_match_threshold`, `whisperx_speaker_profile_min_seconds`, `whisperx_speaker_profile_store_path`.
 - Speaker-profile learn-path quality gate (`whisperx_speaker_profile_quality_gate_enabled`, default off; CLI `--speaker-profile-quality-gate`): when on, a low-quality speaker clip (empty / music-sound tag / `♪` / degenerate repetition / mean word-score below `whisperx_speaker_profile_quality_min_confidence`) can still match an existing profile for display but never updates or creates an embedding centroid, so gibberish and music tails do not pollute speaker identities. The displayed speaker label for a span is unaffected — only profile *learning* is gated.
 - Transcript export is available in Settings:
