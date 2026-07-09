@@ -1091,11 +1091,40 @@ class WhisperXTranscriber:
             ),
         )
         self._align_cache[cache_key] = (model_a, metadata)
+        self._write_alignment_candidate_tag(language_code, align_local_dir, explicit_model, align_repo_id)
         self._emit(
             f"WhisperX alignment model ready: language={language_code}; "
             f"model={model_selection}; cache_key={cache_key}"
         )
         return self._align_cache.get(cache_key)
+
+    def _write_alignment_candidate_tag(
+        self, language_code: str, local_dir: Path, explicit_model: str, repo_id: str
+    ) -> None:
+        """Round 0081: record which repo/bundle a dedicated (non-generic) alignment cache
+        folder holds, as a small `.v2t_align_meta.json` sidecar, so the Settings dialog can
+        dynamically discover custom candidates by scanning disk instead of needing a
+        separately-persisted registry that could drift out of sync with what's actually
+        cached. Deliberately skipped for the generic per-language auto folder
+        (`align/hf/{lang}`, reached when `explicit_model`/`repo_id` are both empty): its
+        directory name already IS the language, and it can only ever hold one thing at a
+        time anyway (the pre-existing language-scoped-cache limitation), so there's nothing
+        distinct to record.
+        """
+        model_ref = (explicit_model or repo_id or "").strip()
+        if not model_ref:
+            return
+        folder_lang = self._normalize_alignment_folder_language(language_code)
+        if not folder_lang:
+            return
+        try:
+            tag_path = local_dir / ".v2t_align_meta.json"
+            tag_path.write_text(
+                json.dumps({"language": folder_lang, "model": model_ref}, ensure_ascii=False),
+                encoding="utf-8",
+            )
+        except Exception:
+            pass
 
     def _resolve_alignment_model_name_for_load(self, language_code: str) -> str:
         align_repo_id = self._resolve_alignment_repo_id(language_code)
@@ -2889,22 +2918,29 @@ class WhisperXTranscriber:
     def _resolve_alignment_local_dir(self, language_code: str, repo_id: str) -> Path:
         base = self._alignment_hf_root_dir()
         effective_model = self._effective_alignment_model(language_code)
-        if effective_model and ("/" not in effective_model):
-            return self._alignment_custom_root_dir() / self._slugify_repo_id(effective_model)
+        if effective_model:
+            # Any override — an explicit session pin, a persisted per-language default
+            # (round 0077), or a legacy english_align_large/zh_align_wbbbbb boolean target —
+            # gets its own repo/bundle-keyed cache dir (`align/hf/{repo-slug}` for an HF repo
+            # id, `align/custom/{slug}` otherwise). Round 0081: this used to only apply to a
+            # same-session explicit pin (checked via the now-removed `self._alignment_model`
+            # read below); a *persisted* per-language default with an HF repo id fell through
+            # to the generic per-language folder instead, so two different repo-id defaults
+            # set for the same language over time would collide into one `align/hf/{lang}`
+            # folder and silently reuse the first-cached model — the same language-scoped-
+            # cache bug the repo-keyed dir exists to prevent, just reachable via the map
+            # instead of a session pin. Keying by `effective_model` uniformly (rather than
+            # only `self._alignment_model`) closes that gap, and also gives each override its
+            # own dedicated folder to record a `.v2t_align_meta.json` candidate tag in
+            # (`_write_alignment_candidate_tag`) for Settings-dialog dynamic discovery.
+            if "/" not in effective_model:
+                return self._alignment_custom_root_dir() / self._slugify_repo_id(effective_model)
+            return base / self._slugify_repo_id(effective_model)
 
-        # An explicitly configured HF repo id gets its own repo-keyed cache dir
-        # (`align/hf/{repo-slug}`). Otherwise two different repos for the same
-        # language collide into one `align/hf/{lang}` folder and the first-cached
-        # model is silently reused for the second — the language-scoped-cache bug.
-        # Auto-default per-language repos keep the flat language folder: their
-        # repo is constant for a given language (no collision), and existing
-        # caches stay valid so we don't trigger a surprise re-download.
-        explicit_repo = self._alignment_model.strip()
-        if explicit_repo and ("/" in explicit_repo):
-            return base / self._slugify_repo_id(explicit_repo)
-
-        # For auto/follow-source/explicit-language flows, keep alignment cache
-        # in language-scoped folders under `align/hf/{lang}`.
+        # No override at all (pure auto/stock default): keep alignment cache in
+        # language-scoped folders under `align/hf/{lang}`. The repo is constant for a given
+        # language in this case (no collision), and existing caches stay valid so we don't
+        # trigger a surprise re-download.
         mode = (self._alignment_language or "auto").strip().lower()
         if mode == "follow-source":
             folder_lang = self._normalize_alignment_folder_language(self._source_language_hint)

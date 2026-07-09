@@ -1,6 +1,7 @@
 """Unit tests for WhisperX alignment model cache resolution."""
 from __future__ import annotations
 
+import json
 from pathlib import Path
 import sys
 import tempfile
@@ -163,6 +164,44 @@ class WhisperXAlignmentResolutionTests(unittest.TestCase):
 
             self.assertEqual(resolved_dir, root / "align" / "hf" / "zh")
 
+    def test_persisted_map_repo_default_gets_its_own_dir_not_the_language_folder(self) -> None:
+        # Round 0081: whisperx_alignment_model_defaults[lang] holding an HF repo id (no
+        # same-session explicit pin) used to fall through to the generic align/hf/{lang}
+        # folder — the same collision the repo-keyed dir exists to prevent, just reachable
+        # via the persisted map instead of a session pin.
+        with tempfile.TemporaryDirectory(prefix="v2t-align-") as td:
+            root = Path(td)
+            transcriber = self._new_stub(root)
+            transcriber._alignment_model_defaults = {
+                "zh": "jonatasgrosman/wav2vec2-large-xlsr-53-chinese-zh-cn",
+            }
+
+            resolved_dir = transcriber._resolve_alignment_local_dir(
+                "zh", "jonatasgrosman/wav2vec2-large-xlsr-53-chinese-zh-cn"
+            )
+
+            self.assertEqual(
+                resolved_dir,
+                root / "align" / "hf" / "jonatasgrosman-wav2vec2-large-xlsr-53-chinese-zh-cn",
+            )
+            self.assertNotEqual(resolved_dir, root / "align" / "hf" / "zh")
+
+    def test_two_persisted_map_repo_defaults_over_time_get_distinct_dirs(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="v2t-align-") as td:
+            root = Path(td)
+            transcriber = self._new_stub(root)
+
+            transcriber._alignment_model_defaults = {
+                "zh": "jonatasgrosman/wav2vec2-large-xlsr-53-chinese-zh-cn",
+            }
+            dir_a = transcriber._resolve_alignment_local_dir("zh", "")
+            transcriber._alignment_model_defaults = {
+                "zh": "wbbbbb/wav2vec2-large-chinese-zh-cn",
+            }
+            dir_b = transcriber._resolve_alignment_local_dir("zh", "")
+
+            self.assertNotEqual(dir_a, dir_b)
+
     def test_explicit_model_used_when_no_local_cache_ready(self) -> None:
         with tempfile.TemporaryDirectory(prefix="v2t-align-") as td:
             root = Path(td)
@@ -252,6 +291,36 @@ class WhisperXAlignmentResolutionTests(unittest.TestCase):
                 transcriber._effective_alignment_model("en"),
                 "jonatasgrosman/wav2vec2-large-xlsr-53-english",
             )
+
+    def test_write_alignment_candidate_tag_records_language_and_model(self) -> None:
+        # Round 0081: the Settings dialog's dynamic-discovery scan reads this sidecar file
+        # back to reconstruct extra per-language candidates without a separate persisted
+        # registry.
+        with tempfile.TemporaryDirectory(prefix="v2t-align-") as td:
+            local_dir = Path(td) / "align" / "hf" / "some-repo-slug"
+            local_dir.mkdir(parents=True)
+            transcriber = self._new_stub(Path(td))
+
+            transcriber._write_alignment_candidate_tag(
+                "zh-hant", local_dir, "some-org/some-custom-repo", ""
+            )
+
+            tag_path = local_dir / ".v2t_align_meta.json"
+            self.assertTrue(tag_path.exists())
+            payload = json.loads(tag_path.read_text(encoding="utf-8"))
+            self.assertEqual(payload, {"language": "zh", "model": "some-org/some-custom-repo"})
+
+    def test_write_alignment_candidate_tag_skipped_for_generic_auto_folder(self) -> None:
+        # No explicit_model and no repo_id => this is the generic align/hf/{lang} folder;
+        # nothing distinct to record (see _write_alignment_candidate_tag's docstring).
+        with tempfile.TemporaryDirectory(prefix="v2t-align-") as td:
+            local_dir = Path(td) / "align" / "hf" / "zh"
+            local_dir.mkdir(parents=True)
+            transcriber = self._new_stub(Path(td))
+
+            transcriber._write_alignment_candidate_tag("zh", local_dir, "", "")
+
+            self.assertFalse((local_dir / ".v2t_align_meta.json").exists())
 
     def test_external_download_monitor_uses_expected_total_when_available(self) -> None:
         with tempfile.TemporaryDirectory(prefix="v2t-align-") as td:

@@ -1,10 +1,12 @@
 """Settings dialog UI for capture/STT/runtime options and live config updates."""
 from __future__ import annotations
 
+import logging
 from pathlib import Path
+import traceback
 from typing import Callable, Sequence
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QEvent, Qt, QTimer
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
     QCheckBox,
@@ -35,8 +37,8 @@ from .settings.presets import PRESET_NAMES, apply_preset, normalize_preset
 from .settings.presenter import (
     alignment_repos_for_language,
     app_names_from_config,
+    discover_custom_alignment_candidates,
     loopback_indices_from_config,
-    normalize_alignment_folder_language,
     normalize_source_language,
 )
 from .settings.schema import allowed_stt_variants, default_stt_model
@@ -57,9 +59,85 @@ from .settings.widgets import (
 )
 
 
+_logger = logging.getLogger('voice2text')
+
+
+def _format_short_stack(limit: int = 10) -> str:
+    """Caller's Python call stack, one frame per `|`-separated segment (excludes this frame)."""
+    frames = traceback.format_stack(limit=limit)[:-1]
+    parts: list[str] = []
+    for frame in frames:
+        parts.extend(segment.strip() for segment in frame.splitlines() if segment.strip())
+    return " | ".join(parts)
+
+
 def _keep_above_overlay(dialog: QDialog) -> None:
     """Keep operator dialogs above the always-on-top subtitle overlay."""
     dialog.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, True)
+
+
+class _AlignmentModelCombo(QComboBox):
+    """QComboBox whose popup can be told to ignore `hidePopup()` for a moment.
+
+    Round 0080: right-clicking a row in the open dropdown was observed closing it even though
+    nothing in this file calls hidePopup() for that gesture — most likely a platform-native
+    context-menu side effect (e.g. Windows' WM_CONTEXTMENU) reaching Qt's popup-container close
+    logic before our `customContextMenuRequested` handler even runs, so reacting *after the
+    fact* (reopening once closed) still let popup rebuild/positioning flash. Suppressing
+    `hidePopup()` for the whole right-click gesture — from mouse-press to the end of the
+    context-menu handler — prevents the close outright, whatever the exact cause turns out to
+    be. `showPopup()` always clears the flag so a stuck suppression can never survive past the
+    next legitimate open.
+
+    Round 0082 (live trace confirmed): the close is a SECOND, DELAYED `hidePopup()` call — Qt
+    calls it once synchronously around the mouse press (correctly suppressed), then again later
+    (still with an empty Python call stack down to `app.exec()`, i.e. from Qt's own C++ internals,
+    consistent with a queued/posted native WM_CONTEXTMENU-driven close) — arriving *after* the
+    context-menu handler had already cleared the guard. A live log showed several rapid right-
+    clicks each successfully suppress their own immediate hidePopup(), then one delayed call
+    slips through in the gap once the guard had been released. Fix: release the guard on a short
+    grace-period timer (`_GRACE_MS` after the last right-click activity) instead of immediately
+    when the context-menu handler finishes, so it's still armed when the delayed call actually
+    lands. `showPopup()` still clears both the flag and any pending timer immediately, so a
+    legitimate reopen is never blocked and a stuck guard can't survive past it.
+
+    Round 0083: this suppress/grace-timer mechanism is now a second-layer safety net rather than
+    the primary defense — `SettingsDialog.eventFilter()` intercepts and swallows the raw
+    `QEvent.Type.ContextMenu` on the popup's viewport directly (the event a live trace tied to the
+    delayed native-driven close), doing the tick-toggle from within the filter instead of via
+    `customContextMenuRequested`, before whatever internal logic would otherwise react to that
+    event and close the popup ever sees it. This class's suppression is kept in case some path to
+    a close doesn't go through that event at all.
+    """
+
+    _GRACE_MS = 250
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.suppress_hide_popup = False
+        self._suppress_release_timer = QTimer(self)
+        self._suppress_release_timer.setSingleShot(True)
+        self._suppress_release_timer.timeout.connect(self._release_suppression)
+
+    def arm_suppression(self, grace_ms: int | None = None) -> None:
+        self.suppress_hide_popup = True
+        self._suppress_release_timer.start(self._GRACE_MS if grace_ms is None else grace_ms)
+
+    def _release_suppression(self) -> None:
+        self.suppress_hide_popup = False
+
+    def showPopup(self) -> None:
+        self._suppress_release_timer.stop()
+        self.suppress_hide_popup = False
+        super().showPopup()
+
+    def hidePopup(self) -> None:
+        stack = _format_short_stack()
+        if self.suppress_hide_popup:
+            _logger.info("[align-model-combo] hidePopup() SUPPRESSED. stack: %s", stack)
+            return
+        _logger.info("[align-model-combo] hidePopup() executing (popup will close). stack: %s", stack)
+        super().hidePopup()
 
 
 class TranscriptExportDialog(QDialog):
@@ -189,6 +267,10 @@ class SettingsDialog(QDialog):
         # Round 0077: language -> preferred alignment model/bundle, set via right-click "set as
         # default" on the alignment-model combo (replaces the old single-language wbbbbb checkbox).
         self._alignment_model_defaults: dict[str, str] = {}
+        # Round 0079: row -> language key for the grouped alignment-model dropdown, rebuilt each
+        # `_refresh_alignment_model_suggestions()` call; lets the right-click handler know which
+        # language a candidate row belongs to without re-deriving it from combo-wide state.
+        self._alignment_suggestion_row_language: dict[int, str] = {}
         self._ui_built = False
         self._applying_preset = False
         self._selected_loopback_indices = self._init_loopback_indices()
@@ -253,7 +335,7 @@ class SettingsDialog(QDialog):
         self._whisperx_vad_check.addItem("pyannote", "pyannote")
         self._whisperx_diarization_check = QCheckBox()
         self._whisperx_diarization_check.toggled.connect(self._on_bundled_field_edited)
-        self._whisperx_align_model_edit = QComboBox()
+        self._whisperx_align_model_edit = _AlignmentModelCombo()
         self._whisperx_align_language_combo = create_whisperx_align_language_combo()
         self._whisperx_align_device_combo = create_whisperx_align_device_combo()
         self._whisperx_align_guard_combo = create_whisperx_align_guard_combo()
@@ -270,12 +352,28 @@ class SettingsDialog(QDialog):
         self._whisperx_align_model_edit.setEditable(True)
         self._whisperx_align_model_edit.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
         self._whisperx_align_model_edit.lineEdit().setPlaceholderText("auto (leave empty) or HF repo id")
-        # Round 0077: right-click a suggested model to pin it as this language's default
-        # (writes whisperx_alignment_model_defaults instead of an explicit one-off pin).
+        # Round 0079: the dropdown itself is grouped by language (a disabled header row per
+        # language, its candidate models listed underneath) covering every curated language at
+        # once. Right-click a candidate in the open dropdown to tick/untick it directly as that
+        # row's language default (writes whisperx_alignment_model_defaults) — this never closes
+        # the dropdown, so several languages can be adjusted in one open/close cycle.
+        #
+        # Round 0083: `customContextMenuRequested` (below) is now only a fallback — under normal
+        # operation `eventFilter`'s interception of the raw ContextMenu event (installed on the
+        # viewport just below) handles right-clicks and swallows that event before it ever
+        # reaches this widget's own contextMenuEvent(), which is what would otherwise emit this
+        # signal. The policy/connection are kept in case some context-menu delivery path bypasses
+        # the viewport event filter.
         self._whisperx_align_model_edit.view().setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self._whisperx_align_model_edit.view().customContextMenuRequested.connect(
             self._on_align_model_suggestion_context_menu
         )
+        # Round 0080/0083: an event filter installed on the popup's viewport runs before Qt's own
+        # popup-container filter (installed earlier at combo/popup construction time — the most
+        # recently-installed filter runs first), so it sees right-click-driven events — including
+        # the ContextMenu event itself (round 0083's fix) — before whatever internal logic would
+        # otherwise react to them and close the popup. See eventFilter()'s docstring-comment.
+        self._whisperx_align_model_edit.view().viewport().installEventFilter(self)
         self._whisperx_diar_model_edit = QLineEdit()
         self._whisperx_hf_token_edit = QLineEdit()
         self._whisperx_hf_token_edit.setEchoMode(QLineEdit.EchoMode.Password)
@@ -311,7 +409,6 @@ class SettingsDialog(QDialog):
         self._preprocess_enabled_check = QCheckBox()
 
         self._source_language_combo = create_source_language_combo()
-        self._source_language_combo.currentIndexChanged.connect(self._on_source_language_changed)
 
         self._translation_enabled_check = QCheckBox()
         self._translation_enabled_check.stateChanged.connect(self._on_translation_toggle)
@@ -870,9 +967,6 @@ class SettingsDialog(QDialog):
                 ("Audio import failed:\n" if self._lang != "zh" else "匯入音檔失敗：\n") + str(exc),
             )
 
-    def _on_source_language_changed(self) -> None:
-        self._refresh_alignment_model_suggestions()
-
     def _set_alignment_model_value(self, value: str) -> None:
         raw = (value or "").strip()
         if not raw:
@@ -884,43 +978,68 @@ class SettingsDialog(QDialog):
         else:
             self._whisperx_align_model_edit.setEditText(raw)
 
-    def _current_alignment_language(self) -> str:
-        lang = str(self._whisperx_align_language_combo.currentData() or 'auto')
-        if lang in {'auto', 'follow-source'}:
-            lang = str(self._source_language_combo.currentData() or 'auto')
-        return lang
+    # Round 0079: the language -> candidate-model groups the alignment-model dropdown is
+    # organized into. Limited to the languages `alignment_repos_for_language` actually curates a
+    # distinct list for; other languages fall back to its generic combined list and have no
+    # dedicated group.
+    _ALIGNMENT_DEFAULT_LANGUAGES: tuple[tuple[str, str], ...] = (
+        ("en", "English"),
+        ("zh", "中文"),
+        ("ja", "日本語"),
+        ("ko", "한국어"),
+    )
 
     def _refresh_alignment_model_suggestions(self) -> None:
+        # Round 0079: one flat dropdown, grouped by a disabled header row per language, covering
+        # every curated language at once (not just whichever language is currently selected
+        # elsewhere in the dialog) — so every language's default is visible/settable without
+        # switching the alignment/source language combo first.
+        # Round 0081: each language's row list is no longer just the static curated set — it's
+        # extended with (a) any custom model actually downloaded/used for that language, per
+        # `discover_custom_alignment_candidates()`'s disk scan of the `.v2t_align_meta.json`
+        # sidecar tags `stt/whisperx_provider.py` writes on successful load, and (b) the
+        # persisted default itself if it's a custom repo that isn't otherwise in the list yet
+        # (closes an orphaned-display gap: the setting always worked via
+        # `_effective_alignment_model` reading the map directly, it just wasn't shown/tickable).
         current = self._whisperx_align_model_edit.currentText().strip()
-        lang = self._current_alignment_language()
-        lang_key = normalize_alignment_folder_language(lang)
-        default_repo = self._alignment_model_defaults.get(lang_key, "") if lang_key else ""
-        repos = alignment_repos_for_language(lang)
+        discovered = discover_custom_alignment_candidates()
         self._whisperx_align_model_edit.blockSignals(True)
         self._whisperx_align_model_edit.clear()
+        self._alignment_suggestion_row_language.clear()
         self._whisperx_align_model_edit.addItem("")
-        for repo in repos:
-            self._whisperx_align_model_edit.addItem(repo)
-        # Round 0077: mark each real suggestion checkable and tick the language's current
-        # default (if any) — right-click toggles the tick directly, no popup menu. "" (auto)
-        # stays non-checkable: it's not a candidate, it's "no pin".
         model = self._whisperx_align_model_edit.model()
-        for row in range(1, self._whisperx_align_model_edit.count()):
-            item = model.item(row)
-            if item is None:
-                continue
-            item.setCheckable(True)
-            item.setCheckState(
-                Qt.CheckState.Checked if item.text().strip() == default_repo else Qt.CheckState.Unchecked
-            )
+        for lang_key, label in self._ALIGNMENT_DEFAULT_LANGUAGES:
+            header_row = self._whisperx_align_model_edit.count()
+            self._whisperx_align_model_edit.addItem(f"— {label} —")
+            header_item = model.item(header_row)
+            header_item.setFlags(Qt.ItemFlag.NoItemFlags)
+            header_font = header_item.font()
+            header_font.setBold(True)
+            header_item.setFont(header_font)
+            default_repo = self._alignment_model_defaults.get(lang_key, "")
+            candidates = list(alignment_repos_for_language(lang_key))
+            for extra in discovered.get(lang_key, []):
+                if extra not in candidates:
+                    candidates.append(extra)
+            if default_repo and default_repo not in candidates:
+                candidates.append(default_repo)
+            for repo in candidates:
+                row = self._whisperx_align_model_edit.count()
+                self._whisperx_align_model_edit.addItem(repo)
+                item = model.item(row)
+                item.setCheckable(True)
+                item.setCheckState(
+                    Qt.CheckState.Checked if repo == default_repo else Qt.CheckState.Unchecked
+                )
+                self._alignment_suggestion_row_language[row] = lang_key
         self._whisperx_align_model_edit.blockSignals(False)
         self._set_alignment_model_value(current)
 
-    def _on_align_model_suggestion_context_menu(self, pos) -> None:
-        # Round 0077: right-click a candidate to toggle it as the per-language default
-        # (whisperx_alignment_model_defaults) directly — a plain tick-mark flip, no popup menu.
-        # At most one item per language stays ticked; toggling flips in place without rebuilding
-        # the list, so it's safe to call while the popup is still open.
+    def _toggle_alignment_suggestion_at(self, pos) -> None:
+        # Round 0079: right-click a candidate in the (grouped) dropdown to toggle it as its
+        # language's default (whisperx_alignment_model_defaults) — a plain tick-mark flip, no
+        # popup menu. At most one item per language stays ticked; toggling flips in place without
+        # a full rebuild, so it's safe to call while the popup is still open.
         view = self._whisperx_align_model_edit.view()
         index = view.indexAt(pos)
         if not index.isValid():
@@ -932,19 +1051,85 @@ class SettingsDialog(QDialog):
         repo = item.text().strip()
         if not repo:
             return
-        lang_key = normalize_alignment_folder_language(self._current_alignment_language())
+        lang_key = self._alignment_suggestion_row_language.get(index.row())
         if not lang_key:
             return
         if item.checkState() == Qt.CheckState.Checked:
             item.setCheckState(Qt.CheckState.Unchecked)
             self._clear_alignment_default_for_language(lang_key, rebuild=False)
             return
-        for row in range(model.rowCount()):
-            sibling = model.item(row)
-            if sibling is not None and sibling is not item:
-                sibling.setCheckState(Qt.CheckState.Unchecked)
+        for row, row_lang in self._alignment_suggestion_row_language.items():
+            if row_lang == lang_key and row != index.row():
+                sibling = model.item(row)
+                if sibling is not None:
+                    sibling.setCheckState(Qt.CheckState.Unchecked)
         item.setCheckState(Qt.CheckState.Checked)
         self._set_alignment_default_for_language(lang_key, repo, rebuild=False)
+
+    def _after_alignment_suggestion_gesture(self) -> None:
+        # Round 0082: re-arm (not clear) the suppression guard for one more grace period now
+        # that this gesture is fully handled — kept as a second-layer safety net alongside
+        # round 0083's event-swallowing (below): if some path still manages to sneak a
+        # hidePopup() through, this grace period catches it anyway. Belt-and-suspenders: if the
+        # popup still somehow ended up hidden, force it back open so several rows/languages can
+        # be ticked in one open/close cycle.
+        self._whisperx_align_model_edit.arm_suppression()
+        if not self._whisperx_align_model_edit.view().isVisible():
+            _logger.info(
+                "[align-model-combo] popup was closed despite the suppression guard "
+                "(right-click gesture handled, but view.isVisible() is False) — reopening."
+            )
+            self._whisperx_align_model_edit.showPopup()
+
+    def _on_align_model_suggestion_context_menu(self, pos) -> None:
+        # Round 0083: this signal only fires as a fallback now — the primary path is
+        # eventFilter() below intercepting and swallowing the raw QEvent.Type.ContextMenu
+        # before Qt's own contextMenuEvent() handling (which is what emits this signal) ever
+        # runs, so under normal operation this method won't be reached at all. Kept wired in
+        # case some context-menu delivery path bypasses the viewport event filter.
+        try:
+            self._toggle_alignment_suggestion_at(pos)
+        finally:
+            self._after_alignment_suggestion_gesture()
+
+    def eventFilter(self, obj, event) -> bool:
+        # Round 0080/0082: right-clicking a row in the open dropdown was closing it even though
+        # nothing in this file calls hidePopup() for that gesture. A live trace (round 0082)
+        # showed the actual close is a SECOND, DELAYED hidePopup() call from Qt's own C++
+        # internals (empty Python stack down to app.exec()), consistent with a queued/posted
+        # native WM_CONTEXTMENU message reaching Qt as a QContextMenuEvent on a later turn of
+        # the event loop — arriving after any same-tick suppression window had already closed.
+        #
+        # Round 0083: rather than only reacting after the fact (a grace-period timer, still
+        # kept below as a second-layer safety net), intercept and swallow the actual
+        # QEvent.Type.ContextMenu here — this filter is installed on the popup's viewport and,
+        # being installed after Qt's own popup-container filter, runs first (Qt calls the
+        # most-recently-installed filter first), so it sees that event before whatever internal
+        # logic would otherwise react to it and close the popup. Doing our tick-toggle directly
+        # from this event (instead of via `customContextMenuRequested`, which is only emitted
+        # once the widget's own contextMenuEvent() runs — i.e. after this filter already had its
+        # chance) and returning True means that logic never sees this ContextMenu event at all.
+        # The raw right-button press/release are swallowed too, on the same principle, even
+        # though (unlike the ContextMenu event) they are not known to be the actual cause of the
+        # close — Windows' native WM_CONTEXTMENU is a separate message from WM_RBUTTONDOWN/UP,
+        # so swallowing the translated QMouseEvent alone would not have stopped it; this is
+        # belt-and-suspenders against any other click-driven side effect, not the load-bearing
+        # part of the fix.
+        if hasattr(self, "_whisperx_align_model_edit") and obj is self._whisperx_align_model_edit.view().viewport():
+            if event.type() == QEvent.Type.ContextMenu:
+                _logger.info("[align-model-combo] ContextMenu event intercepted on dropdown viewport — swallowing it.")
+                try:
+                    self._toggle_alignment_suggestion_at(event.pos())
+                finally:
+                    self._after_alignment_suggestion_gesture()
+                return True
+            if event.type() == QEvent.Type.MouseButtonPress and event.button() == Qt.MouseButton.RightButton:
+                _logger.info("[align-model-combo] right-button press on dropdown viewport — arming hidePopup() suppression (fallback) and swallowing the press.")
+                self._whisperx_align_model_edit.arm_suppression()
+                return True
+            if event.type() == QEvent.Type.MouseButtonRelease and event.button() == Qt.MouseButton.RightButton:
+                return True
+        return super().eventFilter(obj, event)
 
     def _set_alignment_default_for_language(self, lang_key: str, repo: str, *, rebuild: bool = True) -> None:
         self._alignment_model_defaults[lang_key] = repo
@@ -952,7 +1137,15 @@ class SettingsDialog(QDialog):
         # actually takes effect (an explicit pin always wins over the per-language default).
         # setCurrentText only touches the line-edit text, so this is safe even while the
         # suggestion popup is still open (in-place tick-toggle callers pass rebuild=False).
-        self._whisperx_align_model_edit.setCurrentText("")
+        #
+        # Round 0084: skip the clear when the field already shows exactly this repo — e.g. the
+        # user right-clicks the very candidate that's already selected/displayed. Blanking it
+        # then has zero functional effect (pin == repo == the default just set) but visibly wipes
+        # out what the user just picked, which read as "my selection got cleared". Only an
+        # actually-different stale pin needs clearing, since that's the case that would otherwise
+        # silently keep overriding the newly-set default.
+        if self._whisperx_align_model_edit.currentText().strip() != repo:
+            self._whisperx_align_model_edit.setCurrentText("")
         if rebuild:
             self._refresh_alignment_model_suggestions()
 
@@ -1074,7 +1267,7 @@ class SettingsDialog(QDialog):
             self._whisperx_align_guard_revert_btn: "Revert the alignment guard back to the safe default.",
             self._whisperx_diar_device_combo: "Diarization device: auto follows ASR device, cpu lowers VRAM pressure, cuda improves throughput.",
             self._whisperx_expected_speakers_spin: "Expected speaker count. 0=unknown/auto; positive values feed diarization and cap live speaker profiles.",
-            self._whisperx_align_model_edit: "Alignment model. Empty=auto (uses this language's ticked default, if any). Right-click a suggestion in the dropdown to tick/untick it as that language's default (at most one tick per language; no tick = the built-in per-language default). Left-clicking a suggestion (or typing an HF repo id) instead pins that exact model for this session only, ignoring the per-language default.",
+            self._whisperx_align_model_edit: "Alignment model. Empty=auto (uses each language's ticked default, if any). The dropdown is grouped by language, each with its own candidate models; right-click a candidate to tick/untick it as that language's default (at most one tick per language; no tick = the built-in per-language default) — right-clicking never closes the dropdown, so several languages can be adjusted in one open/close cycle. Left-clicking a suggestion (or typing an HF repo id) instead pins that exact model for this session only, ignoring the per-language default.",
             self._whisperx_diar_model_edit: "Diarization model id.",
             self._whisperx_hf_token_edit: "Hugging Face token for restricted/private models.",
             self._whisperx_speaker_backend_combo: "Speaker identity backend for profile embeddings.",
